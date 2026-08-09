@@ -157,6 +157,19 @@ export class Track {
 
   group = new THREE.Group();
   private specMeshes: THREE.InstancedMesh[] = [];
+  /** scenery sorted into distance bands so we can draw only what's near */
+  private sceneryBands: {
+    mesh: THREE.InstancedMesh;
+    /** track position of each instance, for band sorting */
+    s: Float32Array;
+    /** full matrix set, kept so we can repack per frame */
+    mats: Float32Array;
+    colors: Float32Array | null;
+    total: number;
+    /** how far ahead/behind this band draws */
+    reach: number;
+  }[] = [];
+  private lastBandS = -1e9;
   private propMeshes: Record<string, THREE.InstancedMesh> = {};
   private specWindow = { a: 0, b: 0 };
   rng = new RNG(20260114);
@@ -729,6 +742,44 @@ export class Track {
     for (const sp of this.spectators) sp.baseH = this.heightAt(sp.s, sp.x);
   }
 
+  /**
+   * Scenery LOD. Repacks each instanced mesh so it contains only instances
+   * within that type's draw reach, then sets `count` to match — the GPU
+   * never sees the rest. Combined with frustum culling this takes vegetation
+   * from ~10,000 always-submitted instances down to a few hundred.
+   *
+   * Only repacks when the player has moved a meaningful distance, so the
+   * cost is amortised rather than paid every frame.
+   */
+  updateSceneryLod(playerS: number, lodScale = 1, force = false) {
+    if (!force && Math.abs(playerS - this.lastBandS) < 12) return;
+    this.lastBandS = playerS;
+
+    for (const band of this.sceneryBands) {
+      const reach = band.reach * lodScale;
+      // a little more behind than in front is wasted; bias forward
+      const lo = playerS - reach * 0.35;
+      const hi = playerS + reach;
+      const dst = band.mesh.instanceMatrix.array as Float32Array;
+      const dstC = band.mesh.instanceColor?.array as Float32Array | undefined;
+      let n = 0;
+      for (let i = 0; i < band.total; i++) {
+        const s = band.s[i];
+        if (s < lo || s > hi) continue;
+        dst.set(band.mats.subarray(i * 16, i * 16 + 16), n * 16);
+        if (dstC && band.colors) {
+          dstC.set(band.colors.subarray(i * 3, i * 3 + 3), n * 3);
+        }
+        n++;
+      }
+      band.mesh.count = n;
+      band.mesh.instanceMatrix.needsUpdate = true;
+      if (band.mesh.instanceColor) band.mesh.instanceColor.needsUpdate = true;
+      // bounding sphere must cover the live set or frustum culling misfires
+      band.mesh.computeBoundingSphere();
+    }
+  }
+
   /** Index of the first obstacle at or beyond `s` (list is sorted by s). */
   firstObstacleAfter(s: number): number {
     const list = this.obstacles;
@@ -963,6 +1014,11 @@ export class Track {
 
     let nPine = 0, nBroad = 0, nRock = 0, nBush = 0;
     const col = new THREE.Color();
+    // remember where each instance lives so the LOD pass can band them
+    const sPine = new Float32Array(MAX);
+    const sBroad = new Float32Array(1400);
+    const sRock = new Float32Array(2600);
+    const sBush = new Float32Array(2200);
 
     for (let s = 4; s < this.length; s += 3.2) {
       const Z = this.zoneAt(s);
@@ -991,6 +1047,7 @@ export class Track {
             m4.compose(p, q, sc); pineTop.setMatrixAt(nPine, m4);
             col.setHSL(0.28 + rng.range(-0.035, 0.045), rng.range(0.32, 0.6), rng.range(0.14, 0.28));
             pineTop.instanceColor!.setXYZ(nPine, col.r, col.g, col.b);
+            sPine[nPine] = s;
             nPine++;
           } else if (!isPine && nBroad < 1400) {
             sc.set(scale * rng.range(0.9, 1.3), scale * rng.range(0.9, 1.4), scale * rng.range(0.9, 1.3));
@@ -999,6 +1056,7 @@ export class Track {
             m4.compose(p, q, sc); broadTrunk.setMatrixAt(nBroad, m4);
             col.setHSL(0.24 + rng.range(-0.05, 0.06), rng.range(0.35, 0.65), rng.range(0.20, 0.36));
             broad.instanceColor!.setXYZ(nBroad, col.r, col.g, col.b);
+            sBroad[nBroad] = s;
             nBroad++;
           }
         } else if (roll < Z.treeDensity * 0.34 + Z.rockDensity * 0.22 && nRock < 2600) {
@@ -1008,6 +1066,7 @@ export class Track {
           const g0 = rng.range(0.30, 0.55);
           col.setRGB(g0 * 1.05, g0 * 0.98, g0 * 0.9).lerp(new THREE.Color(Z.far), 0.35);
           rocks.instanceColor!.setXYZ(nRock, col.r, col.g, col.b);
+          sRock[nRock] = s;
           nRock++;
         } else if (rng.chance(0.30) && nBush < 2200) {
           const scale = rng.range(0.5, 1.6);
@@ -1015,6 +1074,7 @@ export class Track {
           m4.compose(p, q, sc); bushes.setMatrixAt(nBush, m4);
           col.setHex(Z.verge).offsetHSL(rng.range(-0.03, 0.03), rng.range(-0.1, 0.1), rng.range(-0.09, 0.06));
           bushes.instanceColor!.setXYZ(nBush, col.r, col.g, col.b);
+          sBush[nBush] = s;
           nBush++;
         }
       }
@@ -1022,12 +1082,33 @@ export class Track {
     pineTrunk.count = nPine; pineTop.count = nPine;
     broad.count = nBroad; broadTrunk.count = nBroad;
     rocks.count = nRock; bushes.count = nBush;
-    [pineTrunk, pineTop, broad, broadTrunk, rocks, bushes].forEach(m => {
-      m.instanceMatrix.needsUpdate = true;
-      if (m.instanceColor) m.instanceColor.needsUpdate = true;
-      m.frustumCulled = false;
-      this.group.add(m);
-    });
+
+    // ---- register LOD bands -------------------------------------------
+    // Draw reach is per-type and chosen by silhouette value: tree canopies
+    // define the horizon so they persist furthest; bushes are ground clutter
+    // that contributes nothing past mid range, so they cut early.
+    const reg = (
+      mesh: THREE.InstancedMesh, s: Float32Array, n: number, reach: number,
+    ) => {
+      const mats = new Float32Array(n * 16);
+      mats.set(mesh.instanceMatrix.array.subarray(0, n * 16));
+      const colors = mesh.instanceColor
+        ? new Float32Array(mesh.instanceColor.array.subarray(0, n * 3))
+        : null;
+      this.sceneryBands.push({
+        mesh, s: s.slice(0, n), mats, colors, total: n, reach,
+      });
+      // real frustum culling now that counts change per frame
+      mesh.frustumCulled = true;
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      this.group.add(mesh);
+    };
+    reg(pineTrunk, sPine, nPine, 260);
+    reg(pineTop, sPine, nPine, 460);     // canopies hold the horizon
+    reg(broadTrunk, sBroad, nBroad, 240);
+    reg(broad, sBroad, nBroad, 420);
+    reg(rocks, sRock, nRock, 300);
+    reg(bushes, sBush, nBush, 130);      // ground clutter: near only
   }
 
   private buildPropMeshes() {
@@ -1053,7 +1134,10 @@ export class Track {
       const c = counts[k] || 0;
       if (c === 0) continue;
       const mesh = new THREE.InstancedMesh(defs[k].geo, new THREE.MeshLambertMaterial({ color: defs[k].color }), c);
-      mesh.frustumCulled = false;
+      // props sit on the racing line, so they get real frustum culling and
+      // a bounding sphere refreshed by refreshProps()
+      mesh.frustumCulled = true;
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       mesh.count = c;
       this.propMeshes[k] = mesh;
       this.group.add(mesh);
@@ -1092,7 +1176,13 @@ export class Track {
       m4.compose(p, q, sc);
       mesh.setMatrixAt(o.idx, m4);
     }
-    for (const k of Object.keys(this.propMeshes)) this.propMeshes[k].instanceMatrix.needsUpdate = true;
+    for (const k of Object.keys(this.propMeshes)) {
+      const m = this.propMeshes[k];
+      m.instanceMatrix.needsUpdate = true;
+      // frustum culling reads this; without it Three culls against a stale
+      // sphere and props pop out of existence at the screen edge
+      m.computeBoundingSphere();
+    }
   }
 
   private buildSpectatorMeshes() {
@@ -1101,7 +1191,10 @@ export class Track {
     const mkm = (g: THREE.BufferGeometry, c: number, colored: boolean) => {
       const m = new THREE.InstancedMesh(g, new THREE.MeshLambertMaterial({ color: colored ? 0xffffff : c }), N);
       if (colored) m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(N * 3), 3);
-      m.frustumCulled = false;
+      // spectators are the densest instance set on the mountain; they must
+      // frustum-cull, and updateSpectators() keeps count to the live window
+      m.frustumCulled = true;
+      m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       m.count = N;
       this.group.add(m);
       return m;
@@ -1210,6 +1303,13 @@ export class Track {
     const lastTouched = Math.min(i - 1, list.length - 1);
     this.specWindow.a = a; this.specWindow.b = lastTouched;
     const count = Math.max(0, lastTouched - a + 1);
+    // Draw only the live window. InstancedMesh has no start offset, so the
+    // range [0..a) still submits — but those are behind the camera and get
+    // frustum-culled per draw call, which is the cheap path.
+    for (const m of this.specMeshes) {
+      m.count = Math.min(list.length, lastTouched + 1);
+      m.computeBoundingSphere();
+    }
     for (const m of this.specMeshes) {
       const attr = m.instanceMatrix as THREE.InstancedBufferAttribute & {
         addUpdateRange?: (s: number, c: number) => void;

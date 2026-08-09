@@ -7,7 +7,7 @@ import {
 } from './core';
 import { Track, Obstacle, ZONES } from './track';
 import {
-  createRider, RiderRig, RIDER_PALETTES,
+  createRider, RiderRig, RIDER_PALETTES, getBuild,
   BB_POS, SHOCK_UPPER, SHOCK_LOWER, SHOCK_BASE_LEN, FORK_AXIS,
 } from './models';
 import {
@@ -15,7 +15,7 @@ import {
 } from './fx';
 import { audio } from './audio';
 import {
-  type Perf, type Loadout, computePerf, getBike, loadoutColors,
+  type Perf, type Loadout, computePerf, getBike, loadoutColors, RIDER_BUILD_OF,
 } from './garage';
 import { getMountain } from './mountains';
 import { SHALEBACK_SECTIONS, SHALEBACK_SETPIECES } from './shaleback';
@@ -152,6 +152,8 @@ export interface HudState {
   fps: number;
   perfTier: number;
   particles: number;
+  draws: number;
+  tris: number;
   splitDelta: number;    // seconds vs personal best at last zone
   splitShow: number;     // display timer
   splitHasPb: boolean;
@@ -254,6 +256,9 @@ interface Racer {
   trickAngle: number;
   /** LOD state: are the silhouette shells currently drawn? */
   lodNear: boolean;
+  /** 0..1 accumulated grime, and the colour it's picking up */
+  dirt: number;
+  dirtTint: THREE.Color;
 }
 
 const RIVAL_NAMES = ['BRICK', 'VOLTA', 'MAGPIE', 'SPUD', 'NOODLE', 'TANKA', 'HUSK', 'PIP'];
@@ -421,7 +426,7 @@ export class Game {
       introT: 0, introLine: '', introSub: '', introFade: 0,
       reactWindow: 0, holeshot: false,
       state: 'GROUNDED', stateLabel: 'ROLLING', stateT: 0, transitions: [],
-      fps: 60, perfTier: 0, particles: 0,
+      fps: 60, perfTier: 0, particles: 0, draws: 0, tris: 0,
       pumpArmed: 0, lastBonk: '', lastBonkT: 0, crashCause: '',
       splitDelta: 0, splitShow: 0, splitHasPb: false,
       ghostActive: false, ghostGap: 0, reducedMotion: false,
@@ -512,6 +517,7 @@ export class Game {
     // track — the default mountain is the authored vertical slice
     this.track = new Track(20260114, 4600, SHALEBACK_SECTIONS, SHALEBACK_SETPIECES);
     this.scene.add(this.track.build());
+    this.track.updateSceneryLod(0, 1, true);
 
     // particles
     const soft = makeSoftTexture();
@@ -607,7 +613,11 @@ export class Game {
 
   private mkRacer(isPlayer: boolean, i: number): Racer {
     const pal = RIDER_PALETTES[i % RIDER_PALETTES.length];
-    const rig = createRider(pal);
+    // rivals get the silhouette matching their personality slot; the player
+    // gets a clean neutral build until the garage overrides it
+    const buildId = isPlayer ? 'allround'
+      : ['bonker', 'speedfreak', 'showoff', 'coward', 'chaos', 'allround'][(i - 1) % 6];
+    const rig = createRider(pal, getBuild(buildId));
     this.scene.add(rig.root);
     this.scene.add(rig.shadow, rig.contactF, rig.contactR);
     return {
@@ -631,6 +641,7 @@ export class Game {
       corner: 1, aggression: 0,
       brain: null, mood: { line: 1, swing: 1, send: 1 }, moodCd: 0,
       wantSteer: 0, scCommit: 0, trickSpin: 0, trickAngle: 0, lodNear: true,
+      dirt: 0, dirtTint: new THREE.Color(0x6b5942),
     };
   }
 
@@ -699,6 +710,10 @@ export class Game {
       r.swingT = 99; r.bonkCooldownPair = 0;
       r.scCommit = 0; r.moodCd = 0; r.trickSpin = 0; r.trickAngle = 0;
       r.thinkCd = 0; r.aiSteer = 0; r.wantSteer = 0;
+      // fresh bike at the gate
+      r.dirt = 0;
+      r.dirtTint.setHex(0x6b5942);
+      r.rig.dirt.set(0, r.dirtTint);
       r.finished = false; r.finishTime = 0; r.place = i + 1;
       r.aiOffset = this.rng.range(-0.3, 0.3);
     });
@@ -1421,6 +1436,21 @@ export class Game {
     // ---- drivetrain: a DH bike freewheels, so the cranks only turn while
     // the rider is actually putting power down.
     r.pedalling = damp(r.pedalling, inp.pedal && r.grounded ? 1 : 0, 9, dt);
+
+    // ---- PROGRESSIVE DIRT. Grime builds from riding, fastest in mud and
+    // when sliding; airtime lets a little flake off. Never fully clears, so
+    // a bike that has been down the mountain looks like it.
+    if (r.grounded && r.v > 3) {
+      const wet = surf.kind === 'mud' ? 3.2 : surf.kind === 'grass' ? 1.5 : 1;
+      const slide = 1 + Math.abs(r.vx) * 0.09;
+      r.dirt = Math.min(1, r.dirt + dt * 0.026 * wet * slide * clamp01(r.v / 20));
+      // pick up the local ground colour so mud reads brown and rock grey
+      _c1.setHex(this.track.zoneAt(r.s).dirt).lerp(_c2.setRGB(0.42, 0.36, 0.27), 0.45);
+      r.dirtTint.lerp(_c1, dt * 0.6);
+    } else if (!r.grounded) {
+      r.dirt = Math.max(0, r.dirt - dt * 0.012);
+    }
+    r.rig.dirt.set(r.dirt, r.dirtTint);
 
     // ---- fore/aft weight shift. Riders get back over the rear wheel on
     // steeps and under braking, and move forward to drive on the flat.
@@ -2835,15 +2865,28 @@ export class Game {
       arm.rotation.z = -swing;
       arm.rotation.y = swing * 0.6;
       rig.torso.rotation.y = swing * 0.32;
+      // BONK step 2: the whole bike yaws and heels over against the swing —
+      // Newton's third, and it stops the rider looking like a torso on rails
+      rig.bike.rotation.y = -swing * 0.22;
+      rig.bike.rotation.z = swing * 0.14;
+      rig.fork.rotation.y = r.steerVis - swing * 0.3;
     } else {
       // Hands stay on the grips: as the fork turns, the inside arm pulls back
       // and the outside arm pushes out. Without this the bars rotate away
       // from the hands and the whole rig reads as detached.
       const st = r.steerVis;
+      // IMPACT REACTION: elbows fold under compression exactly as the knees
+      // do, so a landing is absorbed by all four limbs rather than two.
+      const absorbA = clamp(-r.suspension * 1.4, -0.15, 0.65);
       rig.armL.rotation.y = damp(rig.armL.rotation.y, -st * 0.34, 12, dt);
       rig.armR.rotation.y = damp(rig.armR.rotation.y, -st * 0.34, 12, dt);
-      rig.armL.rotation.z = damp(rig.armL.rotation.z, st * 0.20, 12, dt);
-      rig.armR.rotation.z = damp(rig.armR.rotation.z, st * 0.20, 12, dt);
+      rig.armL.rotation.z = damp(rig.armL.rotation.z, st * 0.20 + absorbA * 0.5, 12, dt);
+      rig.armR.rotation.z = damp(rig.armR.rotation.z, st * 0.20 - absorbA * 0.5, 12, dt);
+      rig.armL.rotation.x = damp(rig.armL.rotation.x, -absorbA, 14, dt);
+      rig.armR.rotation.x = damp(rig.armR.rotation.x, -absorbA, 14, dt);
+      // unwind the bonk's bike yaw once the swing is done
+      rig.bike.rotation.y = damp(rig.bike.rotation.y, 0, 10, dt);
+      if (r.grounded) rig.bike.rotation.z = damp(rig.bike.rotation.z, 0, 10, dt);
       // shoulders counter-rotate slightly into the turn
       rig.torso.rotation.y = damp(rig.torso.rotation.y, -st * 0.16, 9, dt);
     }
@@ -3083,6 +3126,7 @@ export class Game {
       ? new Track(m.seed, m.length, SHALEBACK_SECTIONS, SHALEBACK_SETPIECES)
       : new Track(m.seed, m.length);
     this.scene.add(this.track.build());
+    this.track.updateSceneryLod(0, 1, true);
     this.lastZone = -1;
     this.menuTime = 0;
     this.resetRace();
@@ -3110,12 +3154,16 @@ export class Game {
       if (Array.isArray(mat)) mat.forEach(x => x.dispose());
       else mat?.dispose();
     });
-    const rig = createRider(loadoutColors(l));
+    // rider choice drives the silhouette, not just the palette
+    const rig = createRider(loadoutColors(l), getBuild(RIDER_BUILD_OF[l.rider] ?? 'allround'));
     rig.frontWheel.scale.setScalar(bike.wheelScale);
     rig.rearWheel.scale.setScalar(bike.wheelScale);
     rig.bike.scale.set(bike.tubeScale * 0.5 + 0.5, 1, 1);
     this.scene.add(rig.root, rig.shadow, rig.contactF, rig.contactR);
     p.rig = rig;
+    // new bike, clean — and the handle belongs to the new rig
+    p.dirt = 0;
+    rig.dirt.set(0, p.dirtTint);
   }
 
   /**
@@ -3311,6 +3359,9 @@ export class Game {
     const hw = trk.halfWidth(s);
     const x = wob * hw * 0.75;
     const h = trk.heightAt(s, x) + 5.4 + Math.sin(this.menuTime * 0.31) * 2.2;
+    // the flyby ranges far from the grid, so scenery must band around the
+    // camera rather than the parked player
+    trk.updateSceneryLod(s, this.perfGov.lodScale);
     const want = trk.worldPos(s, x, h, _v1);
     const first = this.menuTime < dt * 2;
     const rate = first ? 999 : 1.6;
@@ -3428,6 +3479,10 @@ export class Game {
 
     // fog / light per zone
     const zone = this.track.zoneAt(p.s);
+    // Fog is the FAR band's main tool: it hides the LOD cutoff so vegetation
+    // dissolves into aerial perspective instead of popping. Density is tuned
+    // against the draw reaches in updateSceneryLod — raising one without the
+    // other is what makes pop-in visible.
     const fogTarget = 0.0016 * zone.fog;
     this.fog.density = damp(this.fog.density, fogTarget, 1.2, dt);
     _c1.setHex(zone.far).lerp(_c2.setHex(0xcfe0ee), 0.62);
@@ -3437,6 +3492,7 @@ export class Game {
 
     // spectators
     this.track.updateSpectators(p.s, this.time, dt, this.perfGov.crowdScale);
+    this.track.updateSceneryLod(p.s, this.perfGov.lodScale);
 
     // crowd reaction near player
     this.hud.offTrack = Math.abs(p.x) > this.track.halfWidth(p.s) + 0.5;
@@ -3760,6 +3816,9 @@ export class Game {
       h.fps = this.perfGov.fps;
       h.perfTier = this.perfGov.tier;
       h.particles = this.dirtPool.live + this.smokePool.live + this.sparkPool.live;
+      const info = this.renderer.info.render;
+      h.draws = info.calls;
+      h.tris = info.triangles;
     }
     h.recover = p.recover;
     h.recoverPulse = Math.max(0, h.recoverPulse - this.lastDt * 5);

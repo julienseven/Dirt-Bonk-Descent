@@ -242,7 +242,8 @@ export default function Hud({ game }: { game: Game }) {
           if (dbgT.current) {
             dbgT.current.textContent =
               `${h.stateLabel}  ${h.stateT.toFixed(2)}s\n`
-              + `${h.fps.toFixed(0)} fps · tier ${h.perfTier} · ${h.particles}p`;
+              + `${h.fps.toFixed(0)} fps · tier ${h.perfTier} · ${h.particles}p\n`
+              + `${h.draws} draws · ${(h.tris / 1000).toFixed(0)}k tris`;
             dbgT.current.style.color = h.fps < 50 ? '#ff6a6a'
               : h.fps < 58 ? '#ffd400' : 'rgba(255,255,255,.55)';
           }

@@ -15,6 +15,19 @@ export interface RiderDef {
   helmet: number;
 }
 
+/**
+ * Which silhouette archetype each garage rider uses. Keeps the character you
+ * pick visually distinct on track, not just differently coloured.
+ */
+export const RIDER_BUILD_OF: Record<string, string> = {
+  rusty: 'allround',
+  mox: 'bonker',
+  juno: 'showoff',
+  bex: 'speedfreak',
+  kit: 'coward',
+  grud: 'bonker',
+};
+
 export const RIDERS: RiderDef[] = [
   {
     id: 'rusty', name: 'RUSTY VANE', tag: 'THE LOCAL',

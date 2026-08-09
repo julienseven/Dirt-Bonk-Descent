@@ -4,8 +4,8 @@
 // like a product shot, with scrubbable animation previews.
 // ---------------------------------------------------------------------------
 import * as THREE from 'three';
-import { createRider, type RiderRig } from './models';
-import { type Loadout, getBike, loadoutColors } from './garage';
+import { createRider, getBuild, type RiderRig } from './models';
+import { type Loadout, getBike, loadoutColors, RIDER_BUILD_OF } from './garage';
 import { clamp, clamp01, damp, TAU } from './core';
 import {
   BB_POS, SHOCK_UPPER, SHOCK_LOWER, SHOCK_BASE_LEN, FORK_AXIS,
@@ -174,7 +174,7 @@ export class GarageScene {
       });
       this.rig = null;
     }
-    const rig = createRider(loadoutColors(l));
+    const rig = createRider(loadoutColors(l), getBuild(RIDER_BUILD_OF[l.rider] ?? 'allround'));
     const bike = getBike(l.bike);
     // silhouette differences between bikes
     rig.frontWheel.scale.setScalar(bike.wheelScale);
