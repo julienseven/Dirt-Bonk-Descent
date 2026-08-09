@@ -1179,10 +1179,12 @@ export class Track {
   }
 
   /** Animate spectators in a window around the player. */
-  updateSpectators(playerS: number, time: number, dt: number) {
+  updateSpectators(playerS: number, time: number, dt: number, crowdScale = 1) {
     if (!this.specMeshes.length) return;
     const list = this.spectators;
-    const lo = playerS - 45, hi = playerS + 230;
+    // LOD: the animation window shrinks under load. Spectators outside it
+    // keep their last pose — they're static scenery, not gameplay.
+    const lo = playerS - 45, hi = playerS + 230 * crowdScale;
     let a = 0, b = list.length - 1;
     while (a < b) { const m = (a + b) >> 1; if (list[m].s < lo) a = m + 1; else b = m; }
 

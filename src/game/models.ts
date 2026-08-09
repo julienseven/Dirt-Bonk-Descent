@@ -17,8 +17,49 @@ export const RIDER_PALETTES: RiderColors[] = [
   { jersey: 0xffffff, pants: 0x2b2b35, helmet: 0x111111, frame: 0xff3b30, accent: 0xffd400, skin: 0xc98b5e },
 ];
 
-const mat = (color: number, opts: Partial<THREE.MeshLambertMaterialParameters> = {}) =>
-  new THREE.MeshLambertMaterial({ color, ...opts });
+/**
+ * Material vocabulary for stylised realism.
+ *
+ * Lambert is purely diffuse — no specular term at all — which is why every
+ * surface previously read as the same matte plastic regardless of what it
+ * was meant to be. These use Standard with deliberately *narrow* roughness
+ * bands: enough variation that anodised metal, worn rubber and dusty cloth
+ * are distinguishable, without drifting toward photoreal.
+ *
+ * Note the floors on roughness: nothing goes below 0.28, because a true
+ * mirror finish is what makes game assets look like cheap plastic.
+ */
+export const SURFACE = {
+  /** anodised frame tubing: crisp highlight, holds its colour */
+  metal: (color: number) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.34, metalness: 0.72,
+  }),
+  /** raw / machined parts: duller, greyer highlight */
+  steel: (color: number) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.48, metalness: 0.85,
+  }),
+  /** tyres and grips: soft sheen only, never shiny */
+  rubber: (color: number) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.88, metalness: 0.0,
+  }),
+  /** jersey and pack: matte, slight fabric bloom */
+  cloth: (color: number) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.82, metalness: 0.0,
+  }),
+  /** helmet shell: the one genuinely glossy thing on the rider */
+  gloss: (color: number) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.28, metalness: 0.1,
+  }),
+  /** skin: matte with a faint sheen, never waxy */
+  skin: (color: number) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.72, metalness: 0.0,
+  }),
+  /** goggle lens: emissive so it reads at distance */
+  lens: (color: number) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.15, metalness: 0.3,
+    emissive: new THREE.Color(color).multiplyScalar(0.28),
+  }),
+} as const;
 
 /** Cylinder tube between two local points. */
 function tube(a: THREE.Vector3, b: THREE.Vector3, r: number, m: THREE.Material, seg = 7): THREE.Mesh {
@@ -102,15 +143,16 @@ export function createRider(c: RiderColors): RiderRig {
   const flip = new THREE.Group(); spin.add(flip);
   const offset = new THREE.Group(); offset.position.y = -PIVOT_Y; flip.add(offset);
 
-  const mFrame = mat(c.frame);
-  const mTyre = mat(0x16161a);
-  const mRim = mat(0xd8d8dd);
-  const mHub = mat(c.accent);
-  const mJersey = mat(c.jersey);
-  const mPants = mat(c.pants);
-  const mHelmet = mat(c.helmet);
-  const mSkin = mat(c.skin);
-  const mDark = mat(0x232329);
+  // material classes, so each part reads as what it actually is
+  const mFrame = SURFACE.metal(c.frame);
+  const mTyre = SURFACE.rubber(0x16161a);
+  const mRim = SURFACE.steel(0xd8d8dd);
+  const mHub = SURFACE.metal(c.accent);
+  const mJersey = SURFACE.cloth(c.jersey);
+  const mPants = SURFACE.cloth(c.pants);
+  const mHelmet = SURFACE.gloss(c.helmet);
+  const mSkin = SURFACE.skin(c.skin);
+  const mDark = SURFACE.steel(0x232329);
 
   // ---- bike -----------------------------------------------------------
   const bike = new THREE.Group();
@@ -236,13 +278,13 @@ export function createRider(c: RiderColors): RiderRig {
   chest.position.set(0, 0.26, 0.16);
   chest.rotation.x = -0.62;
   torso.add(chest);
-  const numPlate = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.20, 0.02), mat(0xf5f5f5));
+  const numPlate = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.20, 0.02), SURFACE.gloss(0xf5f5f5));
   numPlate.position.set(0, 0.30, 0.33); numPlate.rotation.x = -0.62;
   torso.add(numPlate);
   const hips = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.24, 0.28), mPants);
   hips.position.set(0, 0.02, -0.04);
   torso.add(hips);
-  const pack = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.30, 0.14), mat(c.accent));
+  const pack = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.30, 0.14), SURFACE.cloth(c.accent));
   pack.position.set(0, 0.34, -0.02); pack.rotation.x = -0.62;
   torso.add(pack);
 
@@ -254,13 +296,13 @@ export function createRider(c: RiderColors): RiderRig {
   head.position.set(0, 0.63, 0.42);
   head.scale.set(1, 0.98, 1.12);
   torso.add(head);
-  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.045, 0.20), mat(c.accent));
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.045, 0.20), SURFACE.gloss(c.accent));
   visor.position.set(0, 0.10, 0.13); visor.rotation.x = 0.28;
   head.add(visor);
-  const goggles = new THREE.Mesh(new THREE.BoxGeometry(0.27, 0.10, 0.06), mat(0x101018));
+  const goggles = new THREE.Mesh(new THREE.BoxGeometry(0.27, 0.10, 0.06), SURFACE.rubber(0x101018));
   goggles.position.set(0, 0.0, 0.16);
   head.add(goggles);
-  const lens = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.06, 0.02), mat(0x66e0ff, { emissive: 0x113344 }));
+  const lens = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.06, 0.02), SURFACE.lens(0x66e0ff));
   lens.position.set(0, 0.0, 0.19);
   head.add(lens);
   const chin = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.12, 0.16), mHelmet);
@@ -275,7 +317,7 @@ export function createRider(c: RiderColors): RiderRig {
     const fore = new THREE.Group();
     fore.position.set(s * 0.07, -0.20, 0.22);
     fore.add(tube(V(0, 0, 0), V(s * 0.05, -0.16, 0.26), 0.052, mSkin));
-    const glove = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.10, 0.12), mat(c.pants));
+    const glove = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.10, 0.12), SURFACE.cloth(c.pants));
     glove.position.set(s * 0.05, -0.17, 0.28);
     fore.add(glove);
     g.add(fore);
@@ -291,7 +333,7 @@ export function createRider(c: RiderColors): RiderRig {
     const shin = new THREE.Group();
     shin.position.set(s * 0.02, -0.34, 0.10);
     shin.add(tube(V(0, 0, 0), V(0, -0.30, -0.06), 0.062, mPants));
-    const shoe = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.08, 0.24), mat(0x1b1b20));
+    const shoe = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.08, 0.24), SURFACE.rubber(0x1b1b20));
     shoe.position.set(0, -0.32, -0.02);
     shin.add(shoe);
     g.add(shin);
@@ -346,6 +388,27 @@ export function createRider(c: RiderColors): RiderRig {
   const contactF = mkContact(), contactR = mkContact();
 
   root.traverse(o => { if ((o as THREE.Mesh).isMesh) { o.castShadow = false; o.receiveShadow = false; } });
+
+  // ---- SILHOUETTE PASS -------------------------------------------------
+  // Priority 1 is rider readability. Inverted-hull backfaces draw a dark
+  // outline behind the rig, so the character stays legible against dirt,
+  // sky, crowd or trees without relying on lighting contrast alone.
+  // Cheap: no post-processing, no second render target.
+  const outlineMat = new THREE.MeshBasicMaterial({
+    color: 0x0b0d12, side: THREE.BackSide, fog: true,
+  });
+  const outlineTargets: THREE.Mesh[] = [];
+  root.traverse(o => {
+    const m = o as THREE.Mesh;
+    // skip tiny parts: outlining them just thickens the model
+    if (m.isMesh && m.geometry) outlineTargets.push(m);
+  });
+  for (const m of outlineTargets) {
+    const shell = new THREE.Mesh(m.geometry, outlineMat);
+    shell.scale.setScalar(1.055);
+    shell.renderOrder = -1;
+    m.add(shell);
+  }
 
   return {
     root, lean, body, spin, flip, bike, fork, forkLower, swingarm, shock,

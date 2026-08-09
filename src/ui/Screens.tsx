@@ -5,6 +5,7 @@ import {
   DIFFICULTIES, formatDelta, type Difficulty, type RecordResult, type SaveData,
 } from '../game/save';
 import { getMountain, levelFromXp } from '../game/mountains';
+import type { XpLine } from '../game/progression';
 
 const PLACE = ['', '1st', '2nd', '3rd', '4th', '5th', '6th'];
 
@@ -22,8 +23,10 @@ const CONTROLS: [string, React.ReactNode][] = [
   ['HOP / BUNNY HOP', <Key>J</Key>],
   ['BONK LEFT / RIGHT', <><Key>Q</Key> <Key>E</Key></>],
   ['BOOST (on ground)', <Key>SPACE</Key>],
-  ['AIR: WHIP / FLIP', <><Key>Q</Key><Key>E</Key> / <Key>J</Key><Key>K</Key></>],
-  ['AIR: SUPERBONK POSE', <Key>SPACE</Key>],
+  ['AIR: SPIN / FLIP', <><Key>Q</Key><Key>E</Key> / <Key>J</Key><Key>K</Key></>],
+  ['STYLE: HAND / FOOT / TABLE', <><Key>1</Key><Key>2</Key><Key>3</Key></>],
+  ['STYLE: WHIP / BARSPIN', <><Key>4</Key><Key>5</Key></>],
+  ['STYLE: SUPERMAN', <Key>SPACE</Key>],
   ['CRASHED? MASH TO GET UP', <><Key>W</Key> <Key>SPACE</Key></>],
   ['PAUSE', <Key>ESC</Key>],
 ];
@@ -171,6 +174,7 @@ export function Menu({
         </div>
 
         <div className="slide-up compact-hide mt-6 flex flex-wrap gap-x-6 gap-y-1 text-[11px] font-bold uppercase tracking-[.18em] text-white/40" style={{ animationDelay: '.24s' }}>
+          <span><span className="text-[#ffd400]">Tip</span> — stack a flip, a spin and a style trick for the big multiplier</span>
           <span><span className="text-[#ffd400]">Tip</span> — pump the terrain: hold <span className="text-white">SHIFT</span> into a dip, release over the crest for free speed</span>
           <span><span className="text-[#ffd400]">Tip</span> — land rear wheel first to keep drive; nose-down goes over the bars</span>
           <span><span className="text-[#ffd400]">Tip</span> — release the trick key to level out before you land</span>
@@ -205,10 +209,10 @@ export function Pause({ onResume, onRestart, onQuit }: { onResume: () => void; o
 }
 
 export function Results({
-  game, save, result, payout, xpGain, levelUp, onRestart, onMenu, onGarage,
+  game, save, result, payout, xpGain, levelUp, xpLines, onRestart, onMenu, onGarage,
 }: {
   game: Game; save: SaveData; result: RecordResult | null;
-  payout: number; xpGain: number; levelUp: boolean;
+  payout: number; xpGain: number; levelUp: boolean; xpLines: XpLine[];
   onRestart: () => void; onMenu: () => void; onGarage: () => void;
 }) {
   const d = game.hud.finishData;
@@ -314,6 +318,29 @@ export function Results({
             ))}
           </div>
           <div className="slide-up rounded-sm border-l-4 border-[#2fe6c8] bg-black/60 p-4 backdrop-blur" style={{ animationDelay: '.14s' }}>
+            {xpLines.length > 0 && (
+              <>
+                <div className="hud-label mb-2">XP EARNED</div>
+                <div className="mb-3">
+                  {xpLines.map((l, i) => (
+                    <div key={l.source + i}
+                      className="flex items-baseline justify-between gap-2 py-[2px]"
+                      style={{ animation: `slideUp .35s ${0.05 + i * 0.06}s both` }}>
+                      <span className="hud-label !tracking-[.08em] !text-[9px]"
+                        style={{ color: l.source === 'challenge' ? '#c0f000' : undefined }}>
+                        {l.label}
+                      </span>
+                      <span className="flex items-baseline gap-2">
+                        <span className="hud-label !text-[8px] text-white/35">{l.detail}</span>
+                        <span className="hud-mono w-[46px] text-right text-[12px] text-[#2fe6c8]">
+                          +{l.amount}
+                        </span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
             {d.splits.length > 1 && (
               <>
                 <div className="hud-label mb-2">ZONE SPLITS</div>

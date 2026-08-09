@@ -2,14 +2,14 @@
 // DIRT BONK DESCENT :: persistence (records, splits, settings)
 // ---------------------------------------------------------------------------
 
-import { type Loadout, DEFAULT_LOADOUT } from './garage';
+import { type Loadout, DEFAULT_LOADOUT, BIKES } from './garage';
 
 export type Difficulty = 'chill' | 'pro' | 'savage';
 
 export const DIFFICULTIES: { id: Difficulty; label: string; blurb: string; color: string }[] = [
-  { id: 'chill', label: 'SUNDAY RIDE', blurb: 'The pack waits for you', color: '#2fe6c8' },
-  { id: 'pro', label: 'PRO CIRCUIT', blurb: 'A real fight to the line', color: '#ffd400' },
-  { id: 'savage', label: 'BONE RATTLER', blurb: 'They will not forgive you', color: '#ff2e88' },
+  { id: 'chill', label: 'ROOKIE', blurb: 'Wide lines, early brakes, slow to recover', color: '#7ef7c8' },
+  { id: 'pro', label: 'PRO', blurb: 'Hits every apex and punishes mistakes', color: '#ff9500' },
+  { id: 'savage', label: 'ABSURD', blurb: 'Perfect lines, every shortcut, perfect timing', color: '#ff2e88' },
 ];
 
 /**
@@ -144,7 +144,14 @@ export function loadSave(): SaveData {
         ...DEFAULT_LOADOUT,
         ...(p.loadout ?? {}),
         levels: p.loadout?.levels ?? {},
-        owned: p.loadout?.owned?.length ? p.loadout.owned : ['clunker'],
+        // old saves may name bikes that no longer exist; drop them and
+        // guarantee the starter frame is always owned
+        owned: Array.from(new Set([
+          'hornet',
+          ...(p.loadout?.owned ?? []).filter(id => BIKES.some(b => b.id === id)),
+        ])),
+        bike: BIKES.some(b => b.id === p.loadout?.bike)
+          ? p.loadout!.bike : 'hornet',
       },
     };
   } catch {

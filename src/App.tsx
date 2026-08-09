@@ -5,9 +5,14 @@ import TouchControls from './ui/TouchControls';
 import { Menu, Pause, Results, Loading } from './ui/Screens';
 import TunePanel from './ui/TunePanel';
 import Garage from './ui/Garage';
-import { runPayout, type Loadout } from './game/garage';
+import { type Loadout } from './game/garage';
+import {
+  xpBreakdown, xpTotal, cashEarned, completedChallenges,
+  type XpLine, type RunSummary,
+} from './game/progression';
+import { getMode } from './game/modes';
 import MountainSelect from './ui/MountainSelect';
-import { runXp, levelFromXp } from './game/mountains';
+import { levelFromXp } from './game/mountains';
 import { audio } from './game/audio';
 import {
   loadSave, writeSave, commitRun, type SaveData, type Difficulty, type RecordResult,
@@ -37,6 +42,7 @@ function GameApp() {
   const [picker, setPicker] = useState(false);
   const [payout, setPayout] = useState(0);
   const [xpGain, setXpGain] = useState(0);
+  const [xpLines, setXpLines] = useState<XpLine[]>([]);
   const [levelUp, setLevelUp] = useState(false);
   const touch = useRef(isTouch());
   const saveRef = useRef(save);
@@ -89,12 +95,23 @@ function GameApp() {
       time: d.time, score: d.score, place: d.place,
       topSpeed: d.topSpeed, splits: d.splits, date: Date.now(),
     }, game.takeGhost());
-    // scrap + XP earned this run
-    const earned = runPayout(d.place, d.score, d.tricks, d.bonks);
-    const gainedXp = runXp({
-      place: d.place, score: d.score, tricks: d.tricks, bonks: d.bonks,
-      shortcuts: d.shortcuts, length: game.track.length,
-    });
+    // ---- itemised progression
+    const mode = getMode(game.mode);
+    const base: RunSummary = {
+      place: d.place, fieldSize: game.hud.total,
+      score: d.score, tricks: d.tricks, bonks: d.bonks,
+      nearMisses: d.nearMisses, shortcuts: d.shortcuts,
+      bestTrickScore: d.bestTrickScore, time: d.time,
+      length: game.track.length, finished: true,
+      challengesDone: [],
+      modeXpScale: mode.xpScale, modeCashScale: mode.cashScale,
+    };
+    const done = completedChallenges(base);
+    const summary: RunSummary = { ...base, challengesDone: done };
+    const lines = xpBreakdown(summary);
+    const gainedXp = xpTotal(lines);
+    const earned = cashEarned(summary);
+    setXpLines(lines);
     const before = levelFromXp(next.xp).level;
     next.coins += earned;
     next.xp += gainedXp;
@@ -192,6 +209,7 @@ function GameApp() {
         <Garage
           loadout={save.loadout}
           coins={save.coins}
+          xp={save.xp}
           reducedMotion={save.reducedMotion}
           onChange={setLoadout}
           onBuy={buy}
@@ -219,7 +237,7 @@ function GameApp() {
       )}
       {game && phase === 'finish' && (
         <Results game={game} save={save} result={lastResult} payout={payout}
-          xpGain={xpGain} levelUp={levelUp}
+          xpGain={xpGain} levelUp={levelUp} xpLines={xpLines}
           onRestart={rerun} onMenu={toMenu} onGarage={() => { toMenu(); setGarage(true); }} />
       )}
     </div>

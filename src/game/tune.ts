@@ -9,14 +9,15 @@
 import { clamp, clamp01, RNG } from './core';
 import { Track, TRACK_LENGTH } from './track';
 import { GRAV, SOFT_CAP, DRAG_K, TUCK_DRAG } from './game';
-import { DIFF_TUNING, SKILL_MIN, SKILL_MAX, type Difficulty } from './save';
+import { DIFF_TUNING, type Difficulty } from './save';
+import { AI_TIERS, tierFromLegacy } from './ai';
 
 const DT = 1 / 60;
 const MAX_T = 600;
 
 interface Sim {
   s: number; v: number;
-  skill: number; corner: number;
+  skill: number; cap: number; grip: number;
   finish: number;
 }
 
@@ -65,12 +66,17 @@ export function simulateRace(
   const rng = new RNG(seed * 7919 + 13);
   const T = DIFF_TUNING[diff];
 
+  // model the real field: personality caps and per-tier cornering grip
+  const tier = AI_TIERS[tierFromLegacy(diff)];
   const ai: Sim[] = [];
   for (let i = 1; i <= 5; i++) {
+    const spread = (i - 1 - 2.5) * tier.spread;
     ai.push({
       s: 0, v: 0,
       skill: T.skill + i * T.step + rng.range(-0.03, 0.03),
-      corner: 0.62 + rng.range(0, 0.38), finish: -1,
+      cap: (tier.cap + spread * 10) + rng.range(-0.4, 0.4),
+      grip: 13 + tier.cornerCommit * 11 + rng.range(0, 3),
+      finish: -1,
     });
   }
 
@@ -96,9 +102,9 @@ export function simulateRace(
       if (r.finish >= 0) continue;
       const rel = ps - r.s;
       const band = clamp(rel * 0.0024 * T.bandK, -0.10 * T.bandK, 0.15 * T.bandK);
-      const cap = 24.5 + clamp(r.skill + band, SKILL_MIN, SKILL_MAX) * 15;
+      const cap = r.cap * (1 + band * 0.5);
       const look = r.s + 22 + r.v * 0.55;
-      const lim = cornerLimit(trk, look, 15 + r.corner * 9);
+      const lim = cornerLimit(trk, look, r.grip);
       const brake = r.v > Math.min(cap * 1.1, lim)
         && Math.abs(trk.curvatureAt(look)) > 0.008;
       const tuck = !brake && Math.abs(trk.curvatureAt(look)) < 0.005 && r.v > 18;

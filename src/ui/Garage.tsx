@@ -3,9 +3,10 @@ import { GarageScene, PREVIEW_LIST, type PreviewAnim } from '../game/garageScene
 import {
   RIDERS, BIKES, UPGRADES, MAX_LEVEL, STAT_KEYS, STAT_LABEL,
   FRAME_COLORS, JERSEY_COLORS, ACCENT_COLORS,
-  computeStats, getBike, getRider, levelOf, upgradeCost,
+  computeStats, getBike, getRider, levelOf, upgradeCost, upgradeReqLevel,
   type Loadout, type Stats,
 } from '../game/garage';
+import { levelFromXp } from '../game/mountains';
 import { audio } from '../game/audio';
 
 type Tab = 'rider' | 'bike' | 'tune' | 'paint';
@@ -65,10 +66,11 @@ function Card({ on, locked, onClick, children }: {
 }
 
 export default function Garage({
-  loadout, coins, onChange, onBuy, onClose, reducedMotion,
+  loadout, coins, xp, onChange, onBuy, onClose, reducedMotion,
 }: {
   loadout: Loadout;
   coins: number;
+  xp: number;
   onChange: (l: Loadout) => void;
   onBuy: (cost: number, l: Loadout) => void;
   onClose: () => void;
@@ -104,9 +106,12 @@ export default function Garage({
     onBuy(price, { ...loadout, bike: id, owned: [...loadout.owned, id] });
   };
 
+  const riderLevel = levelFromXp(xp).level;
+
   const buyUpgrade = (stat: keyof Stats) => {
     const lvl = levelOf(loadout, bike.id, stat);
     const cost = upgradeCost(stat, lvl);
+    if (riderLevel < upgradeReqLevel(stat, lvl)) { audio.hitTaken(0.4); return; }
     if (cost === null || coins < cost) { audio.hitTaken(0.4); return; }
     audio.chime(4);
     const levels = { ...loadout.levels };
@@ -241,7 +246,9 @@ export default function Garage({
                 {UPGRADES.map(u => {
                   const lvl = levelOf(loadout, bike.id, u.id);
                   const cost = upgradeCost(u.id, lvl);
-                  const afford = cost !== null && coins >= cost;
+                  const need = upgradeReqLevel(u.id, lvl);
+                  const locked = riderLevel < need;
+                  const afford = !locked && cost !== null && coins >= cost;
                   return (
                     <div key={u.id} className="mb-[7px] border-2 border-white/12 bg-black/40 px-3 py-2">
                       <div className="flex items-center gap-2">
@@ -257,7 +264,7 @@ export default function Garage({
                         </div>
                         <button
                           onClick={() => buyUpgrade(u.id)}
-                          disabled={cost === null || !afford}
+                          disabled={cost === null || !afford || locked}
                           className="ml-1 shrink-0 border-2 px-2 py-[5px] transition-colors"
                           style={{
                             borderColor: cost === null ? 'rgba(126,247,200,.5)'
@@ -265,7 +272,9 @@ export default function Garage({
                             color: cost === null ? '#7ef7c8' : afford ? '#ffd400' : 'rgba(255,255,255,.3)',
                             cursor: cost === null || !afford ? 'not-allowed' : 'pointer',
                           }}>
-                          <span className="hud-big text-[12px]">{cost === null ? 'MAX' : cost}</span>
+                          <span className="hud-big text-[12px]">
+                            {cost === null ? 'MAX' : locked ? `LV${need}` : cost}
+                          </span>
                         </button>
                       </div>
                       <p className="mt-[5px] text-[10px] leading-snug text-white/40">{u.desc}</p>

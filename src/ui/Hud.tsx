@@ -239,7 +239,13 @@ export default function Hud({ game }: { game: Game }) {
             dbgState.current.textContent = h.state;
             dbgState.current.style.color = STATE_TINT[h.state] ?? '#ffffff';
           }
-          if (dbgT.current) dbgT.current.textContent = `${h.stateLabel}  ${h.stateT.toFixed(2)}s`;
+          if (dbgT.current) {
+            dbgT.current.textContent =
+              `${h.stateLabel}  ${h.stateT.toFixed(2)}s\n`
+              + `${h.fps.toFixed(0)} fps · tier ${h.perfTier} · ${h.particles}p`;
+            dbgT.current.style.color = h.fps < 50 ? '#ff6a6a'
+              : h.fps < 58 ? '#ffd400' : 'rgba(255,255,255,.55)';
+          }
           if (dbgLog.current) {
             const txt = h.transitions
               .slice().reverse()
@@ -499,7 +505,7 @@ export default function Hud({ game }: { game: Game }) {
       <div ref={dbgWrap} className="absolute left-5 top-[128px] hidden border-l-4 border-[#2fe6c8] bg-black/78 px-3 py-2 backdrop-blur">
         <div className="hud-label !text-[8px]">BIKE STATE</div>
         <div ref={dbgState} className="hud-big text-[22px] leading-none text-white">GROUNDED</div>
-        <div ref={dbgT} className="hud-mono mt-[2px] text-[10px] text-white/55" />
+        <div ref={dbgT} className="hud-mono mt-[2px] whitespace-pre text-[10px] text-white/55" />
         <div className="hud-label mt-2 !text-[8px]">TRANSITIONS</div>
         <div ref={dbgLog} className="hud-mono whitespace-pre text-[9px] leading-[1.5] text-[#7ef7c8]" />
       </div>

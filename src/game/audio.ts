@@ -31,6 +31,17 @@ export class GameAudio {
   private crowd!: Loop;     // ambient crowd bed
   private rival!: Loop;     // nearest rival's tyres
   private rivalPan: StereoPannerNode | null = null;
+  private brake!: Loop;     // pad-on-rotor hiss
+  private forest!: Loop;    // leaf rustle bed
+  private water!: Loop;     // running water near the mud pit
+  private chainOsc: OscillatorNode | null = null;
+  private chainGain: GainNode | null = null;
+  private chainFilter: BiquadFilterNode | null = null;
+  /** cumulative crank angle, so chain clicks land on real link passes */
+  private chainPhase = 0;
+  private lastLink = 0;
+  private birdTimer = 0;
+  private creakTimer = 0;
   private ready = false;
   private musicTimer = 0;
   private step = 0;
@@ -38,6 +49,7 @@ export class GameAudio {
   private musicOn = true;
   private sfxOn = true;
   private intensity = 0;    // 0..1 drives music layers
+  private homeStretch = 0;  // 0..1 approach to the finish
 
   init() {
     if (this.ctx) return;
@@ -73,6 +85,12 @@ export class GameAudio {
     this.wind = this.makeLoop('lowpass', 700, 0, 0.7);
     this.crowd = this.makeLoop('bandpass', 900, 0, 3.4);
     // nearest-rival tyre roll, panned to their side of you
+    // brakes: narrow high-Q band, so it reads as pad-on-rotor, not noise
+    this.brake = this.makeLoop('bandpass', 3100, 0, 9);
+    // forest: soft broadband rustle
+    this.forest = this.makeLoop('bandpass', 2400, 0, 0.7);
+    // water: lower, wetter band
+    this.water = this.makeLoop('bandpass', 900, 0, 0.9);
     this.rival = this.makeLoop('bandpass', 300, 0, 1.3);
     if (ctx.createStereoPanner) {
       this.rivalPan = ctx.createStereoPanner();
@@ -80,6 +98,18 @@ export class GameAudio {
       this.rival.gain.connect(this.rivalPan);
       this.rivalPan.connect(this.sfxBus);
     }
+    // drivetrain: a faint sawtooth whose pitch tracks cadence, sitting under
+    // the discrete link clicks. On its own it reads as "geared machine".
+    const co = ctx.createOscillator();
+    co.type = 'sawtooth';
+    co.frequency.value = 60;
+    const cf = ctx.createBiquadFilter();
+    cf.type = 'bandpass'; cf.frequency.value = 1500; cf.Q.value = 3.5;
+    const cg = ctx.createGain(); cg.gain.value = 0;
+    co.connect(cf); cf.connect(cg); cg.connect(this.sfxBus);
+    co.start(0);
+    this.chainOsc = co; this.chainGain = cg; this.chainFilter = cf;
+
     this.ready = true;
   }
 
@@ -132,6 +162,22 @@ export class GameAudio {
     rivalNear?: number; rivalPan?: number; rivalSpeed?: number;
     /** 0..1 exposed-summit gale, used by the cold open */
     gale?: number;
+    // ---- bike
+    /** crank revolutions per second; drives chain clicks + drivetrain hum */
+    cadence?: number;
+    /** 0..1 how hard the brakes are on */
+    braking01?: number;
+    /** 0..1 suspension compression rate, for damper creak */
+    suspRate?: number;
+    // ---- environment
+    /** 0..1 density of trees around the player */
+    forest?: number;
+    /** 0..1 nearby running water */
+    water?: number;
+    /** 0..1 how much of the mountain is quiet enough for birdsong */
+    calm?: number;
+    /** 0..1 approach to the finish line, lifts the music */
+    homeStretch?: number;
   }) {
     if (!this.ready || !this.ctx) return;
     const t = this.ctx.currentTime;
@@ -162,7 +208,54 @@ export class GameAudio {
       this.rivalPan.pan.setTargetAtTime(clamp(o.rivalPan ?? 0, -1, 1), t, 0.1);
     }
 
-    this.intensity = o.intensity;
+    // ---- BRAKES: pad hiss that rises in pitch as you slow
+    const br = o.paused ? 0 : clamp01(o.braking01 ?? 0) * (o.grounded ? 1 : 0);
+    this.brake.gain.gain.setTargetAtTime(br * 0.15 * (0.3 + sp), t, 0.05);
+    this.brake.filter.frequency.setTargetAtTime(lerp(4200, 2400, sp), t, 0.08);
+
+    // ---- CHAIN: discrete link clicks tied to real crank rotation, so the
+    // drivetrain sounds mechanical rather than like a looped sample.
+    const cad = o.paused ? 0 : (o.cadence ?? 0);
+    if (this.chainGain && this.chainOsc && this.chainFilter) {
+      this.chainGain.gain.setTargetAtTime(cad > 0.05 ? 0.020 : 0, t, 0.09);
+      this.chainOsc.frequency.setTargetAtTime(40 + cad * 26, t, 0.08);
+      this.chainFilter.frequency.setTargetAtTime(1100 + cad * 260, t, 0.1);
+    }
+    this.chainPhase += cad * dt;
+    // ~7 audible link passes per crank revolution
+    const link = Math.floor(this.chainPhase * 7);
+    if (link !== this.lastLink && cad > 0.4 && this.sfxOn) {
+      this.lastLink = link;
+      this.tick(1900 + Math.random() * 900, 0.014 + cad * 0.006);
+    }
+
+    // ---- SUSPENSION: damper creak when travel changes fast
+    this.creakTimer -= dt;
+    const sr = clamp01(o.suspRate ?? 0);
+    if (sr > 0.45 && this.creakTimer <= 0 && !o.paused) {
+      this.creakTimer = 0.16 + Math.random() * 0.2;
+      this.creak(sr);
+    }
+
+    // ---- FOREST / WATER beds
+    this.forest.gain.gain.setTargetAtTime(
+      o.paused ? 0 : clamp01(o.forest ?? 0) * 0.085, t, 0.6);
+    this.water.gain.gain.setTargetAtTime(
+      o.paused ? 0 : clamp01(o.water ?? 0) * 0.11, t, 0.5);
+
+    // ---- BIRDS: only where it's quiet and you're not flat out
+    this.birdTimer -= dt;
+    const calm = clamp01(o.calm ?? 0) * (1 - sp * 0.7);
+    if (!o.paused && calm > 0.25 && this.birdTimer <= 0) {
+      this.birdTimer = 1.6 + Math.random() * 5.5;
+      this.birdCall(calm);
+    }
+
+    // Music tracks the run: speed and style raise it, but the approach to
+    // the line dominates, so the last stretch always feels like a finale.
+    const home = clamp01(o.homeStretch ?? 0);
+    this.intensity = clamp01(o.intensity * (1 - home * 0.45) + home);
+    this.homeStretch = home;
     if (this.musicOn && !o.paused) this.tickMusic(dt);
   }
 
@@ -206,6 +299,24 @@ export class GameAudio {
         this.stab(t, 110 * Math.pow(2, n / 12), (0.055 + I * 0.075));
       }
     }
+
+    // ---- FINALE LAYERS: only on the run to the line.
+    const H = this.homeStretch;
+    if (H > 0.15) {
+      // driving eighth-note ride
+      if (s % 2 === 0) this.hat(t, 0.05 * H);
+      // tom fill rolling into each bar
+      if (s % 16 === 14 || s % 16 === 15) {
+        this.tom(t, 150 - (s % 16 - 14) * 30, 0.20 * H);
+      }
+      // octave-up lead doubling, so the melody lifts
+      if (H > 0.45 && s % 4 === 0) {
+        const OCT = [24, 27, 31, 27];
+        this.stab(t, 110 * Math.pow(2, OCT[(s / 4) % 4] / 12), 0.05 * H);
+      }
+      // four-on-the-floor kick under the last stretch
+      if (H > 0.6 && s % 2 === 0 && s % 4 !== 0) this.kick(t, 0.35 * H);
+    }
   }
 
   private env(g: GainNode, t: number, peak: number, a: number, d: number) {
@@ -237,6 +348,18 @@ export class GameAudio {
     this.env(g2, t, v * 0.22, 0.002, 0.09);
     o.connect(g2); g2.connect(this.musicBus); o.start(t); o.stop(t + 0.14);
   }
+  private tom(t: number, freq: number, v: number) {
+    const ctx = this.ctx!;
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(freq, t);
+    o.frequency.exponentialRampToValueAtTime(freq * 0.55, t + 0.16);
+    const g = ctx.createGain();
+    this.env(g, t, v, 0.003, 0.16);
+    o.connect(g); g.connect(this.musicBus);
+    o.start(t); o.stop(t + 0.22);
+  }
+
   private hat(t: number, v: number) {
     const ctx = this.ctx!;
     const n = ctx.createBufferSource(); n.buffer = this.noiseBuf; n.playbackRate.value = 2.6;
@@ -315,11 +438,111 @@ export class GameAudio {
     osc.start(t); osc.stop(t + o.dur + 0.08);
   }
 
+  /** Single chain-link click. Tiny, dry, and cheap enough to fire often. */
+  private tick(freq: number, vol: number) {
+    if (!this.ctx) return;
+    const ctx = this.ctx, t = ctx.currentTime;
+    const o = ctx.createOscillator();
+    o.type = 'square';
+    o.frequency.value = freq;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.02);
+    const f = ctx.createBiquadFilter();
+    f.type = 'highpass'; f.frequency.value = 1200;
+    o.connect(f); f.connect(g); g.connect(this.sfxBus);
+    o.start(t); o.stop(t + 0.03);
+  }
+
+  /** Damper creak — a short pitch-bent groan under load. */
+  private creak(power: number) {
+    if (!this.ctx) return;
+    const ctx = this.ctx, t = ctx.currentTime;
+    const o = ctx.createOscillator();
+    o.type = 'sawtooth';
+    const base = 120 + Math.random() * 70;
+    o.frequency.setValueAtTime(base, t);
+    o.frequency.exponentialRampToValueAtTime(base * 0.62, t + 0.16);
+    const f = ctx.createBiquadFilter();
+    f.type = 'bandpass'; f.frequency.value = 620; f.Q.value = 7;
+    const g = ctx.createGain();
+    this.env(g, t, 0.032 * power, 0.02, 0.15);
+    o.connect(f); f.connect(g); g.connect(this.sfxBus);
+    o.start(t); o.stop(t + 0.22);
+  }
+
+  /** Two- or three-note bird call, pitched high and panned wide. */
+  private birdCall(vol: number) {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const pan = Math.random() * 1.6 - 0.8;
+    const notes = 2 + Math.floor(Math.random() * 2);
+    const root = 2100 + Math.random() * 1400;
+    for (let i = 0; i < notes; i++) {
+      const at = ctx.currentTime + i * (0.09 + Math.random() * 0.05);
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      const f0 = root * (1 + i * 0.14);
+      o.frequency.setValueAtTime(f0, at);
+      o.frequency.exponentialRampToValueAtTime(f0 * 1.35, at + 0.05);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, at);
+      g.gain.linearRampToValueAtTime(0.05 * vol, at + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, at + 0.09);
+      let last: AudioNode = g;
+      if (ctx.createStereoPanner) {
+        const p = ctx.createStereoPanner(); p.pan.value = pan;
+        g.connect(p); last = p;
+      }
+      o.connect(g); last.connect(this.sfxBus);
+      o.start(at); o.stop(at + 0.12);
+    }
+  }
+
   bonk(power = 1, pan = 0) {
     // meaty cartoon impact: low thump + wood crack + tail
     this.tone({ freq: 220 * (1 + power * 0.2), freq2: 48, dur: 0.20, peak: 0.55 * power, type: 'sine', pan });
     this.burst({ dur: 0.13, peak: 0.45 * power, f0: 1800, f1: 260, q: 0.8, rate: 1.1, pan });
     this.tone({ freq: 880, freq2: 300, dur: 0.07, peak: 0.18 * power, type: 'square', pan });
+  }
+
+  /**
+   * MEGA BONK. Deliberately over the top: a sub-bass drop, a metallic clang
+   * with a long ring, a comedic descending whistle, and a delayed debris
+   * scatter. Four layered events so it lands as an *event*, not a louder hit.
+   */
+  megaBonk(power = 1, pan = 0) {
+    if (!this.ready || !this.ctx || !this.sfxOn) return;
+    // 1. sub-bass drop you feel more than hear
+    this.tone({ freq: 150, freq2: 26, dur: 0.55, peak: 0.72 * power, type: 'sine', pan });
+    // 2. the crack
+    this.burst({ dur: 0.20, peak: 0.60 * power, f0: 2600, f1: 180, q: 0.6, rate: 1.2, pan });
+    // 3. metallic clang with a long tail — two detuned partials ringing
+    const ctx = this.ctx, t = ctx.currentTime;
+    [523, 787, 1174].forEach((f, i) => {
+      const o = ctx.createOscillator();
+      o.type = 'triangle';
+      o.frequency.setValueAtTime(f * (1 + power * 0.05), t);
+      o.frequency.exponentialRampToValueAtTime(f * 0.88, t + 0.7);
+      const g = ctx.createGain();
+      this.env(g, t, (0.13 / (i + 1)) * power, 0.002, 0.75);
+      let last: AudioNode = g;
+      if (ctx.createStereoPanner) {
+        const p = ctx.createStereoPanner(); p.pan.value = clamp(pan, -1, 1);
+        g.connect(p); last = p;
+      }
+      o.connect(g); last.connect(this.sfxBus);
+      o.start(t); o.stop(t + 0.85);
+    });
+    // 4. cartoon descending whistle, slightly late so it reads as aftermath
+    this.tone({ freq: 1500, freq2: 240, dur: 0.42, peak: 0.11 * power, type: 'sine', pan: -pan });
+    // 5. debris scatter
+    for (let i = 0; i < 5; i++) {
+      setTimeout(() => this.burst({
+        dur: 0.09, peak: 0.10 * power, f0: 3000 - i * 380, f1: 900,
+        q: 4, rate: 1.5, pan: pan + (Math.random() - 0.5),
+      }), 90 + i * 70);
+    }
   }
   hitTaken(power = 1) {
     this.tone({ freq: 150, freq2: 40, dur: 0.28, peak: 0.5 * power, type: 'triangle' });

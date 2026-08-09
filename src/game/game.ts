@@ -28,7 +28,18 @@ import {
   type Ragdoll,
 } from './crash';
 import {
-  BonkType, resolveBonk, bonkFlavour, canBeBonked, riderMass,
+  StyleTrick, STYLE_TRICKS, spinSteps, scoreTrick, previewName,
+  type TrickTally,
+} from './tricks';
+import { getMode, type ModeId } from './modes';
+import { PerfGovernor, aiThinkInterval, LOD_BANDS } from './perf';
+import {
+  AI_TIERS, buildField, chaosRoll, tierFromLegacy,
+  type AiBrain, type AiTier,
+} from './ai';
+import { bus } from './events';
+import {
+  BonkType, resolveBonk, bonkFlavour, canBeBonked,
   type BonkBody, type BonkResult,
 } from './bonk';
 import {
@@ -138,6 +149,9 @@ export interface HudState {
   lastBonkT: number;   // display timer
   crashCause: string;  // why the player is currently on the floor
   transitions: { from: string; to: string; t: number }[];
+  fps: number;
+  perfTier: number;
+  particles: number;
   splitDelta: number;    // seconds vs personal best at last zone
   splitShow: number;     // display timer
   splitHasPb: boolean;
@@ -149,7 +163,7 @@ export interface HudState {
   finishData: null | {
     time: number; place: number; score: number; bonks: number; tricks: number;
     topSpeed: number; bestTrick: string; bestTrickScore: number; airTotal: number;
-    gap: number; splits: number[]; shortcuts: number;
+    gap: number; splits: number[]; shortcuts: number; nearMisses: number;
   };
 }
 
@@ -217,8 +231,29 @@ interface Racer {
   aiSeed: number;
   aiHopCd: number;
   aiCap: number;
+  /** seconds until this rival re-plans; distance-throttled */
+  thinkCd: number;
+  /** cached steering target between thinks */
+  aiSteer: number;
+  aiPedal: boolean;
+  aiBrake: boolean;
+  aiTuck: boolean;
   corner: number;      // 0..1 how well they hold the apex
   aggression: number;
+  /** resolved personality x difficulty */
+  brain: AiBrain | null;
+  /** chaos-agent mood, re-rolled periodically */
+  mood: { line: number; swing: number; send: number };
+  moodCd: number;
+  /** delayed-reaction buffer: what they *will* steer toward */
+  wantSteer: number;
+  /** committed to a shortcut this section? */
+  scCommit: number;
+  /** rad/s of trick rotation this rival is throwing, 0 = none */
+  trickSpin: number;
+  trickAngle: number;
+  /** LOD state: are the silhouette shells currently drawn? */
+  lodNear: boolean;
 }
 
 const RIVAL_NAMES = ['BRICK', 'VOLTA', 'MAGPIE', 'SPUD', 'NOODLE', 'TANKA', 'HUSK', 'PIP'];
@@ -266,6 +301,7 @@ export class Game {
   finishGap = Infinity;
   drafting = false;
   difficulty: Difficulty = 'pro';
+  aiTier: AiTier = 'pro';
   /** cumulative race time on entering each zone, this run */
   splits: number[] = [];
   /** personal-best splits to race against (empty = no PB yet) */
@@ -284,6 +320,13 @@ export class Game {
   private camSnap = false;
   // trick state
   airSpin = 0; airFlip = 0; airPose = 0; airPeak = 0; airStartY = 0;
+  /** seconds each style trick has been held this air */
+  styleHeld = new Map<StyleTrick, number>();
+  /** currently-held style tricks, for the pose blender */
+  styleActive = new Set<StyleTrick>();
+  /** tailwhip / barspin rotation accumulators */
+  whipAngle = 0;
+  barAngle = 0;
   trickBuffer: string[] = [];
   trickStepAudio = 0;
   frozen = false;
@@ -321,7 +364,7 @@ export class Game {
   private sparkPool!: ParticlePool;
   private smokePool!: ParticlePool;
   private sky!: THREE.Mesh;
-  private ridge!: THREE.Mesh;
+  private ridge!: THREE.Group;
   private clouds!: THREE.Group;
   private sun!: THREE.DirectionalLight;
   private hemi!: THREE.HemisphereLight;
@@ -339,8 +382,12 @@ export class Game {
   mobile = false;
   /** pause the render loop entirely while the garage owns the screen */
   suspended = false;
-  mountainId = 'shalebeck';
+  mountainId = 'shaleback';
   shortcutsHit = 0;
+  nearMisses = 0;
+  mode: ModeId = 'descent';
+  /** adaptive quality governor */
+  perfGov = new PerfGovernor();
   /** ?states in the URL shows the live state machine readout */
   debugStates = typeof window !== 'undefined'
     && window.location.search.includes('states');
@@ -354,6 +401,7 @@ export class Game {
   /** garage loadout effects; identity by default */
   perf: Perf = {
     topCap: 0, accel: 1, grip: 1, airRate: 1, landTol: 0, bonk: 1,
+    knockResist: 0, boostBurn: 1, boostPush: 1, mass: 86,
   };
   /** analog steer from touch, screen space; null = use the keyboard */
   steerAxis: number | null = null;
@@ -373,6 +421,7 @@ export class Game {
       introT: 0, introLine: '', introSub: '', introFade: 0,
       reactWindow: 0, holeshot: false,
       state: 'GROUNDED', stateLabel: 'ROLLING', stateT: 0, transitions: [],
+      fps: 60, perfTier: 0, particles: 0,
       pumpArmed: 0, lastBonk: '', lastBonkT: 0, crashCause: '',
       splitDelta: 0, splitShow: 0, splitHasPb: false,
       ghostActive: false, ghostGap: 0, reducedMotion: false,
@@ -398,8 +447,11 @@ export class Game {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, coarse ? 1.5 : 2));
     this.renderer.setSize(w, h);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.12;
+    // Cineon over ACES: ACES is a film-emulation curve that desaturates
+    // highlights toward photoreal. Cineon holds colour harder, which is what
+    // "stylised extreme sports" wants — bright, readable, poster-like.
+    this.renderer.toneMapping = THREE.CineonToneMapping;
+    this.renderer.toneMappingExposure = 1.24;
     this.renderer.domElement.style.display = 'block';
     this.container.appendChild(this.renderer.domElement);
 
@@ -414,15 +466,22 @@ export class Game {
     this.camera = new THREE.PerspectiveCamera(this.fov, w / h, 0.4, 6000);
     this.scene.add(this.camera);
 
-    this.hemi = new THREE.HemisphereLight(0xcfe6ff, 0x6a5535, 1.15);
+    // Stylised key/fill: a warm low sun for long shadows and strong terrain
+    // silhouettes, a saturated cool bounce so shaded faces read as blue
+    // rather than grey, and a hard rim to separate riders from the hill.
+    this.hemi = new THREE.HemisphereLight(0xbcd8ff, 0x7a5a30, 0.95);
     this.scene.add(this.hemi);
-    this.sun = new THREE.DirectionalLight(0xfff0d0, 1.75);
-    this.sun.position.set(-0.5, 1, 0.35);
+    this.sun = new THREE.DirectionalLight(0xffe6b0, 2.15);
+    this.sun.position.set(-0.5, 0.72, 0.35);
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
-    const rim = new THREE.DirectionalLight(0x9ec8ff, 0.45);
-    rim.position.set(0.6, 0.3, -1);
+    const rim = new THREE.DirectionalLight(0x88b4ff, 0.72);
+    rim.position.set(0.6, 0.25, -1);
     this.scene.add(rim);
+    // low warm bounce off the dirt, keeps undersides from going flat black
+    const bounce = new THREE.DirectionalLight(0xffb070, 0.32);
+    bounce.position.set(0.2, -1, 0.1);
+    this.scene.add(bounce);
 
     // sky
     const skyGeo = new THREE.SphereGeometry(3200, 24, 16);
@@ -475,32 +534,75 @@ export class Game {
     document.addEventListener('visibilitychange', this.onVisibility);
   }
 
-  private buildRidges(): THREE.Mesh {
-    const seg = 140;
-    const pos: number[] = [], col: number[] = [], idx: number[] = [];
-    const R = 2600;
-    const c = new THREE.Color();
-    for (let i = 0; i <= seg; i++) {
-      const a = (i / seg) * TAU;
-      const hgt = 180 + fbm1(i * 0.14, 4) * 240 + Math.max(0, fbm1(i * 0.045 + 20, 2)) * 420;
-      const x = Math.cos(a) * R, z = Math.sin(a) * R;
-      pos.push(x, -300, z);
-      pos.push(x, -300 + hgt, z);
-      c.setRGB(0.42, 0.52, 0.66).lerp(new THREE.Color(0.72, 0.80, 0.88), 0.25);
-      col.push(0.36, 0.45, 0.58);
-      col.push(c.r, c.g, c.b);
+  /**
+   * Layered mountain vistas. Three concentric rings at different distances,
+   * each paler and bluer than the one in front — cheap aerial perspective
+   * that gives the horizon real depth instead of one flat cut-out band.
+   */
+  private buildRidges(): THREE.Group {
+    const group = new THREE.Group();
+    const LAYERS = [
+      { R: 1750, base: -340, amp: 210, tall: 300, seed: 0.0, tint: 0.18, sharp: 1.5 },
+      { R: 2500, base: -320, amp: 300, tall: 520, seed: 51.3, tint: 0.46, sharp: 1.1 },
+      { R: 3300, base: -300, amp: 380, tall: 760, seed: 97.7, tint: 0.72, sharp: 0.85 },
+    ];
+    const HAZE = new THREE.Color(0.78, 0.86, 0.95);
+
+    // ---- MOUNTAIN SCALE. A hazy valley floor far below the course, so the
+    // drop reads as "thousands of metres down a mountain" rather than "a
+    // hillside with a skybox". Sits under everything and never occludes.
+    const floor = new THREE.Mesh(
+      new THREE.CircleGeometry(3400, 40).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({
+        color: new THREE.Color(0.60, 0.70, 0.80),
+        fog: false, depthWrite: false, transparent: true, opacity: 0.92,
+      }),
+    );
+    floor.position.y = -560;
+    floor.renderOrder = -9;
+    group.add(floor);
+
+    for (const L of LAYERS) {
+      const seg = 190;
+      const pos: number[] = [], col: number[] = [], idx: number[] = [];
+      const c = new THREE.Color();
+      for (let i = 0; i <= seg; i++) {
+        const a = (i / seg) * TAU;
+        // sharpened noise gives angular peaks rather than rolling lumps,
+        // which is what reads as "mountain silhouette"
+        const n1 = fbm1(i * 0.11 + L.seed, 4);
+        const n2 = Math.max(0, fbm1(i * 0.037 + L.seed + 20, 2));
+        const peak = Math.pow(Math.abs(n1), 1 / L.sharp) * Math.sign(n1);
+        const hgt = L.amp + peak * L.amp * 0.9 + n2 * L.tall;
+        const x = Math.cos(a) * L.R, z = Math.sin(a) * L.R;
+        pos.push(x, L.base, z);
+        pos.push(x, L.base + hgt, z);
+        // rock at the base, snow-lit toward the peaks, all pushed to haze
+        c.setRGB(0.30, 0.36, 0.48).lerp(HAZE, L.tint);
+        col.push(c.r, c.g, c.b);
+        const snow = clamp01((hgt - L.amp * 1.1) / (L.tall * 0.7));
+        c.setRGB(0.52, 0.60, 0.72).lerp(new THREE.Color(1, 1, 1), snow * 0.65)
+          .lerp(HAZE, L.tint);
+        col.push(c.r, c.g, c.b);
+      }
+      for (let i = 0; i < seg; i++) {
+        const a = i * 2, b = a + 1, d = a + 2, e = a + 3;
+        idx.push(a, d, b, b, d, e);
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+      g.setIndex(idx);
+      // Unlit is correct here and only here: these are atmospheric backdrop
+      // layers whose colour IS the aerial perspective. Lighting them would
+      // fight the haze gradient that sells the distance.
+      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+        vertexColors: true, side: THREE.DoubleSide, fog: false, depthWrite: false,
+      }));
+      m.renderOrder = -8;
+      group.add(m);
     }
-    for (let i = 0; i < seg; i++) {
-      const a = i * 2, b = a + 1, d = a + 2, e = a + 3;
-      idx.push(a, d, b, b, d, e);
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-    g.setIndex(idx);
-    const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, fog: false, depthWrite: false }));
-    m.renderOrder = -8;
-    return m;
+    return group;
   }
 
   private mkRacer(isPlayer: boolean, i: number): Racer {
@@ -525,7 +627,10 @@ export class Game {
       stCadence: 1, stLean: 1, stWeight: 0, stHead: 1, stTwitch: 1,
       place: i + 1, finished: false, finishTime: 0,
       skill: 0, aiOffset: 0, aiSeed: this.rng.range(0, 100), aiHopCd: 0, aiCap: 30,
+      thinkCd: 0, aiSteer: 0, aiPedal: true, aiBrake: false, aiTuck: false,
       corner: 1, aggression: 0,
+      brain: null, mood: { line: 1, swing: 1, send: 1 }, moodCd: 0,
+      wantSteer: 0, scCommit: 0, trickSpin: 0, trickAngle: 0, lodNear: true,
     };
   }
 
@@ -546,13 +651,22 @@ export class Game {
   applyDifficulty(d: Difficulty = this.difficulty) {
     this.difficulty = d;
     const T = DIFF_TUNING[d];
+    this.aiTier = tierFromLegacy(d);
+    const tier = AI_TIERS[this.aiTier];
+    // one contrasting personality per grid slot
+    const field = buildField(this.racers.length - 1, tier, 4242);
     let i = 0;
     for (const r of this.racers) {
       if (r.isPlayer) continue;
+      const brain = field[i];
       i++;
+      r.brain = brain;
+      r.name = brain.p.name;
+      r.colorHex = brain.p.colour;
+      r.aiCap = brain.cap;
       r.skill = T.skill + i * T.step + this.rng.range(-0.03, 0.03);
-      r.corner = 0.62 + this.rng.range(0, 0.38);          // apex discipline
-      r.aggression = clamp01(this.rng.range(0.3, 1.0) * T.aggro);
+      r.corner = brain.line;
+      r.aggression = brain.p.aggression;
       // Animation identity is tied to how they ride: a disciplined cornerer
       // leans hard and looks through the turn; an aggressive one sits
       // forward and fidgets. Stable across restarts via the racer's seed.
@@ -583,6 +697,8 @@ export class Game {
       r.chassisPitch = 0; r.pitchV = 0; r.contactF = true; r.contactR = true;
       r.pump = 0; r.pumpArmed = 0;
       r.swingT = 99; r.bonkCooldownPair = 0;
+      r.scCommit = 0; r.moodCd = 0; r.trickSpin = 0; r.trickAngle = 0;
+      r.thinkCd = 0; r.aiSteer = 0; r.wantSteer = 0;
       r.finished = false; r.finishTime = 0; r.place = i + 1;
       r.aiOffset = this.rng.range(-0.3, 0.3);
     });
@@ -608,6 +724,7 @@ export class Game {
     // dense, not sparse: JSON.stringify turns array holes into `null`, which
     // then slips past `!== undefined` guards and yields garbage deltas
     this.shortcutsHit = 0;
+    this.nearMisses = 0;
     this.scActive = null;
     this.splits = new Array(this.track.zones.length).fill(0);
     this.ghostSamples = [];
@@ -759,6 +876,16 @@ export class Game {
   private frame() {
     const dt = Math.min(this.clock.getDelta(), 0.05);
     this.lastDt = dt;
+    this.perfGov.sample(dt);
+    bus.time = this.time;
+    // last-resort visual shed: drop resolution only after particles, LOD and
+    // crowd have already been cut back
+    const wantPR = Math.min(
+      window.devicePixelRatio,
+      this.mobile ? 1.5 : this.perfGov.pixelRatio);
+    if (Math.abs(this.renderer.getPixelRatio() - wantPR) > 0.05) {
+      this.renderer.setPixelRatio(wantPR);
+    }
     // the garage owns the screen (and its own GL context) while open
     if (this.suspended) return;
     const phase = this.hud.phase;
@@ -828,6 +955,7 @@ export class Game {
     this.dirtPool.update(sdt);
     this.smokePool.update(sdt);
     this.sparkPool.update(sdt);
+    this.updateRiderLod();
     this.updateGhost();
     this.updatePopups(dt);
     this.updateRivalTags();
@@ -858,6 +986,7 @@ export class Game {
       gap: this.finishGap,
       splits: this.splits.slice(),
       shortcuts: this.shortcutsHit,
+      nearMisses: this.nearMisses,
     };
     this.setPhase('finish');
     this.startReplay();
@@ -896,7 +1025,8 @@ export class Game {
       this.boosting = true;
     } else if (!this.key('Space') || this.boost <= 0 || !boostOk) this.boosting = false;
     if (this.boosting) {
-      this.boost = Math.max(0, this.boost - 34 * dt);
+      // BOOST EFFICIENCY: a bigger tank drains slower, so it lasts longer
+      this.boost = Math.max(0, this.boost - 34 * this.perf.boostBurn * dt);
       if (this.boost <= 0) this.boosting = false;
     }
 
@@ -925,7 +1055,24 @@ export class Game {
       else this.airSpin = this.levelOut(this.airSpin, 11 * assist * dt);
       if (flipDir !== 0) this.airFlip += flipDir * 6.4 * ar * dt;
       else this.airFlip = this.levelOut(this.airFlip, 9 * assist * dt);
-      if (this.key('Space')) this.airPose += dt;
+      // ---- STYLE TRICKS: held poses on their own keys, so they stack
+      // freely with spins and flips instead of competing for input.
+      this.styleActive.clear();
+      let controlCost = 0;
+      for (const st of STYLE_TRICKS) {
+        if (!this.key(st.key)) continue;
+        this.styleActive.add(st.id);
+        this.styleHeld.set(st.id, (this.styleHeld.get(st.id) ?? 0) + dt);
+        controlCost += st.controlCost;
+        if (st.id === StyleTrick.SUPERMAN) this.airPose += dt;
+      }
+      // holding a big trick costs rotation authority — a real trade-off
+      if (controlCost > 0) {
+        const k = 1 - clamp01(controlCost) * 0.55;
+        this.airSpin += spinDir * 7.8 * ar * dt * (k - 1);
+        this.airFlip += flipDir * 6.4 * ar * dt * (k - 1);
+      }
+
       const rot = Math.abs(this.airSpin) + Math.abs(this.airFlip);
       const step = Math.floor(rot / (TAU * 0.5));
       if (step > this.trickStepAudio) { audio.trick(step); this.trickStepAudio = step; }
@@ -1051,7 +1198,9 @@ export class Game {
         }
         r.crash -= dt * (1 + r.recover * 1.25);
       } else {
-        r.crash -= dt;
+        // RECOVERY skill: a resilient rider on a high tier is back up in
+        // roughly half the time a rookie coward takes
+        r.crash -= dt * (r.brain ? r.brain.recovery : 1);
       }
       // ---- RAGDOLL: cause-specific tumble
       const rd = r.ragdoll;
@@ -1119,7 +1268,8 @@ export class Game {
     const speed01 = clamp01(r.v / 40);
     // throttle comes from the state, not the raw key
     if (RULES.throttle) a += pedalForce(speed01) * P.accel;
-    a += RULES.thrust;
+    // boost thrust scales with efficiency too
+    a += RULES.thrust * (r.state === BikeState.BOOSTING ? P.boostPush : 1);
     a -= RULES.retard * surf.grip;
     const dragK = DRAG_K * (inp.tuck ? TUCK_DRAG : 1);
     a -= dragK * r.v * r.v;
@@ -1449,6 +1599,10 @@ export class Game {
       }
       this.airSpin = this.airFlip = this.airPose = 0;
       this.airPeak = 0;
+      this.styleHeld.clear();
+      this.styleActive.clear();
+      this.whipAngle = 0;
+      this.barAngle = 0;
       this.slowmo = 0;
     } else {
       r.v -= impact * 0.10 * (1 - landQual) * 1.6;
@@ -1504,15 +1658,60 @@ export class Game {
     if (!live && this.hud.phase !== 'countdown') { this.poseRacer(r, dt, 0); return; }
     if (this.hud.phase === 'countdown') { this.poseRacer(r, dt, 0); return; }
 
+    // ---- THINK THROTTLE. Planning is the expensive half of the AI (two
+    // curvature samples, an obstacle sweep and a corner-limit solve). A
+    // rival 300m back doesn't need that at 60Hz — nobody can see them do it.
+    // Movement still integrates every frame, so nothing stutters.
+    r.thinkCd -= dt;
+    if (r.thinkCd > 0) {
+      this.stepRacer(r, dt, {
+        steer: r.aiSteer, pedal: r.aiPedal, brake: r.aiBrake,
+        tuck: r.aiTuck, hop: false, boost: false, live,
+      });
+      return;
+    }
+    const dist = Math.abs(r.s - this.player.s);
+    r.thinkCd = aiThinkInterval(dist) * this.perfGov.aiScale;
+
     const hw = trk.halfWidth(r.s);
     const look = r.s + 22 + r.v * 0.55;
     const curvAhead = trk.curvatureAt(look);
     // aim for the inside of the coming corner, plus personality offset
-    // the path curves toward +x when curvature is positive, so that side is the apex
-    let targetX = Math.sign(curvAhead) * Math.min(hw * 0.55, Math.abs(curvAhead) * 2200) * r.corner;
-    targetX += r.aiOffset * hw * 0.55;
-    // sloppier riders wander more
-    targetX += Math.sin(this.time * 0.7 + r.aiSeed) * hw * 0.12 * (1.6 - r.corner);
+    const B = r.brain;
+
+    // ---- CHAOS AGENT: re-roll intent every few seconds
+    r.moodCd -= dt;
+    if (B && B.p.id === 'chaos' && r.moodCd <= 0) {
+      r.moodCd = 1.6 + Math.random() * 2.8;
+      r.mood = chaosRoll(this.rng);
+    }
+    const moodLine = B?.p.id === 'chaos' ? r.mood.line : 1;
+    const moodSwing = B?.p.id === 'chaos' ? r.mood.swing : 1;
+
+    // ---- LINE SELECTION. Competence decides how close to the true apex
+    // they get; personality decides whether they care.
+    const apex = Math.sign(curvAhead) * Math.min(hw * 0.55, Math.abs(curvAhead) * 2200);
+    const quality = clamp01((B ? B.line : r.corner) * moodLine);
+    let targetX = apex * quality;
+    targetX += r.aiOffset * hw * 0.55 * (1 - quality * 0.6);
+    // erratic riders wander; disciplined ones hold their line
+    const wander = B ? B.wander : (1.6 - r.corner);
+    targetX += Math.sin(this.time * 0.7 + r.aiSeed) * hw * 0.12 * wander;
+
+    // ---- SHORTCUTS. Nerve x skill decides whether they commit, and they
+    // stay committed until the exit rather than dithering at the mouth.
+    if (B) {
+      if (r.scCommit > 0) {
+        r.scCommit -= dt;
+        const sc = trk.shortcutAt(r.s, r.x) ?? this.nearestShortcut(r.s);
+        if (sc) targetX = sc.side * (hw + sc.width * 0.5);
+      } else {
+        const sc = this.nearestShortcut(r.s);
+        if (sc && sc.s0 - r.s > 4 && sc.s0 - r.s < 26 && Math.random() < B.shortcut * dt * 3) {
+          r.scCommit = (sc.s1 - r.s) / Math.max(8, r.v) + 0.5;
+        }
+      }
+    }
     // avoid obstacles ahead
     const obs = trk.obstacles;
     for (let i = trk.firstObstacleAfter(r.s + 2); i < obs.length; i++) {
@@ -1534,32 +1733,59 @@ export class Game {
       }
     }
 
-    targetX = clamp(targetX, -hw * 0.86, hw * 0.86);
-    const steer = clamp((targetX - r.x) * 0.42 - r.vx * 0.18, -1, 1);
+    targetX = clamp(targetX, r.scCommit > 0 ? -hw * 2 : -hw * 0.86,
+      r.scCommit > 0 ? hw * 2 : hw * 0.86);
+    const rawSteer = clamp((targetX - r.x) * 0.42 - r.vx * 0.18, -1, 1);
+    // ---- REACTION DELAY. The honest way to make lower tiers beatable:
+    // they want the same thing, they just get there later.
+    r.wantSteer = rawSteer;
+    const react = B ? B.reaction : 0.2;
+    const steer = react > 0.01
+      ? damp(r.aiSteer, r.wantSteer, 1 / Math.max(0.02, react), dt)
+      : rawSteer;
 
     // rubber-band: keeps the pack breathing around the player without cheating.
     // bandK is per-difficulty so the band can't erase the difficulty choice.
     const rel = this.player.s - r.s;
-    const bk = DIFF_TUNING[this.difficulty].bandK;
-    const band = clamp(rel * 0.0024 * bk, -0.10 * bk, 0.15 * bk);
-    const skill = clamp(r.skill + band, SKILL_MIN, SKILL_MAX);
-    r.aiCap = 24.5 + skill * 15;
+    const bk = B ? B.bandK : DIFF_TUNING[this.difficulty].bandK;
+    const band2 = clamp(rel * 0.0024 * bk, -0.10 * bk, 0.15 * bk);
+    const skill = clamp(r.skill + band2, SKILL_MIN, SKILL_MAX);
+    // personality sets the ceiling; the band nudges it
+    r.aiCap = B ? B.cap * (1 + band2 * 0.5) : 24.5 + skill * 15;
     const wantSpeed = r.aiCap;
-    // weaker riders bleed more speed through corners, so gaps open naturally
-    const grip = 15 + r.corner * 9;
-    const cornerLimit = Math.abs(curvAhead) > 0.0002 ? Math.sqrt(grip / Math.abs(curvAhead)) : 999;
-    const pedal = r.v < wantSpeed;
-    const brake = r.v > Math.min(wantSpeed * 1.1, cornerLimit) && Math.abs(curvAhead) > 0.008;
+    // ---- CORNERING. Higher tiers believe in more grip, so they carry more
+    // speed through the same corner rather than simply having a higher cap.
+    const grip = B ? B.cornerGrip : 15 + r.corner * 9;
+    const cornerLimit = Math.abs(curvAhead) > 0.0002
+      ? Math.sqrt(grip / Math.abs(curvAhead)) : 999;
+    // ---- RISK MANAGEMENT. Cautious riders brake earlier for real hazards.
+    const caution = B ? B.caution : 0.5;
+    const hazardAhead = this.aiHazardAhead(r, 12 + r.v * 0.9);
+    const brakeFor = hazardAhead ? caution * 0.35 : 0;
+    const pedal = r.v < wantSpeed * (1 - brakeFor);
+    const brake = (r.v > Math.min(wantSpeed * 1.1, cornerLimit * (1 - caution * 0.12))
+      && Math.abs(curvAhead) > 0.008) || (hazardAhead && caution > 0.6);
     const tuck = !brake && Math.abs(curvAhead) < 0.005 && r.v > 18;
 
     // hop off lips
+    // ---- JUMPING. Sendy personalities hop lips; cautious ones roll them.
     r.aiHopCd -= dt;
     let hop = false;
     if (r.grounded && r.aiHopCd <= 0) {
       const h0 = trk.heightAt(r.s, r.x);
       const h1 = trk.heightAt(r.s + 6, r.x);
-      if (h1 - h0 > 0.9 && Math.random() < 0.5) { hop = true; r.aiHopCd = 0.8; }
+      const send = B ? B.p.sendiness * (0.5 + B.tier.trickSkill * 0.7) : 0.5;
+      if (h1 - h0 > 0.9 && Math.random() < send) { hop = true; r.aiHopCd = 0.8; }
     }
+    // ---- TRICKS. Airborne rivals throw rotations if the brain wants to.
+    if (!r.grounded && r.airTime > 0.22 && B && r.trickSpin === 0) {
+      if (Math.random() < B.trick) {
+        // ambition scales with skill: rookies quarter-spin, absurd do flips
+        r.trickSpin = (Math.random() < 0.5 ? -1 : 1)
+          * (2 + B.tier.trickSkill * 7);
+      }
+    }
+    if (r.grounded) r.trickSpin = 0;
     // ---- rivals swing at WHOEVER is next to them, player or not.
     // This is what makes the pack feel like a brawl instead of a convoy.
     r.bonkCd -= dt;
@@ -1571,9 +1797,19 @@ export class Game {
         if (Math.abs(other.y - r.y) > 2.4) continue;
         // more likely to swing at someone who's beating them
         const spite = other.s > r.s ? 1.5 : 0.7;
-        // combat sections crank everyone up
+        // combat sections crank everyone up; so does the mode
         const arena = this.track.zoneAt(r.s).combat ? 2.3 : 1;
-        if (Math.random() < r.aggression * spite * arena * dt * 2.4) {
+        const modeK = getMode(this.mode).aggressionScale;
+        const Bc = r.brain;
+        // THE BONKER hunts the player specifically; others take what's near
+        const focus = other.isPlayer ? 1 + (Bc ? Bc.playerFocus * 2.2 : 0) : 1;
+        // higher tiers pick their moment: a rider mid-corner or mid-air is
+        // far easier to put down, and good AI knows it
+        const vulnerable = (!other.grounded || Math.abs(other.vx) > 5) ? 1.8 : 1;
+        const timing = Bc ? 1 + (vulnerable - 1) * Bc.tier.combatSkill : 1;
+        const rate = (Bc ? Bc.swingRate : r.aggression)
+          * spite * arena * modeK * focus * timing * moodSwing;
+        if (Math.random() < rate * dt * 1.6) {
           r.bonkCd = 1.6;
           r.bonkSwing = 1;
           r.bonkDir = Math.sign(dx) || 1;
@@ -1583,6 +1819,8 @@ export class Game {
         break;
       }
     }
+    // cache the plan so throttled frames can replay it
+    r.aiSteer = steer; r.aiPedal = pedal; r.aiBrake = brake; r.aiTuck = tuck;
     this.stepRacer(r, dt, { steer, pedal, brake, tuck, hop, boost: false, live });
   }
 
@@ -1649,6 +1887,52 @@ export class Game {
     }
   }
 
+  /**
+   * Rider LOD. Outline shells double the mesh count per rig, which is fine
+   * for the player and a nearby duel but wasteful for a rival 200m back who
+   * is a few pixels tall. Toggling visibility keeps the silhouette where it
+   * matters and drops the cost where it doesn't.
+   */
+  private updateRiderLod() {
+    const p = this.player;
+    const cut = LOD_BANDS[1] * this.perfGov.lodScale;
+    for (const r of this.racers) {
+      const near = r.isPlayer || Math.abs(r.s - p.s) < cut;
+      if (r.lodNear === near) continue;
+      r.lodNear = near;
+      r.rig.root.traverse(o => {
+        const m = o as THREE.Mesh;
+        const mm = m.material as THREE.Material | undefined;
+        if (mm && (mm as THREE.MeshBasicMaterial).side === THREE.BackSide) {
+          o.visible = near;
+        }
+      });
+    }
+  }
+
+  /** Is there a solid hazard in this rival's path within `reach` metres? */
+  private aiHazardAhead(r: Racer, reach: number): boolean {
+    const list = this.track.obstacles;
+    for (let i = this.track.firstObstacleAfter(r.s); i < list.length; i++) {
+      const o = list[i];
+      if (o.s - r.s > reach) break;
+      if (o.gone || o.mass < 100) continue;
+      if (Math.abs(o.x - r.x) < o.r + 1.2) return true;
+    }
+    return false;
+  }
+
+  /** Next shortcut mouth at or ahead of `s`. */
+  private nearestShortcut(s: number) {
+    let best: import('./track').Shortcut | null = null;
+    for (const sc of this.track.shortcuts) {
+      if (sc.s1 < s) continue;
+      if (!best || sc.s0 < best.s0) best = sc;
+      if (sc.s0 > s + 60) break;
+    }
+    return best;
+  }
+
   /** Snapshot a racer as a bonk body. */
   private toBody(r: Racer): BonkBody {
     return {
@@ -1678,11 +1962,12 @@ export class Game {
     // upgrades from the garage make the player hit harder
     const gain = a.isPlayer ? this.perf.bonk : 1;
 
-    // ---- apply to the victim
-    b.vx += res.knockX * gain;
+    // ---- apply to the victim. STABILITY resists being thrown around.
+    const resist = b.isPlayer ? 1 - this.perf.knockResist : 1;
+    b.vx += res.knockX * gain * resist;
     b.v = Math.max(0, b.v * res.victimSpeedMul - res.knockS * 0.1);
-    if (res.knockY > 0.4 && b.grounded) { b.vy += res.knockY * gain; b.grounded = false; }
-    b.stun = Math.max(b.stun, 0.4 + res.power * 0.5);
+    if (res.knockY > 0.4 && b.grounded) { b.vy += res.knockY * gain * resist; b.grounded = false; }
+    b.stun = Math.max(b.stun, (0.4 + res.power * 0.5) * resist);
     b.leanV += Math.sign(res.knockX) * (8 + res.power * 10);
     b.suspV -= res.power * 5;
 
@@ -1730,7 +2015,9 @@ export class Game {
     crashed: boolean, deliberate: boolean,
   ) {
     const mega = res.type === BonkType.MEGA || res.type === BonkType.WALL;
-    audio.bonk(clamp(0.6 + res.power, 0.5, 1.5), clamp(-Math.sign(res.knockX) * 0.5, -1, 1));
+    const pan = clamp(-Math.sign(res.knockX) * 0.5, -1, 1);
+    if (res.type === BonkType.MEGA) audio.megaBonk(clamp(0.7 + res.power, 0.6, 1.5), pan);
+    else audio.bonk(clamp(0.6 + res.power, 0.5, 1.5), pan);
     audio.duck(mega ? 0.6 : 0.42, mega ? 0.55 : 0.38);
     this.hitStop = (mega ? 0.11 : 0.07) + res.power * 0.04;
     this.shakeAdd((mega ? 0.9 : 0.55) + res.power * 0.4);
@@ -2170,6 +2457,7 @@ export class Game {
       const dx = Math.abs(o.x - p.x);
       if (dx < o.r + 2.0 && dx > o.r + 0.55) {
         this.nearMissCd = 0.6;
+        this.nearMisses++;
         this.addScore(90 * this.comboMult());
         this.boost = Math.min(100, this.boost + 7);
         this.style = Math.min(1, this.style + 0.18);
@@ -2198,49 +2486,39 @@ export class Game {
   }
 
   // -------------------------------------------------------------------------
+  /** Build the tally of everything the rider did this air. */
+  private currentTally(air: number): TrickTally {
+    return {
+      spinSteps: spinSteps(this.airSpin),
+      flipCount: Math.floor(Math.abs(this.airFlip) / TAU + 0.18),
+      flipBack: this.airFlip < 0,
+      styles: this.styleHeld,
+      airTime: air,
+    };
+  }
+
   private scoreTrick(air: number, impact: number) {
-    const spins = Math.abs(this.airSpin) / TAU;
-    const flips = Math.abs(this.airFlip) / TAU;
-    const nSpin = Math.floor(spins + 0.32);
-    const nFlip = Math.floor(flips + 0.32);
-    const pose = this.airPose;
-    if (nSpin === 0 && nFlip === 0 && pose < 0.35 && air < 0.85) return;
+    const res = scoreTrick(this.currentTally(air));
+    if (!res) return;
 
-    const parts: string[] = [];
-    let pts = 0;
-    if (nFlip >= 1) {
-      const back = this.airFlip < 0;
-      const names = back
-        ? ['', 'BONKFLIP', 'DOUBLE BONKFLIP', 'TRIPLE BONKFLIP']
-        : ['', 'FRONT ROLL', 'DOUBLE FRONT ROLL', 'TRIPLE FRONT ROLL'];
-      parts.push(names[Math.min(nFlip, 3)]);
-      pts += nFlip * nFlip * 420;
-    }
-    if (nSpin >= 1) {
-      parts.push(`${nSpin * 360} WHIP`);
-      pts += nSpin * nSpin * 300;
-    }
-    if (pose > 0.35) { parts.push('SUPERBONK'); pts += Math.min(pose, 2.2) * 260; }
-    if (parts.length === 0 && air >= 0.85) { parts.push('BIG AIR'); pts += air * 180; }
-    if (parts.length > 1) pts *= 1.6;
-
-    const airMult = 1 + clamp01((air - 0.5) / 2.2) * 1.4;
-    pts *= airMult;
+    let pts = res.score;
     // clean landing bonus
-    const clean = clamp01(1 - impact / 34);
-    pts *= 0.75 + clean * 0.5;
+    pts *= 0.75 + clamp01(1 - impact / 34) * 0.5;
     pts *= this.comboMult();
 
-    const name = parts.join(' + ');
     this.tricksLanded++;
     this.addCombo();
     this.addScore(pts);
-    this.boost = Math.min(100, this.boost + clamp(14 + pts / 42, 10, 42));
+    this.boost = Math.min(100, this.boost + clamp(14 + pts / 42, 10, 46));
     this.style = 1;
-    if (pts > this.bestTrickScore) { this.bestTrickScore = pts; this.bestTrick = name; }
-    this.popup(`${name}  +${Math.round(pts)}`, 'trick', null, '#7ef7ff');
-    audio.chime(Math.min(10, nSpin * 3 + nFlip * 4));
-    audio.cheer(clamp01(pts / 1400));
+    if (pts > this.bestTrickScore) { this.bestTrickScore = pts; this.bestTrick = res.name; }
+
+    const label = res.bonusLabel
+      ? `${res.name}\n${res.bonusLabel}  +${Math.round(pts)}`
+      : `${res.name}  +${Math.round(pts)}`;
+    this.popup(label, 'trick', null, res.channels >= 3 ? '#c0f000' : '#7ef7ff');
+    audio.chime(Math.min(10, res.channels * 3 + Math.floor(pts / 500)));
+    audio.cheer(clamp01(pts / 1600));
   }
 
   /**
@@ -2402,19 +2680,67 @@ export class Game {
     if (r.isPlayer) {
       rig.spin.rotation.y = damp(rig.spin.rotation.y, this.airSpin, 30, dt);
       rig.flip.rotation.x = damp(rig.flip.rotation.x, this.airFlip, 26, dt);
-      // superman pose stacks on top of the weight shift
-      const poseAmt = clamp01(this.airPose * 3);
+      // ---- STYLE POSES. Each reads differently in silhouette, and they
+      // blend additively so combinations look like combinations.
+      const A = this.styleActive;
+      const on = (s: StyleTrick) => (A.has(s) ? 1 : 0);
+      const poseAmt = clamp01(this.airPose * 3) * on(StyleTrick.SUPERMAN);
+      const noHand = on(StyleTrick.NO_HANDER);
+      const oneFoot = on(StyleTrick.ONE_FOOTER);
+      const table = on(StyleTrick.TABLETOP);
+      const whip = on(StyleTrick.TAILWHIP);
+      const bars = on(StyleTrick.BARSPIN);
+      const D = 11;
+
+      // superman: body stretched out behind the bike
       rig.rider.position.z = damp(rig.rider.position.z,
         -poseAmt * 0.62 + r.weight * 0.17, 12, dt);
       rig.rider.position.y = damp(rig.rider.position.y,
         poseAmt * 0.26 - clamp01(-r.weight) * 0.07, 12, dt);
-      rig.legL.rotation.x = damp(rig.legL.rotation.x, poseAmt * 1.35, 12, dt);
-      rig.legR.rotation.x = damp(rig.legR.rotation.x, poseAmt * 1.35, 12, dt);
-      // torso pitch is resolved below, together with the weight shift
-    } else if (!r.grounded && r.airTime > 0.35) {
-      // rivals throw a little style too
+
+      // legs: superman extends both, one-footer kicks the right leg out
+      rig.legL.rotation.x = damp(rig.legL.rotation.x, poseAmt * 1.35, D, dt);
+      rig.legR.rotation.x = damp(rig.legR.rotation.x,
+        poseAmt * 1.35 + oneFoot * 1.15, D, dt);
+      rig.legR.rotation.z = damp(rig.legR.rotation.z, oneFoot * 0.85, D, dt);
+
+      // arms: no-hander throws both wide
+      rig.armL.rotation.z = damp(rig.armL.rotation.z, noHand * 1.25, D, dt);
+      rig.armR.rotation.z = damp(rig.armR.rotation.z, -noHand * 1.25, D, dt);
+      rig.armL.rotation.x = damp(rig.armL.rotation.x, -noHand * 0.5, D, dt);
+      rig.armR.rotation.x = damp(rig.armR.rotation.x, -noHand * 0.5, D, dt);
+
+      // tabletop: whole bike laid flat sideways under the rider
+      rig.bike.rotation.z = damp(rig.bike.rotation.z, table * 1.15, D, dt);
+      rig.bike.rotation.y = damp(rig.bike.rotation.y, table * 0.25, D, dt);
+
+      // tailwhip: the frame rotates around the steerer
+      this.whipAngle += whip * 13 * dt;
+      if (!whip) this.whipAngle = damp(this.whipAngle,
+        Math.round(this.whipAngle / TAU) * TAU, 9, dt);
+      rig.swingarm.rotation.y = this.whipAngle;
+
+      // barspin: bars and front wheel spin under the rider
+      this.barAngle += bars * 15 * dt;
+      if (!bars) this.barAngle = damp(this.barAngle,
+        Math.round(this.barAngle / TAU) * TAU, 11, dt);
+      rig.fork.rotation.y = r.steerVis + this.barAngle;
+    } else if (r.isPlayer) {
+      // grounded: unwind any leftover trick geometry
+      rig.bike.rotation.z = damp(rig.bike.rotation.z, 0, 12, dt);
+      rig.bike.rotation.y = damp(rig.bike.rotation.y, 0, 12, dt);
+      rig.swingarm.rotation.y = damp(rig.swingarm.rotation.y, 0, 12, dt);
+    }
+    if (!r.isPlayer && !r.grounded && r.trickSpin !== 0) {
+      // rival is committed to a trick: spin it, then unwind on touchdown
+      r.trickAngle += r.trickSpin * dt;
+      const flipper = Math.abs(r.trickSpin) > 6;
+      if (flipper) rig.flip.rotation.x = r.trickAngle;
+      else rig.spin.rotation.y = r.trickAngle;
+    } else if (!r.isPlayer && !r.grounded && r.airTime > 0.35) {
       rig.flip.rotation.x = damp(rig.flip.rotation.x, -Math.min(r.airTime, 0.9) * 0.55, 8, dt);
-    } else {
+    } else if (!r.isPlayer) {
+      r.trickAngle = damp(r.trickAngle, 0, 12, dt);
       rig.flip.rotation.x = damp(rig.flip.rotation.x, 0, 9, dt);
       rig.spin.rotation.y = damp(rig.spin.rotation.y, 0, 9, dt);
     }
@@ -2576,9 +2902,10 @@ export class Game {
 
     // roost from rear wheel — volume is a property of the state
     const stRoost = roostFactor(r.state);
+    const pScale = this.perfGov.particleScale;
     if (stRoost > 0 && r.v > 4) {
       const slip = Math.abs(r.vx) + Math.abs(inp.steer) * r.v * 0.14;
-      const rate = (2 + slip * 2.4 + r.v * 0.5) * surf.roost * stRoost;
+      const rate = (2 + slip * 2.4 + r.v * 0.5) * surf.roost * stRoost * pScale;
       this.roostAccum += rate * dt;
       const rear = trk.worldPos(r.s - 0.7, r.x, r.y + 0.15, _v1);
       trk.frameAt(r.s, _f1, _f2, _f3);
@@ -2597,7 +2924,7 @@ export class Game {
         });
       }
       // dust cloud
-      if (r.v > 12 && Math.random() < dt * (10 + r.v * 0.9) * surf.roost) {
+      if (r.v > 12 && Math.random() < dt * (10 + r.v * 0.9) * surf.roost * pScale) {
         this.smokePool.spawn({
           pos: rear.clone().addScaledVector(_f2, this.rng.range(-0.8, 0.8)),
           vel: _v2.copy(_f1).multiplyScalar(-r.v * 0.10).addScaledVector(_f3, this.rng.range(0.4, 1.6)).clone(),
@@ -2773,7 +3100,7 @@ export class Game {
     const bike = getBike(l.bike);
     // heft drives collision mass: a SLAB HEAVY under GRUD genuinely
     // out-muscles a WISP CARBON in a shoulder-check
-    p.mass = riderMass(bike.base.land + bike.base.bonk, bike.base.bonk);
+    p.mass = this.perf.mass;
     const old = p.rig;
     this.scene.remove(old.root, old.shadow, old.contactF, old.contactR);
     old.root.traverse(o => {
@@ -3019,7 +3346,9 @@ export class Game {
     const crashK = p.crash > 0 ? clamp01(p.crash / Math.max(0.4, p.crashMax)) : 0;
     const back = 7.6 + speed01 * 3.6 + air * 2.6 + (this.boosting ? -0.8 : 0)
       + crashK * 3.4;
-    const height = 2.75 + speed01 * 0.5 + air * 1.5 + aboveGround * 0.55
+    // camera drops toward the deck with speed: ground detail passes closer
+    // to the lens, which reads as faster than raising it would
+    const height = 2.75 - speed01 * 0.55 + air * 1.5 + aboveGround * 0.55
       + crashK * 2.2;
     const camS = p.s - back;
     const camX = p.x * 0.62;
@@ -3064,7 +3393,9 @@ export class Game {
     this.camRoll = damp(this.camRoll, targetRoll, 7, dt);
     this.camera.rotateZ(this.camRoll);
 
-    // fov punch — the surge is a big motion trigger, so scale it back too
+    // ---- SENSE OF SPEED. Three cues stack rather than relying on FOV
+    // alone: the lens widens, the camera drops toward the deck (so ground
+    // detail rips past closer to the eye), and it tucks in behind.
     const fovK = this.reducedMotion ? 0.35 : 1;
     const targetFov = 66 + (speed01 * 16 + (this.boosting ? 9 : 0)
       + (p.crash > 0 ? -6 : 0) + air * 3) * fovK;
@@ -3086,7 +3417,14 @@ export class Game {
     this.sky.position.copy(this.camera.position);
     this.clouds.position.set(this.camera.position.x, 0, this.camera.position.z);
     this.clouds.children.forEach(c => c.lookAt(this.camera.position.x, c.position.y, this.camera.position.z));
-    this.ridge.position.set(this.camera.position.x, this.camera.position.y - 210, this.camera.position.z);
+    // Ridges follow in XZ so they never run out, but only partially in Y —
+    // holding some world anchoring means the horizon visibly rises as you
+    // descend, which is what sells the height of the mountain.
+    this.ridge.position.set(
+      this.camera.position.x,
+      this.camera.position.y * 0.45 - 210,
+      this.camera.position.z,
+    );
 
     // fog / light per zone
     const zone = this.track.zoneAt(p.s);
@@ -3098,7 +3436,7 @@ export class Game {
     this.sun.target.position.copy(this.camera.position);
 
     // spectators
-    this.track.updateSpectators(p.s, this.time, dt);
+    this.track.updateSpectators(p.s, this.time, dt, this.perfGov.crowdScale);
 
     // crowd reaction near player
     this.hud.offTrack = Math.abs(p.x) > this.track.halfWidth(p.s) + 0.5;
@@ -3166,6 +3504,16 @@ export class Game {
       jersey: 0x7ef7ff, pants: 0x2a3f4a, helmet: 0xbfefff,
       frame: 0x7ef7ff, accent: 0xffffff, skin: 0x9fd0e0,
     });
+    // the ghost is translucent, so the silhouette shells would read as murky
+    // dark blobs rather than an outline — strip them before tinting
+    const shells: THREE.Object3D[] = [];
+    rig.root.traverse(o => {
+      const m = o as THREE.Mesh;
+      const mm = m.material as THREE.Material | undefined;
+      if (mm && (mm as THREE.MeshBasicMaterial).side === THREE.BackSide) shells.push(o);
+    });
+    for (const s of shells) s.parent?.remove(s);
+
     rig.root.traverse(o => {
       const m = (o as THREE.Mesh).material as THREE.Material | undefined;
       if (!m) return;
@@ -3407,7 +3755,12 @@ export class Game {
     h.stateT = p.stateT;
     h.pumpArmed = p.pumpArmed;
     if (h.lastBonkT > 0) h.lastBonkT -= this.lastDt;
-    if (this.debugStates) h.transitions = p.log.recent(8);
+    if (this.debugStates) {
+      h.transitions = p.log.recent(8);
+      h.fps = this.perfGov.fps;
+      h.perfTier = this.perfGov.tier;
+      h.particles = this.dirtPool.live + this.smokePool.live + this.sparkPool.live;
+    }
     h.recover = p.recover;
     h.recoverPulse = Math.max(0, h.recoverPulse - this.lastDt * 5);
     const z = this.track.zoneAt(p.s);
@@ -3418,13 +3771,7 @@ export class Game {
     }));
     // trick readout
     if (!p.grounded && p.airTime > 0.15) {
-      const sp = Math.round(Math.abs(this.airSpin) / TAU * 360 / 90) * 90;
-      const fl = Math.floor(Math.abs(this.airFlip) / TAU + 0.15);
-      const bits: string[] = [];
-      if (fl >= 1) bits.push(fl > 1 ? `${fl}x FLIP` : 'FLIP');
-      if (sp >= 180) bits.push(`${sp}`);
-      if (this.airPose > 0.3) bits.push('SUPERBONK');
-      h.trickText = bits.join(' + ');
+      h.trickText = previewName(this.currentTally(p.airTime));
       h.trickHold = clamp01(p.airTime / 2);
     } else { h.trickText = ''; h.trickHold = 0; }
 
@@ -3449,11 +3796,26 @@ export class Game {
       ? clamp01(this.introT / 2.2) * (1 - clamp01((this.introT - INTRO.jump) / 3))
       : 0;
 
+    const zoneNow = this.track.zoneAt(p.s);
+    const toLine = this.track.length - 20 - p.s;
+
     audio.update(this.lastDt, {
       gale,
       rivalNear: rvNear * rvNear,
       rivalPan: rvPan,
       rivalSpeed: rvSpeed,
+      // ---- bike
+      cadence: p.pedalling > 0.05
+        ? lerp(4.2, 11.5, clamp01(p.v / 26)) * p.stCadence / TAU : 0,
+      braking01: this.key('KeyS', 'ArrowDown') && p.grounded ? 1 : 0,
+      suspRate: clamp01(Math.abs(p.suspV) / 7),
+      // ---- environment, read from the section you're actually in
+      forest: clamp01(zoneNow.treeDensity / 1.6),
+      water: zoneNow.surface === 'mud' ? 0.85 : 0,
+      calm: clamp01(1 - zoneNow.crowd / 2.2) * (p.grounded ? 1 : 0.4),
+      // ---- the finale builds over the last 500m
+      homeStretch: h.phase === 'race'
+        ? clamp01(1 - toLine / 500) : 0,
       speed01: clamp01(p.v / 42),
       grounded: p.grounded,
       offTrack: h.offTrack,
@@ -3483,6 +3845,7 @@ const _yAxis = new THREE.Vector3(0, 1, 0);
 const _xAxis = new THREE.Vector3(1, 0, 0);
 const IDENTITY_PERF: Perf = {
   topCap: 0, accel: 1, grip: 1, airRate: 1, landTol: 0, bonk: 1,
+  knockResist: 0, boostBurn: 1, boostPush: 1, mass: 86,
 };
 const _v3 = new THREE.Vector3();
 const _v4 = new THREE.Vector3();

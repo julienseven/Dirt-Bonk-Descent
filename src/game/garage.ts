@@ -19,7 +19,7 @@ export const RIDERS: RiderDef[] = [
   {
     id: 'rusty', name: 'RUSTY VANE', tag: 'THE LOCAL',
     blurb: 'Knows every rut on this hill. Nothing rattles him.',
-    bias: { grip: 6, land: 6 }, skin: 0xd8a172, helmet: 0xfff0d0,
+    bias: { grip: 6, stab: 6 }, skin: 0xd8a172, helmet: 0xfff0d0,
   },
   {
     id: 'mox', name: 'MOX HALLIDAY', tag: 'THE BRAWLER',
@@ -29,12 +29,12 @@ export const RIDERS: RiderDef[] = [
   {
     id: 'juno', name: 'JUNO PIKE', tag: 'THE FLYER',
     blurb: 'Finds air where there is none. Lands most of it.',
-    bias: { air: 12, land: 5, top: -3 }, skin: 0xf0c39a, helmet: 0x00e5ff,
+    bias: { air: 12, stab: 5, top: -3 }, skin: 0xf0c39a, helmet: 0x00e5ff,
   },
   {
     id: 'bex', name: 'BEX ORTOLAN', tag: 'THE MISSILE',
     blurb: 'Tucks on everything. Brakes are a suggestion.',
-    bias: { top: 11, accel: 5, land: -5 }, skin: 0x6b4226, helmet: 0xff2e2e,
+    bias: { top: 11, accel: 5, stab: -5 }, skin: 0x6b4226, helmet: 0xff2e2e,
   },
   {
     id: 'kit', name: 'KIT SOLVANG', tag: 'THE SURGEON',
@@ -44,7 +44,7 @@ export const RIDERS: RiderDef[] = [
   {
     id: 'grud', name: 'GRUD', tag: 'THE UNIT',
     blurb: 'Enormous. Unbothered. Rolls through things.',
-    bias: { bonk: 15, land: 8, accel: -7 }, skin: 0xc98b5e, helmet: 0x111111,
+    bias: { bonk: 15, stab: 8, accel: -7 }, skin: 0xc98b5e, helmet: 0x111111,
   },
 ];
 
@@ -52,16 +52,19 @@ export const RIDERS: RiderDef[] = [
 export interface Stats {
   top: number;    // top speed
   accel: number;  // acceleration
-  grip: number;   // cornering
-  air: number;    // trick control
-  land: number;   // landing forgiveness
-  bonk: number;   // melee shove
+  grip: number;   // handling / cornering authority
+  stab: number;   // stability: landing forgiveness + resistance to being shoved
+  air: number;    // air control: rotation rate
+  bonk: number;   // bonk power
+  boost: number;  // boost efficiency: how far a full tank goes
 }
 
-export const STAT_KEYS: (keyof Stats)[] = ['top', 'accel', 'grip', 'air', 'land', 'bonk'];
+export const STAT_KEYS: (keyof Stats)[] =
+  ['top', 'accel', 'grip', 'stab', 'air', 'bonk', 'boost'];
 export const STAT_LABEL: Record<keyof Stats, string> = {
-  top: 'TOP SPEED', accel: 'ACCEL', grip: 'GRIP',
-  air: 'AIR CONTROL', land: 'LANDING', bonk: 'BONK FORCE',
+  top: 'TOP SPEED', accel: 'ACCELERATION', grip: 'HANDLING',
+  stab: 'STABILITY', air: 'AIR CONTROL', bonk: 'BONK POWER',
+  boost: 'BOOST EFFICIENCY',
 };
 
 export interface BikeDef {
@@ -77,42 +80,40 @@ export interface BikeDef {
   tubeScale: number;
 }
 
+/**
+ * FOUR FRAMES — each is the best bike on the mountain for a different way of
+ * playing, and clearly the wrong bike for the others. Totals are within a few
+ * points of each other; the shape is what differs.
+ *
+ *   HORNET   balanced          no weakness, no edge
+ *   SLAB     brawler           wins the canyon, loses the jumps
+ *   WISP     freerider         owns the air, blows away in a fight
+ *   BOLT     downhill missile  fastest in a line, hates tight corners
+ */
 export const BIKES: BikeDef[] = [
   {
-    id: 'clunker', name: 'THE CLUNKER', klass: 'STARTER',
-    blurb: 'Heavy, honest, and free. It will get you down.',
-    base: { top: 42, accel: 44, grip: 46, air: 40, land: 44, bonk: 50 },
-    price: 0, frame: 0x2fe6c8, accent: 0xffd400, wheelScale: 1, tubeScale: 1,
-  },
-  {
     id: 'hornet', name: 'HORNET 29', klass: 'ALL-ROUND',
-    blurb: 'Light, quick, no bad habits. The safe pick.',
-    base: { top: 58, accel: 62, grip: 58, air: 54, land: 52, bonk: 44 },
-    price: 900, frame: 0xffd400, accent: 0x1b1b22, wheelScale: 1.04, tubeScale: 0.92,
+    blurb: 'No weaknesses, no party tricks. Good everywhere, best nowhere.',
+    base: { top: 58, accel: 60, grip: 62, stab: 58, air: 56, bonk: 52, boost: 58 },
+    price: 0, frame: 0xffd400, accent: 0x1b1b22, wheelScale: 1.0, tubeScale: 1.0,
   },
   {
     id: 'slab', name: 'SLAB HEAVY', klass: 'BRAWLER',
-    blurb: 'Built from scaffolding. Wins every argument.',
-    base: { top: 52, accel: 40, grip: 54, air: 38, land: 74, bonk: 82 },
-    price: 1400, frame: 0xff3b30, accent: 0x111111, wheelScale: 1.1, tubeScale: 1.22,
+    blurb: 'Built from scaffolding. Wins every argument, loses every jump.',
+    base: { top: 52, accel: 40, grip: 50, stab: 88, air: 30, bonk: 92, boost: 46 },
+    price: 1300, frame: 0xff3b30, accent: 0x111111, wheelScale: 1.12, tubeScale: 1.26,
   },
   {
     id: 'wisp', name: 'WISP CARBON', klass: 'FREERIDE',
-    blurb: 'Barely there. Flicks like a thought.',
-    base: { top: 56, accel: 66, grip: 52, air: 84, land: 46, bonk: 30 },
-    price: 1900, frame: 0x9b30ff, accent: 0x00ff9d, wheelScale: 0.96, tubeScale: 0.8,
+    blurb: 'Barely there. Spins like a coin — and gets shoved like one.',
+    base: { top: 56, accel: 74, grip: 66, stab: 32, air: 94, bonk: 26, boost: 70 },
+    price: 1900, frame: 0x9b30ff, accent: 0x00ff9d, wheelScale: 0.94, tubeScale: 0.76,
   },
   {
     id: 'bolt', name: 'BOLT DH-9', klass: 'DOWNHILL',
-    blurb: 'A missile with bars. Point it and hold on.',
-    base: { top: 86, accel: 58, grip: 70, air: 56, land: 62, bonk: 46 },
-    price: 2800, frame: 0x0e6fd6, accent: 0xff2e88, wheelScale: 1.06, tubeScale: 1.02,
-  },
-  {
-    id: 'bonkyard', name: 'BONKYARD SPECIAL', klass: 'PROTOTYPE',
-    blurb: 'Welded from three dead bikes and pure spite.',
-    base: { top: 74, accel: 72, grip: 66, air: 70, land: 68, bonk: 74 },
-    price: 4200, frame: 0xff6a00, accent: 0x00e5ff, wheelScale: 1.08, tubeScale: 1.1,
+    blurb: 'A missile with handlebars. Point it downhill and stop steering.',
+    base: { top: 94, accel: 62, grip: 38, stab: 70, air: 44, bonk: 50, boost: 82 },
+    price: 2600, frame: 0x0e6fd6, accent: 0xff2e88, wheelScale: 1.08, tubeScale: 1.04,
   },
 ];
 
@@ -123,16 +124,25 @@ export interface UpgradeDef {
   part: string;
   desc: string;
   perLevel: number;
+  /** currency cost per level */
   costs: number[];
+  /** player level required per upgrade level — this is the real gate */
+  reqLevel: number[];
 }
 
+/**
+ * Upgrades are gated by RIDER LEVEL first and currency second. You cannot
+ * buy your way past the level requirement, so power comes from playing —
+ * currency only decides the order you unlock things in.
+ */
 export const UPGRADES: UpgradeDef[] = [
-  { id: 'top', name: 'DRIVETRAIN', part: 'TALL GEARING', desc: 'Raises the speed you can hold on the straights.', perLevel: 7, costs: [150, 300, 550, 900] },
-  { id: 'accel', name: 'CRANKS', part: 'LIGHT ARMS', desc: 'Get back up to pace faster out of corners.', perLevel: 7, costs: [140, 280, 520, 850] },
-  { id: 'grip', name: 'TYRES', part: 'SOFT COMPOUND', desc: 'More bite in the berms and on loose dirt.', perLevel: 7, costs: [160, 320, 580, 950] },
-  { id: 'air', name: 'BARS', part: 'WIDE RISER', desc: 'Faster rotation and finer control in the air.', perLevel: 7, costs: [130, 270, 500, 820] },
-  { id: 'land', name: 'SUSPENSION', part: 'COIL SHOCK', desc: 'Soak up bad landings that would otherwise end you.', perLevel: 7, costs: [170, 340, 600, 1000] },
-  { id: 'bonk', name: 'GLOVES', part: 'KNUCKLE PLATE', desc: 'Hit harder, launch rivals further, bank more boost.', perLevel: 7, costs: [120, 250, 460, 780] },
+  { id: 'top', name: 'DRIVETRAIN', part: 'TALL GEARING', desc: 'Raises the speed you can hold on the straights.', perLevel: 7, costs: [150, 300, 550, 900], reqLevel: [0, 2, 5, 9] },
+  { id: 'accel', name: 'CRANKS', part: 'LIGHT ARMS', desc: 'Get back up to pace faster out of corners.', perLevel: 7, costs: [140, 280, 520, 850], reqLevel: [0, 2, 5, 9] },
+  { id: 'grip', name: 'TYRES', part: 'SOFT COMPOUND', desc: 'More bite in the berms and on loose dirt.', perLevel: 7, costs: [160, 320, 580, 950], reqLevel: [0, 3, 6, 10] },
+  { id: 'air', name: 'BARS', part: 'WIDE RISER', desc: 'Faster rotation and finer control in the air.', perLevel: 7, costs: [130, 270, 500, 820], reqLevel: [1, 3, 6, 10] },
+  { id: 'stab', name: 'SUSPENSION', part: 'COIL SHOCK', desc: 'Soak up bad landings and shrug off hits that would put you down.', perLevel: 7, costs: [170, 340, 600, 1000], reqLevel: [1, 4, 7, 11] },
+  { id: 'bonk', name: 'GLOVES', part: 'KNUCKLE PLATE', desc: 'Hit harder, launch rivals further, bank more boost.', perLevel: 7, costs: [120, 250, 460, 780], reqLevel: [0, 3, 6, 10] },
+  { id: 'boost', name: 'FUEL CELL', part: 'BIG TANK', desc: 'Boost burns slower, so every tank carries you further.', perLevel: 7, costs: [150, 310, 560, 920], reqLevel: [2, 4, 7, 11] },
 ];
 
 export const MAX_LEVEL = 4;
@@ -186,12 +196,12 @@ export interface Loadout {
 
 export const DEFAULT_LOADOUT: Loadout = {
   rider: 'rusty',
-  bike: 'clunker',
+  bike: 'hornet',
   frame: 'stock',
   jersey: 'red',
   accent: 'gold',
   levels: {},
-  owned: ['clunker'],
+  owned: ['hornet'],
 };
 
 export const getRider = (id: string) => RIDERS.find(r => r.id === id) ?? RIDERS[0];
@@ -204,6 +214,12 @@ export function levelOf(l: Loadout, bikeId: string, stat: keyof Stats): number {
 export function upgradeCost(stat: keyof Stats, level: number): number | null {
   const u = UPGRADES.find(x => x.id === stat)!;
   return level >= MAX_LEVEL ? null : u.costs[level];
+}
+
+/** Rider level needed for the next tier of this upgrade. */
+export function upgradeReqLevel(stat: keyof Stats, level: number): number {
+  const u = UPGRADES.find(x => x.id === stat)!;
+  return level >= MAX_LEVEL ? 99 : u.reqLevel[level];
 }
 
 /** Final 0-100 stats from bike base + upgrades + rider bias. */
@@ -223,26 +239,37 @@ export function computeStats(l: Loadout): Stats {
 /** Gameplay multipliers derived from stats. Tuned to stay inside the
  *  physics envelope the balance harness validated: roughly +/-10%. */
 export interface Perf {
-  topCap: number;    // m/s added to the soft cap
-  accel: number;     // pedal force multiplier
-  grip: number;      // lateral grip multiplier
-  airRate: number;   // trick rotation multiplier
-  landTol: number;   // extra landing angle tolerance (radians)
-  bonk: number;      // bonk force / boost gain multiplier
+  topCap: number;      // m/s added to the soft cap
+  accel: number;       // pedal force multiplier
+  grip: number;        // lateral grip multiplier
+  airRate: number;     // trick rotation multiplier
+  landTol: number;     // extra landing angle tolerance (radians)
+  bonk: number;        // bonk force / boost gain multiplier
+  knockResist: number; // 0..1 reduction in knockback taken
+  boostBurn: number;   // multiplier on boost drain (lower = lasts longer)
+  boostPush: number;   // multiplier on boost thrust
+  mass: number;        // kg, for the bonk resolver
 }
 
 export function computePerf(l: Loadout): Perf {
   const s = computeStats(l);
   const n = (v: number) => (v - 50) / 50;   // -1 .. +1
   return {
-    topCap: n(s.top) * 4.5,
-    accel: 1 + n(s.accel) * 0.22,
-    grip: 1 + n(s.grip) * 0.16,
-    airRate: 1 + n(s.air) * 0.28,
-    landTol: n(s.land) * 0.16,
-    bonk: 1 + n(s.bonk) * 0.35,
+    topCap: n(s.top) * 5.0,
+    accel: 1 + n(s.accel) * 0.24,
+    grip: 1 + n(s.grip) * 0.20,
+    airRate: 1 + n(s.air) * 0.42,
+    // stability does double duty: landing forgiveness AND resisting shoves
+    landTol: n(s.stab) * 0.18,
+    knockResist: clamp01(n(s.stab) * 0.35),
+    bonk: 1 + n(s.bonk) * 0.38,
+    boostBurn: 1 - n(s.boost) * 0.30,
+    boostPush: 1 + n(s.boost) * 0.18,
+    mass: 78 + (s.stab - 50) * 0.42 + (s.bonk - 50) * 0.20,
   };
 }
+
+const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
 /** Resolve cosmetics into the colour set the rider builder wants. */
 export function loadoutColors(l: Loadout): RiderColors {

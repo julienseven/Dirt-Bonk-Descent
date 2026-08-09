@@ -37,15 +37,24 @@ export function makeDirtTexture(): THREE.Texture {
     g.fillStyle = grd;
     g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
   }
-  // gravel speckles
-  for (let i = 0; i < 5200; i++) {
+  // Gravel. Deliberately restrained: high-frequency speckle at strong alpha
+  // reads as noise rather than dirt, and shimmers badly once the surface is
+  // moving. Fewer, larger, softer stones hold together at speed.
+  for (let i = 0; i < 1700; i++) {
     const x = rng.range(0, S), y = rng.range(0, S);
-    const r = rng.range(0.5, 2.6);
+    const r = rng.range(1.4, 4.2);
     const v = rng.range(0, 1);
     g.fillStyle = v > 0.62
-      ? `rgba(255,255,250,${rng.range(0.14, 0.42)})`
-      : `rgba(30,24,18,${rng.range(0.10, 0.34)})`;
+      ? `rgba(255,252,244,${rng.range(0.05, 0.16)})`
+      : `rgba(38,30,22,${rng.range(0.05, 0.14)})`;
     g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  }
+  // a few larger embedded stones give scale reference without density
+  for (let i = 0; i < 260; i++) {
+    const x = rng.range(0, S), y = rng.range(0, S);
+    const r = rng.range(3.5, 8);
+    g.fillStyle = `rgba(${rng.chance(0.5) ? '210,200,184' : '52,42,32'},${rng.range(0.06, 0.13)})`;
+    g.beginPath(); g.ellipse(x, y, r, r * rng.range(0.6, 1), rng.range(0, 3), 0, Math.PI * 2); g.fill();
   }
   // directional drag streaks (tyre wear)
   for (let i = 0; i < 160; i++) {
