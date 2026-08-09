@@ -4,6 +4,10 @@ import Hud from './ui/Hud';
 import TouchControls from './ui/TouchControls';
 import { Menu, Pause, Results, Loading } from './ui/Screens';
 import TunePanel from './ui/TunePanel';
+import Garage from './ui/Garage';
+import { runPayout, type Loadout } from './game/garage';
+import MountainSelect from './ui/MountainSelect';
+import { runXp, levelFromXp } from './game/mountains';
 import { audio } from './game/audio';
 import {
   loadSave, writeSave, commitRun, type SaveData, type Difficulty, type RecordResult,
@@ -29,6 +33,11 @@ function GameApp() {
   const [pct, setPct] = useState(0);
   const [save, setSave] = useState<SaveData>(() => loadSave());
   const [lastResult, setLastResult] = useState<RecordResult | null>(null);
+  const [garage, setGarage] = useState(false);
+  const [picker, setPicker] = useState(false);
+  const [payout, setPayout] = useState(0);
+  const [xpGain, setXpGain] = useState(0);
+  const [levelUp, setLevelUp] = useState(false);
   const touch = useRef(isTouch());
   const saveRef = useRef(save);
   saveRef.current = save;
@@ -50,6 +59,8 @@ function GameApp() {
       g.ghostData = s.ghost[s.difficulty] ?? null;
       g.showGhost = s.showGhost;
       g.reducedMotion = s.reducedMotion;
+      g.applyLoadout(s.loadout);
+      if (s.mountain !== 'shalebeck') g.loadMountain(s.mountain);
       audio.setMusicEnabled(s.music);
       audio.setSfxEnabled(s.sfx);
       g.start();
@@ -78,12 +89,34 @@ function GameApp() {
       time: d.time, score: d.score, place: d.place,
       topSpeed: d.topSpeed, splits: d.splits, date: Date.now(),
     }, game.takeGhost());
+    // scrap + XP earned this run
+    const earned = runPayout(d.place, d.score, d.tricks, d.bonks);
+    const gainedXp = runXp({
+      place: d.place, score: d.score, tricks: d.tricks, bonks: d.bonks,
+      shortcuts: d.shortcuts, length: game.track.length,
+    });
+    const before = levelFromXp(next.xp).level;
+    next.coins += earned;
+    next.xp += gainedXp;
+    const after = levelFromXp(next.xp).level;
+    // per-mountain best time
+    const mid = next.mountain;
+    const pb = next.mountainBest[mid];
+    if (pb === undefined || d.time < pb) {
+      next.mountainBest = { ...next.mountainBest, [mid]: d.time };
+    }
+    setPayout(earned);
+    setXpGain(gainedXp);
+    setLevelUp(after > before);
     setSave(next);
     setLastResult(res);
     // race the new benchmark next run
     game.pbSplits = next.best[next.difficulty]?.splits ?? [];
     game.ghostData = next.ghost[next.difficulty] ?? null;
   }, [phase, game]);
+
+  // stop the race renderer while the garage's own GL context is on screen
+  useEffect(() => { if (game) game.suspended = garage; }, [game, garage]);
 
   const patch = useCallback((p: Partial<SaveData>) => {
     setSave(prev => {
@@ -102,11 +135,43 @@ function GameApp() {
     }
   }, [game, patch]);
 
+  const setLoadout = useCallback((l: Loadout) => {
+    patch({ loadout: l });
+    game?.applyLoadout(l);
+  }, [game, patch]);
+
+  const buy = useCallback((cost: number, l: Loadout) => {
+    setSave(prev => {
+      const next = { ...prev, coins: Math.max(0, prev.coins - cost), loadout: l };
+      writeSave(next);
+      return next;
+    });
+    game?.applyLoadout(l);
+  }, [game]);
+
+  const pickMountain = useCallback((id: string) => {
+    patch({ mountain: id });
+    game?.loadMountain(id);
+    setPicker(false);
+  }, [game, patch]);
+
   const startRace = useCallback(() => {
     if (!game) return;
     setLastResult(null);
+    setPayout(0);
+    setXpGain(0);
+    setLevelUp(false);
     game.pbSplits = saveRef.current.best[saveRef.current.difficulty]?.splits ?? [];
     game.startRace();
+  }, [game]);
+
+  /** Re-run without replaying the cold open. */
+  const rerun = useCallback(() => {
+    if (!game) return;
+    setLastResult(null);
+    setPayout(0); setXpGain(0); setLevelUp(false);
+    game.pbSplits = saveRef.current.best[saveRef.current.difficulty]?.splits ?? [];
+    game.quickRestart();
   }, [game]);
 
   const toMenu = useCallback(() => {
@@ -120,13 +185,28 @@ function GameApp() {
       <div ref={mount} className="absolute inset-0" />
       {!game && <Loading pct={pct} />}
       {game && <Hud game={game} />}
-      {game && (phase === 'race' || phase === 'countdown') && (
+      {game && (phase === 'race' || phase === 'countdown' || phase === 'intro') && (
         <TouchControls game={game} visible={touch.current} />
       )}
-      {game && phase === 'menu' && (
+      {game && garage && (
+        <Garage
+          loadout={save.loadout}
+          coins={save.coins}
+          reducedMotion={save.reducedMotion}
+          onChange={setLoadout}
+          onBuy={buy}
+          onClose={() => setGarage(false)}
+        />
+      )}
+      {game && picker && (
+        <MountainSelect save={save} onPick={pickMountain} onClose={() => setPicker(false)} />
+      )}
+      {game && phase === 'menu' && !garage && !picker && (
         <Menu
           save={save}
           onStart={startRace}
+          onGarage={() => setGarage(true)}
+          onMountains={() => setPicker(true)}
           onDifficulty={chooseDifficulty}
           onToggleMusic={v => { patch({ music: v }); audio.setMusicEnabled(v); }}
           onToggleSfx={v => { patch({ sfx: v }); audio.setSfxEnabled(v); }}
@@ -135,10 +215,12 @@ function GameApp() {
         />
       )}
       {game && phase === 'paused' && (
-        <Pause onResume={() => game.togglePause()} onRestart={startRace} onQuit={toMenu} />
+        <Pause onResume={() => game.togglePause()} onRestart={rerun} onQuit={toMenu} />
       )}
       {game && phase === 'finish' && (
-        <Results game={game} save={save} result={lastResult} onRestart={startRace} onMenu={toMenu} />
+        <Results game={game} save={save} result={lastResult} payout={payout}
+          xpGain={xpGain} levelUp={levelUp}
+          onRestart={rerun} onMenu={toMenu} onGarage={() => { toMenu(); setGarage(true); }} />
       )}
     </div>
   );

@@ -4,6 +4,20 @@ import { formatTime } from '../game/core';
 
 const PLACE = ['', '1st', '2nd', '3rd', '4th', '5th', '6th'];
 
+/** colour per bonk type, matching the resolver's palette */
+const BONK_TINT: Record<string, string> = {
+  'SIDE BONK': '#ffd400', 'FRONT BONK': '#ff9500', 'REAR BONK': '#7ef7ff',
+  'WALL BONK': '#ff6a00', 'DOUBLE BONK': '#c0f000', 'MEGA BONK': '#ff2e88',
+};
+
+/** colour per state, so transitions are readable at a glance */
+const STATE_TINT: Record<string, string> = {
+  GROUNDED: '#cfd6e0', ACCELERATING: '#7ef7c8', BRAKING: '#ff9500',
+  DRIFTING: '#7ef7ff', AIRBORNE: '#9fd0ff', TRICKING: '#ff2e88',
+  LANDING: '#ffd400', BOOSTING: '#ff4de3', CRASHING: '#ff4d4d',
+  STUNNED: '#ff6a6a', RECOVERING: '#c0f000', FINISHED: '#ffffff',
+};
+
 export default function Hud({ game }: { game: Game }) {
   const root = useRef<HTMLDivElement>(null);
   const speedNum = useRef<HTMLDivElement>(null);
@@ -15,6 +29,8 @@ export default function Hud({ game }: { game: Game }) {
   const comboNum = useRef<HTMLDivElement>(null);
   const comboBar = useRef<HTMLDivElement>(null);
   const boostFill = useRef<HTMLDivElement>(null);
+  const pumpRing = useRef<HTMLDivElement>(null);
+  const bonkTag = useRef<HTMLDivElement>(null);
   const boostWrap = useRef<HTMLDivElement>(null);
   const boostRdy = useRef<HTMLDivElement>(null);
   const trackBar = useRef<HTMLDivElement>(null);
@@ -34,6 +50,17 @@ export default function Hud({ game }: { game: Game }) {
   const hazWrap = useRef<HTMLDivElement>(null);
   const hazArrow = useRef<HTMLDivElement>(null);
   const hazEdge = useRef<HTMLDivElement>(null);
+  const introWrap = useRef<HTMLDivElement>(null);
+  const introLine = useRef<HTMLDivElement>(null);
+  const introSub = useRef<HTMLDivElement>(null);
+  const barTop = useRef<HTMLDivElement>(null);
+  const barBot = useRef<HTMLDivElement>(null);
+  const reactWrap = useRef<HTMLDivElement>(null);
+  const reactBar = useRef<HTMLDivElement>(null);
+  const dbgWrap = useRef<HTMLDivElement>(null);
+  const dbgState = useRef<HTMLDivElement>(null);
+  const dbgT = useRef<HTMLDivElement>(null);
+  const dbgLog = useRef<HTMLDivElement>(null);
   const splitTxt = useRef<HTMLDivElement>(null);
   const ghostTxt = useRef<HTMLDivElement>(null);
   const stretchBar = useRef<HTMLDivElement>(null);
@@ -48,6 +75,43 @@ export default function Hud({ game }: { game: Game }) {
     const loop = () => {
       raf = requestAnimationFrame(loop);
       const h = game.hud;
+
+      // ---- cold open overlay (drawn even though the race HUD is hidden)
+      const intro = h.phase === 'intro';
+      if (introWrap.current) {
+        introWrap.current.style.opacity = intro ? '1' : '0';
+        introWrap.current.style.pointerEvents = 'none';
+      }
+      if (intro) {
+        // letterbox slides in, then retracts as the racers launch
+        const bars = Math.min(h.introFade, 1) * (h.introLine === 'SEND IT.' ? 0.35 : 1);
+        if (barTop.current) barTop.current.style.height = `${bars * 11}vh`;
+        if (barBot.current) barBot.current.style.height = `${bars * 11}vh`;
+        if (introLine.current && introLine.current.textContent !== h.introLine) {
+          introLine.current.textContent = h.introLine;
+          if (h.introLine) {
+            introLine.current.animate(
+              [{ transform: 'scale(2.2)', opacity: 0 }, { transform: 'scale(1)', opacity: 1 }],
+              { duration: 380, easing: 'cubic-bezier(.15,1.5,.4,1)' });
+          }
+        }
+        if (introLine.current) {
+          const send = h.introLine === 'SEND IT.';
+          introLine.current.style.fontSize = send ? 'clamp(46px,11vw,140px)' : 'clamp(60px,13vw,170px)';
+          introLine.current.style.color = send ? '#c0f000' : '#ffffff';
+        }
+        if (introSub.current && introSub.current.textContent !== h.introSub) {
+          introSub.current.textContent = h.introSub;
+        }
+        if (introSub.current) introSub.current.style.opacity = h.introSub ? '1' : '0';
+        // reaction window
+        const rw = h.reactWindow;
+        if (reactWrap.current) {
+          reactWrap.current.style.opacity = rw > 0 && !h.holeshot ? '1' : '0';
+        }
+        if (reactBar.current) reactBar.current.style.width = `${rw * 100}%`;
+      }
+
       const racing = h.phase === 'race' || h.phase === 'countdown' || h.phase === 'paused';
       if (root.current) root.current.style.opacity = racing || h.phase === 'finish' ? '1' : '0';
       if (!racing && h.phase !== 'finish') return;
@@ -73,9 +137,26 @@ export default function Hud({ game }: { game: Game }) {
         comboWrap.current.style.opacity = on ? '1' : '0';
         comboWrap.current.style.transform = `translateY(${on ? 0 : -10}px) scale(${on ? 1 : 0.9})`;
       }
+      // last bonk type, under the combo counter
+      if (bonkTag.current) {
+        const on = h.lastBonkT > 0;
+        bonkTag.current.style.opacity = on ? String(Math.min(1, h.lastBonkT)) : '0';
+        if (on && bonkTag.current.textContent !== h.lastBonk) {
+          bonkTag.current.textContent = h.lastBonk;
+          bonkTag.current.style.color = BONK_TINT[h.lastBonk] ?? '#ffd400';
+          bonkTag.current.animate(
+            [{ transform: 'scale(1.4) skewX(-10deg)' }, { transform: 'scale(1) skewX(-10deg)' }],
+            { duration: 260, easing: 'cubic-bezier(.2,1.6,.4,1)' });
+        }
+      }
       if (comboNum.current) comboNum.current.textContent = `${h.combo}x`;
       if (comboBar.current) comboBar.current.style.width = `${h.comboTime * 100}%`;
 
+      // pump charge rides alongside the boost gauge
+      if (pumpRing.current) {
+        pumpRing.current.style.opacity = h.pumpArmed > 0.04 ? '1' : '0';
+        pumpRing.current.style.height = `${Math.min(100, h.pumpArmed * 100)}%`;
+      }
       if (boostFill.current) boostFill.current.style.height = `${h.boost}%`;
       if (boostWrap.current) boostWrap.current.style.filter = h.boosting ? 'drop-shadow(0 0 14px #ff4de3)' : 'none';
       if (boostRdy.current) boostRdy.current.style.opacity = h.boost > 25 && !h.boosting ? '1' : '0';
@@ -137,6 +218,25 @@ export default function Hud({ game }: { game: Game }) {
       }
       if (offTxt.current) offTxt.current.style.opacity = h.offTrack && h.phase === 'race' ? '1' : '0';
       if (draftTxt.current) draftTxt.current.style.opacity = h.drafting ? '1' : '0';
+
+      // state machine debug readout
+      if (dbgWrap.current) {
+        const on = game.debugStates;
+        dbgWrap.current.style.display = on ? 'block' : 'none';
+        if (on) {
+          if (dbgState.current && dbgState.current.textContent !== h.state) {
+            dbgState.current.textContent = h.state;
+            dbgState.current.style.color = STATE_TINT[h.state] ?? '#ffffff';
+          }
+          if (dbgT.current) dbgT.current.textContent = `${h.stateLabel}  ${h.stateT.toFixed(2)}s`;
+          if (dbgLog.current) {
+            const txt = h.transitions
+              .slice().reverse()
+              .map(x => `${x.t.toFixed(2)}  ${x.from} → ${x.to}`).join('\n');
+            if (dbgLog.current.textContent !== txt) dbgLog.current.textContent = txt;
+          }
+        }
+      }
 
       // split delta vs personal best
       if (splitTxt.current) {
@@ -203,6 +303,38 @@ export default function Hud({ game }: { game: Game }) {
   }, [game]);
 
   return (
+    <>
+    {/* ---------- cold open ---------- */}
+    <div ref={introWrap} className="pointer-events-none absolute inset-0 select-none opacity-0 transition-opacity duration-500"
+      style={{ zIndex: 7 }}>
+      <div ref={barTop} className="absolute inset-x-0 top-0 bg-black"
+        style={{ height: 0, transition: 'height .5s cubic-bezier(.2,.9,.25,1)' }} />
+      <div ref={barBot} className="absolute inset-x-0 bottom-0 bg-black"
+        style={{ height: 0, transition: 'height .5s cubic-bezier(.2,.9,.25,1)' }} />
+
+      <div className="absolute inset-x-0 top-[38%] flex flex-col items-center">
+        <div ref={introLine} className="hud-big text-center leading-[0.85] text-white"
+          style={{ textShadow: '0 8px 0 #000, 0 0 70px rgba(0,0,0,.9)' }} />
+        <div ref={introSub}
+          className="hud-label mt-3 !text-[13px] !tracking-[.44em] text-white/75 opacity-0 transition-opacity duration-300"
+          style={{ textShadow: '0 2px 6px #000' }} />
+      </div>
+
+      {/* reaction window */}
+      <div ref={reactWrap} className="absolute inset-x-0 bottom-[19%] flex flex-col items-center opacity-0 transition-opacity duration-150">
+        <div className="hud-big text-[26px] text-[#c0f000]" style={{ textShadow: '0 3px 0 #000' }}>
+          HIT <span className="rounded-[4px] border-b-[3px] border-black/70 bg-white px-2 text-black">W</span> NOW
+        </div>
+        <div className="mt-2 h-[8px] w-[240px] border-2 border-black/70 bg-black/60">
+          <div ref={reactBar} className="h-full bg-[#c0f000]" style={{ width: '100%' }} />
+        </div>
+      </div>
+
+      <div className="absolute bottom-4 right-5">
+        <span className="hud-label !text-[9px] text-white/40">ESC TO SKIP</span>
+      </div>
+    </div>
+
     <div ref={root} className="pointer-events-none absolute inset-0 select-none transition-opacity duration-300" style={{ zIndex: 6 }}>
       {/* screen effects */}
       <div ref={vign} className="absolute inset-0" style={{
@@ -250,6 +382,8 @@ export default function Hud({ game }: { game: Game }) {
             <div ref={comboBar} className="h-full bg-[#ffd400]" style={{ width: '100%' }} />
           </div>
         </div>
+        <div ref={bonkTag} className="hud-big text-[17px] leading-none opacity-0"
+          style={{ transform: 'skewX(-10deg)', textShadow: '0 2px 0 #000', transition: 'opacity .2s' }} />
       </div>
 
       {/* right: descent bar */}
@@ -288,6 +422,10 @@ export default function Hud({ game }: { game: Game }) {
           <div ref={boostWrap} className="relative h-[160px] w-[26px] overflow-hidden rounded-sm border-2 border-black/70 bg-black/55">
             <div ref={boostFill} className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#ff8a00] via-[#ff2e88] to-[#7ef7ff]" style={{ height: '0%', transition: 'height .08s linear' }} />
             <div className="absolute inset-0" style={{ background: 'repeating-linear-gradient(0deg,transparent 0 12px,rgba(0,0,0,.55) 12px 14px)' }} />
+          </div>
+          <div className="relative mx-auto mt-[3px] h-[5px] w-[26px] border border-black/60 bg-black/50">
+            <div ref={pumpRing} className="absolute bottom-0 left-0 w-full bg-[#c0f000] opacity-0"
+              style={{ height: '0%', transition: 'opacity .15s' }} />
           </div>
           <div className="hud-label mt-1">BOOST</div>
           <div ref={boostRdy} className="hud-big text-[13px] text-[#ffd400] opacity-0 transition-opacity">SPACE!</div>
@@ -337,6 +475,15 @@ export default function Hud({ game }: { game: Game }) {
         </div>
       </div>
 
+      {/* state machine debug (?states) */}
+      <div ref={dbgWrap} className="absolute left-5 top-[128px] hidden border-l-4 border-[#2fe6c8] bg-black/78 px-3 py-2 backdrop-blur">
+        <div className="hud-label !text-[8px]">BIKE STATE</div>
+        <div ref={dbgState} className="hud-big text-[22px] leading-none text-white">GROUNDED</div>
+        <div ref={dbgT} className="hud-mono mt-[2px] text-[10px] text-white/55" />
+        <div className="hud-label mt-2 !text-[8px]">TRANSITIONS</div>
+        <div ref={dbgLog} className="hud-mono whitespace-pre text-[9px] leading-[1.5] text-[#7ef7c8]" />
+      </div>
+
       {/* hazard telegraph */}
       <div ref={hazEdge} className="absolute inset-y-0 left-0 w-full opacity-0" style={{ transition: 'opacity .1s' }} />
       <div ref={hazWrap} className="absolute left-1/2 top-[60%] flex items-center gap-3 opacity-0"
@@ -346,5 +493,6 @@ export default function Hud({ game }: { game: Game }) {
         <div className="hud-big text-[20px] leading-none text-[#ff9500]" style={{ textShadow: '0 3px 0 #000' }}>HAZARD</div>
       </div>
     </div>
+    </>
   );
 }

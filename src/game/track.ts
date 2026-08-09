@@ -76,6 +76,20 @@ export interface Spectator {
   scale: number;
 }
 
+/**
+ * A risky off-piste line that cuts a corner. Riding it end-to-end grants a
+ * progress bonus equal to the distance it genuinely saves; bailing out early
+ * gives nothing, so it's a commitment.
+ */
+export interface Shortcut {
+  s0: number;         // entry
+  s1: number;         // exit
+  side: number;       // -1 / +1 in track space
+  width: number;      // rideable channel width beyond the tape
+  saving: number;     // metres of progress on a clean run
+  name: string;
+}
+
 const _v = new THREE.Vector3();
 const _m4 = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
@@ -118,6 +132,7 @@ export class Track {
   obstacles: Obstacle[] = [];
   spectators: Spectator[] = [];
   gantries: { s: number }[] = [];
+  shortcuts: Shortcut[] = [];
 
   group = new THREE.Group();
   private specMeshes: THREE.InstancedMesh[] = [];
@@ -125,12 +140,13 @@ export class Track {
   private specWindow = { a: 0, b: 0 };
   rng = new RNG(20260114);
 
-  constructor(seed = 20260114) {
+  constructor(seed = 20260114, length = TRACK_LENGTH) {
     this.rng = new RNG(seed);
-    this.length = TRACK_LENGTH;
-    this.count = Math.floor(TRACK_LENGTH / STEP) + 2;
+    this.length = length;
+    this.count = Math.floor(length / STEP) + 2;
     this.buildNodes();
     this.buildFeatures();
+    this.buildShortcuts();
     this.placeObstacles();
     this.placeSpectators();
   }
@@ -152,7 +168,7 @@ export class Track {
 
     for (let i = 0; i < n; i++) {
       const s = i * STEP;
-      const t = s / TRACK_LENGTH;
+      const t = s / this.length;
       const zi = this.zoneIndexAt(t);
       const Z = ZONES[zi];
       this.zoneIdx[i] = zi;
@@ -219,7 +235,7 @@ export class Track {
     for (let i = 0; i < ZONES.length; i++) if (t >= ZONES[i].t0 && t < ZONES[i].t1) return i;
     return ZONES.length - 1;
   }
-  zoneAt(s: number): Zone { return ZONES[this.zoneIndexAt(s / TRACK_LENGTH)]; }
+  zoneAt(s: number): Zone { return ZONES[this.zoneIndexAt(s / this.length)]; }
 
   private addFeature(f: Feature) {
     this.features.push(f);
@@ -233,7 +249,7 @@ export class Track {
   private buildFeatures() {
     const rng = this.rng;
     let s = 90;
-    while (s < TRACK_LENGTH - 140) {
+    while (s < this.length - 140) {
       const Z = this.zoneAt(s);
       const hw = this.halfWidth(s);
       const kind = rng.pick(Z.features);
@@ -291,11 +307,98 @@ export class Track {
       s += advance;
     }
     // signature features: guaranteed showpieces
-    this.addFeature({ kind: 'table', s0: TRACK_LENGTH * 0.245, len: 54, h: 4.1, depth: 0, x0: -999, x1: 999, n: 0 });
-    this.addFeature({ kind: 'gap', s0: TRACK_LENGTH * 0.665, len: 72, h: 4.6, depth: 6.0, x0: -999, x1: 999, n: 0 });
-    this.addFeature({ kind: 'kicker', s0: TRACK_LENGTH * 0.935, len: 18, h: 3.4, depth: 0, x0: -999, x1: 999, n: 0 });
+    const L = this.length;
+    this.addFeature({ kind: 'table', s0: L * 0.245, len: 54, h: 4.1, depth: 0, x0: -999, x1: 999, n: 0 });
+    this.addFeature({ kind: 'gap', s0: L * 0.665, len: 72, h: 4.6, depth: 6.0, x0: -999, x1: 999, n: 0 });
+    this.addFeature({ kind: 'kicker', s0: L * 0.935, len: 18, h: 3.4, depth: 0, x0: -999, x1: 999, n: 0 });
 
-    for (let g = 320; g < TRACK_LENGTH - 200; g += 520) this.gantries.push({ s: g });
+    for (let g = 320; g < L - 200; g += 520) this.gantries.push({ s: g });
+  }
+
+  /**
+   * Place shortcuts on the OUTSIDE of sustained corners, where leaving the
+   * tape genuinely shortens the path. Kept clear of big air features so you
+   * never get launched blind into the woods.
+   */
+  private buildShortcuts() {
+    const rng = this.rng;
+    const NAMES = [
+      'THE POACH', 'RIDGE CUT', 'BAILEY LINE', 'THE SNEAK', 'ROOT RUN',
+      'DEAD DROP', 'MINERS TRACK', 'THE SHAVE',
+    ];
+    let n = 0;
+    for (let s = 260; s < this.length - 360; s += 40) {
+      // sustained curvature over the candidate span?
+      const span = rng.range(90, 150);
+      let sum = 0, samples = 0;
+      for (let k = s; k < s + span; k += 10) { sum += this.curvatureAt(k); samples++; }
+      const avg = sum / Math.max(1, samples);
+      if (Math.abs(avg) < 0.0075) continue;
+
+      // don't overlap a gap / table / double
+      let blocked = false;
+      for (let k = s - 30; k < s + span + 30; k += 12) {
+        const bl = this.buckets[Math.floor(k / this.bucketSize)];
+        if (bl) for (const f of bl) {
+          if (f.kind === 'gap' || f.kind === 'table' || f.kind === 'double') blocked = true;
+        }
+      }
+      if (blocked) continue;
+      // keep them apart
+      if (this.shortcuts.length && s - this.shortcuts[this.shortcuts.length - 1].s1 < 260) continue;
+
+      // outside of the corner: curvature > 0 bends toward +x, so outside is -x
+      const side = avg > 0 ? -1 : 1;
+      // the chord across a curved arc is shorter than the arc itself
+      const theta = Math.abs(avg) * span;
+      const arcSaving = span * (1 - Math.sin(theta / 2) / Math.max(0.05, theta / 2));
+      const saving = clamp(arcSaving * 1.5 + span * 0.05, 6, 34);
+
+      this.shortcuts.push({
+        s0: s, s1: s + span, side,
+        width: rng.range(5.5, 8.5),
+        saving,
+        name: NAMES[n % NAMES.length],
+      });
+      n++;
+      s += span + 120;
+    }
+  }
+
+  /** 0..1 how strongly (s,x) sits inside a shortcut channel. */
+  channelAt(s: number, x: number): number {
+    let best = 0;
+    for (const sc of this.shortcuts) {
+      if (s < sc.s0 - 14 || s > sc.s1 + 14) continue;
+      if (Math.sign(x) !== sc.side) continue;
+      const hw = this.halfWidth(s);
+      const out = Math.abs(x) - hw;
+      if (out < -1.5 || out > sc.width) continue;
+      // taper in at the mouth and out at the exit so it blends with terrain
+      const along = clamp01(Math.min(s - (sc.s0 - 14), (sc.s1 + 14) - s) / 16);
+      const across = clamp01(Math.min(out + 1.5, sc.width - out) / 2.2);
+      best = Math.max(best, along * across);
+    }
+    return best;
+  }
+
+  /** Is there an open shortcut mouth at this point on the tape? */
+  tapeGapAt(s: number, side: number): boolean {
+    for (const sc of this.shortcuts) {
+      if (sc.side !== side) continue;
+      if (s > sc.s0 - 6 && s < sc.s1 + 6) return true;
+    }
+    return false;
+  }
+
+  shortcutAt(s: number, x: number): Shortcut | null {
+    for (const sc of this.shortcuts) {
+      if (s < sc.s0 || s > sc.s1) continue;
+      if (Math.sign(x) !== sc.side) continue;
+      if (Math.abs(x) < this.halfWidth(s) - 0.5) continue;
+      return sc;
+    }
+    return null;
   }
 
   private featureHeight(f: Feature, s: number, x: number): number {
@@ -391,8 +494,13 @@ export class Track {
     if (ax > hw) {
       const t = ax - hw;
       const slope = x < 0 ? this.slopeLAt(s) : this.slopeRAt(s);
-      h += slope * 18 * Math.log(1 + t / 18);
-      h += fbm2(s * 0.05, x * 0.05, 3) * Math.min(4.0, t * 0.42);
+      let side = slope * 18 * Math.log(1 + t / 18);
+      let bump = fbm2(s * 0.05, x * 0.05, 3) * Math.min(4.0, t * 0.42);
+      // a shortcut channel is cut into the hillside: flatten it so it's
+      // rideable, but leave some chatter so it still feels like off-piste
+      const ch = this.channelAt(s, x);
+      if (ch > 0) { side *= 1 - ch; bump *= 1 - ch * 0.55; }
+      h += side + bump;
     }
     return h;
   }
@@ -443,6 +551,15 @@ export class Track {
     const off = Math.abs(x) > hw + 0.4;
     if (off) {
       const deep = clamp01((Math.abs(x) - hw) / 6);
+      const ch = this.channelAt(s, x);
+      if (ch > 0.25) {
+        // loose but rideable: quicker than the rough, slower than the racing
+        // line, so a shortcut is a genuine trade rather than free speed
+        return {
+          grip: lerp(0.72, 0.94, ch), drag: lerp(1.9, 1.15, ch),
+          kind: 'gravel', roost: 1.3,
+        };
+      }
       return { grip: lerp(0.72, 0.42, deep), drag: lerp(1.9, 5.2, deep), kind: 'grass', roost: 0.7 };
     }
     switch (Z.surface) {
@@ -458,7 +575,7 @@ export class Track {
   private placeObstacles() {
     const rng = this.rng;
     let s = 120;
-    while (s < TRACK_LENGTH - 90) {
+    while (s < this.length - 90) {
       const Z = this.zoneAt(s);
       const hw = this.halfWidth(s);
       const type = rng.pick(Z.props) as Obstacle['type'];
@@ -487,7 +604,7 @@ export class Track {
   private placeSpectators() {
     const rng = this.rng;
     let s = 20;
-    while (s < TRACK_LENGTH - 10) {
+    while (s < this.length - 10) {
       const Z = this.zoneAt(s);
       const hw = this.halfWidth(s);
       const density = Z.crowd;
@@ -534,6 +651,7 @@ export class Track {
     this.buildPropMeshes();
     this.buildSpectatorMeshes();
     this.buildZoneSetPieces();
+    this.buildShortcutSigns();
     this.buildStartFinish();
     return this.group;
   }
@@ -635,8 +753,12 @@ export class Track {
         const x = side * (hw + 1.05);
         const base = this.heightAt(s, x);
         const sag = Math.sin(s * 0.35) * 0.05;
-        const lo = this.worldPos(s, x, base + 0.62 + sag, new THREE.Vector3());
-        const hi = this.worldPos(s, x, base + 1.02 + sag, new THREE.Vector3());
+        // collapse the ribbon to nothing across a shortcut mouth
+        const open = this.tapeGapAt(s, side);
+        const loH = base + 0.62 + sag;
+        const hiH = open ? loH : base + 1.02 + sag;
+        const lo = this.worldPos(s, x, loH, new THREE.Vector3());
+        const hi = this.worldPos(s, x, hiH, new THREE.Vector3());
         pos.push(lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
         uv.push(s / 6, 0, s / 6, 1);
         if (i > 0) {
@@ -655,13 +777,14 @@ export class Track {
       this.group.add(m);
     }
     // posts
-    const postCount = Math.floor(TRACK_LENGTH / 7) * 2;
+    const postCount = Math.floor(this.length / 7) * 2;
     const posts = new THREE.InstancedMesh(postGeo(), new THREE.MeshLambertMaterial({ color: 0xdedede }), postCount);
     const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(1, 1, 1);
     const up = new THREE.Vector3(), fwd = new THREE.Vector3(), right = new THREE.Vector3();
     let n = 0;
-    for (let s = 0; s < TRACK_LENGTH && n < postCount; s += 7) {
+    for (let s = 0; s < this.length && n < postCount; s += 7) {
       for (let side = -1; side <= 1; side += 2) {
+        if (this.tapeGapAt(s, side)) continue;
         const hw = this.halfWidth(s);
         const x = side * (hw + 1.05);
         const p = this.worldPos(s, x, this.heightAt(s, x), new THREE.Vector3());
@@ -738,7 +861,7 @@ export class Track {
     let nPine = 0, nBroad = 0, nRock = 0, nBush = 0;
     const col = new THREE.Color();
 
-    for (let s = 4; s < TRACK_LENGTH; s += 3.2) {
+    for (let s = 4; s < this.length; s += 3.2) {
       const Z = this.zoneAt(s);
       const hw = this.halfWidth(s);
       this.frameAt(s, fwd, right, up);
@@ -1017,7 +1140,7 @@ export class Track {
 
     for (let zi = 0; zi < ZONES.length; zi++) {
       const Z = ZONES[zi];
-      const s0 = Z.t0 * TRACK_LENGTH, s1 = Z.t1 * TRACK_LENGTH;
+      const s0 = Z.t0 * this.length, s1 = Z.t1 * this.length;
 
       switch (Z.name) {
         case 'PINE PLUNGE': {
@@ -1182,6 +1305,49 @@ export class Track {
     this.group.add(grp);
   }
 
+  /** Arrow boards at each shortcut mouth so the line can be read at speed. */
+  private buildShortcutSigns() {
+    const signTex = (() => {
+      const c = document.createElement('canvas'); c.width = 256; c.height = 128;
+      const g = c.getContext('2d')!;
+      g.fillStyle = '#12130f'; g.fillRect(0, 0, 256, 128);
+      g.fillStyle = '#c0f000';
+      g.beginPath();
+      g.moveTo(40, 64); g.lineTo(120, 20); g.lineTo(120, 46);
+      g.lineTo(216, 46); g.lineTo(216, 82); g.lineTo(120, 82);
+      g.lineTo(120, 108); g.closePath(); g.fill();
+      g.strokeStyle = '#c0f000'; g.lineWidth = 7; g.strokeRect(4, 4, 248, 120);
+      const t = new THREE.CanvasTexture(c);
+      t.colorSpace = THREE.SRGBColorSpace;
+      return t;
+    })();
+    const postMat = new THREE.MeshLambertMaterial({ color: 0x3a3a42 });
+    const grp = new THREE.Group();
+    for (const sc of this.shortcuts) {
+      const s = sc.s0 - 12;
+      const hw = this.halfWidth(s);
+      const x = sc.side * (hw + 2.0);
+      const h = this.heightAt(s, x);
+      this.worldPos(s, x, h, _p);
+      this.frameAt(s, _fwd2, _right2, _up2);
+
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.09, 2.3, 5), postMat);
+      post.position.copy(_p).addScaledVector(_up2, 1.15);
+      post.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), _up2);
+      grp.add(post);
+
+      const board = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.7, 0.85),
+        new THREE.MeshLambertMaterial({ map: signTex, side: THREE.DoubleSide }));
+      board.position.copy(_p).addScaledVector(_up2, 2.3);
+      // face back up the hill, arrow pointing off-piste
+      board.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(
+        _right2.clone().multiplyScalar(-sc.side), _up2, _fwd2.clone().multiplyScalar(-sc.side)));
+      grp.add(board);
+    }
+    this.group.add(grp);
+  }
+
   private buildStartFinish() {
     const mkArch = (s: number, label: string, bg: string, fg: string) => {
       const grp = new THREE.Group();
@@ -1216,6 +1382,6 @@ export class Track {
       this.group.add(grp);
     };
     mkArch(14, 'START', '#101014', '#ffd400');
-    mkArch(TRACK_LENGTH - 26, 'FINISH', '#ffd400', '#101014');
+    mkArch(this.length - 26, 'FINISH', '#ffd400', '#101014');
   }
 }

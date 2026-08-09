@@ -57,6 +57,8 @@ export interface RiderRig {
   shinL: THREE.Group;
   shinR: THREE.Group;
   shadow: THREE.Mesh;
+  contactF: THREE.Mesh;   // tight shadow under the front tyre
+  contactR: THREE.Mesh;   // ... and the rear
 }
 
 const PIVOT_Y = 0.72;
@@ -318,12 +320,38 @@ export function createRider(c: RiderColors): RiderRig {
   shadow.rotation.x = -Math.PI / 2;
   shadow.renderOrder = 2;
 
+  // Tight, dark contact patches directly under each tyre. The big blob reads
+  // as "roughly here"; these are what actually plant the bike on the dirt.
+  const contactTex = (() => {
+    const cv = document.createElement('canvas'); cv.width = cv.height = 64;
+    const g2 = cv.getContext('2d')!;
+    const grd = g2.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grd.addColorStop(0, 'rgba(0,0,0,0.85)');
+    grd.addColorStop(0.35, 'rgba(0,0,0,0.55)');
+    grd.addColorStop(0.72, 'rgba(0,0,0,0.14)');
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    g2.fillStyle = grd; g2.fillRect(0, 0, 64, 64);
+    const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; return t;
+  })();
+  const mkContact = () => {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.62, 0.92),
+      new THREE.MeshBasicMaterial({
+        map: contactTex, transparent: true, depthWrite: false, opacity: 0.85,
+      }));
+    m.rotation.x = -Math.PI / 2;
+    m.renderOrder = 3;
+    return m;
+  };
+  const contactF = mkContact(), contactR = mkContact();
+
   root.traverse(o => { if ((o as THREE.Mesh).isMesh) { o.castShadow = false; o.receiveShadow = false; } });
 
   return {
     root, lean, body, spin, flip, bike, fork, forkLower, swingarm, shock,
     frontWheel, rearWheel, cranks,
-    rider, torso, head, armL, armR, legL, legR, shinL, shinR, shadow,
+    rider, torso, head, armL, armR, legL, legR, shinL, shinR,
+    shadow, contactF, contactR,
   };
 }
 

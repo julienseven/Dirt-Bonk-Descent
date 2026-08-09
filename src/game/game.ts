@@ -3,9 +3,9 @@
 // ---------------------------------------------------------------------------
 import * as THREE from 'three';
 import {
-  clamp, clamp01, damp, lerp, RNG, TAU, smoothstep, fbm1,
+  clamp, clamp01, damp, lerp, RNG, TAU, smoothstep, smootherstep, fbm1,
 } from './core';
-import { Track, TRACK_LENGTH, Obstacle, ZONES } from './track';
+import { Track, Obstacle, ZONES } from './track';
 import {
   createRider, RiderRig, RIDER_PALETTES,
   BB_POS, SHOCK_UPPER, SHOCK_LOWER, SHOCK_BASE_LEN, FORK_AXIS,
@@ -15,17 +15,59 @@ import {
 } from './fx';
 import { audio } from './audio';
 import {
+  type Perf, type Loadout, computePerf, getBike, loadoutColors,
+} from './garage';
+import { getMountain } from './mountains';
+import {
+  BonkType, resolveBonk, bonkFlavour, canBeBonked, riderMass,
+  type BonkBody, type BonkResult,
+} from './bonk';
+import {
+  BikeState, TransitionLog, STATE_RULES, STATE_TUNING,
+  resolveState, pedalForce, roostFactor, isAirborne, canBonk,
+  type StateSnapshot,
+} from './bikeState';
+import {
   type Difficulty, type Ghost, DIFF_TUNING, GHOST_DT, encodeGhost,
   SKILL_MIN, SKILL_MAX,
 } from './save';
 
 export const GRAV = 30;
 export const SOFT_CAP = 47;
+/** Axle offsets from the bike's origin, in metres along the track. */
+export const AXLE_F = 0.60;
+export const AXLE_R = -0.62;
+export const WHEELBASE = AXLE_F - AXLE_R;
 /** quadratic air drag; tucking multiplies this by TUCK_DRAG */
 export const DRAG_K = 0.0040;
 export const TUCK_DRAG = 0.58;
 
-export type Phase = 'menu' | 'countdown' | 'race' | 'finish' | 'paused';
+export type Phase = 'menu' | 'intro' | 'countdown' | 'race' | 'finish' | 'paused';
+
+/**
+ * Cold-open beat sheet. Times are cumulative seconds.
+ * The whole thing runs ~8.5s and ends the instant the racers launch, so the
+ * player is riding before they've finished reading anything.
+ */
+const INTRO = {
+  /** low wide shot, rider silhouetted against the drop */
+  wide: 0,
+  /** camera swings around behind the rider, revealing the mountain */
+  swing: 2.6,
+  /** rival rolls up alongside */
+  rival: 4.4,
+  /** the look */
+  glance: 5.6,
+  /** rival stands up and goes */
+  jump: 6.9,
+  /** reaction window opens — ~1s to answer */
+  react: 6.9,
+  /** 3 - 2 - 1 */
+  count: 7.9,
+  /** SEND IT */
+  send: 10.9,
+  end: 11.6,
+};
 
 export interface Popup {
   el: HTMLDivElement;
@@ -71,6 +113,21 @@ export interface HudState {
   recoverPulse: number;  // flashes on each successful mash
   finalStretch: boolean; // in the run to the line
   photoFinish: boolean;  // decided by inches
+  // --- cold open
+  introT: number;
+  introLine: string;     // big centre text
+  introSub: string;      // small line under it
+  introFade: number;     // 0..1 letterbox / fade-in
+  reactWindow: number;   // 0..1 remaining reaction time
+  holeshot: boolean;     // nailed the launch
+  // --- state machine readout
+  state: string;
+  stateLabel: string;
+  stateT: number;
+  pumpArmed: number;   // 0..1 stored pump energy
+  lastBonk: string;    // headline type of the most recent bonk
+  lastBonkT: number;   // display timer
+  transitions: { from: string; to: string; t: number }[];
   splitDelta: number;    // seconds vs personal best at last zone
   splitShow: number;     // display timer
   splitHasPb: boolean;
@@ -82,7 +139,7 @@ export interface HudState {
   finishData: null | {
     time: number; place: number; score: number; bonks: number; tricks: number;
     topSpeed: number; bestTrick: string; bestTrickScore: number; airTotal: number;
-    gap: number; splits: number[];
+    gap: number; splits: number[]; shortcuts: number;
   };
 }
 
@@ -110,12 +167,36 @@ interface Racer {
   grace: number;       // post-crash invulnerability
   lastObs: number;     // debounce: obstacle already resolved
   obsCd: number;
+  // --- physics state machine
+  state: BikeState;
+  prevState: BikeState;
+  stateT: number;      // seconds in the current state
+  landTimer: number;   // >0 for a beat after touchdown
+  log: TransitionLog;
   crashMax: number;    // full duration of the current tumble
   recover: number;     // 0..1 mash progress toward getting up early
   crankAngle: number;  // drivetrain phase (freewheels when not pedalling)
   pedalling: number;   // 0..1 smoothed, drives the leg cycle vs attack stance
+  // --- two-wheel contact
+  chassisPitch: number;  // radians, from the front/rear height difference
+  pitchV: number;
+  contactF: boolean;
+  contactR: boolean;
+  // --- pumping
+  pump: number;          // -1 fully unweighted .. +1 fully compressed
+  pumpArmed: number;     // stored energy released on extension
+  // --- bonk
+  mass: number;          // kg, rider + bike
+  swingT: number;        // time since the last swing started (for DOUBLE)
+  bonkCooldownPair: number;
   headYaw: number;     // look-into-the-corner
   weight: number;      // -1 hung off the back .. +1 forward over the bars
+  // --- per-rider animation identity (seeded once, never changes)
+  stCadence: number;   // spins fast vs mashes a big gear
+  stLean: number;      // how far they throw the bike into a turn
+  stWeight: number;    // baseline stance: forward attacker vs seated cruiser
+  stHead: number;      // how much they look through corners
+  stTwitch: number;    // idle restlessness
   place: number;
   finished: boolean;
   finishTime: number;
@@ -245,6 +326,24 @@ export class Game {
   onPhaseChange?: (p: Phase) => void;
   quality: 'high' | 'low' = 'high';
   mobile = false;
+  /** pause the render loop entirely while the garage owns the screen */
+  suspended = false;
+  mountainId = 'shalebeck';
+  shortcutsHit = 0;
+  /** ?states in the URL shows the live state machine readout */
+  debugStates = typeof window !== 'undefined'
+    && window.location.search.includes('states');
+  // --- cold open state
+  private introT = 0;
+  private introFired = false;
+  private introReacted = false;
+  private introSent = false;
+  private introCount = -1;
+  private scActive: { sc: import('./track').Shortcut; entered: number } | null = null;
+  /** garage loadout effects; identity by default */
+  perf: Perf = {
+    topCap: 0, accel: 1, grip: 1, airRate: 1, landTol: 0, bonk: 1,
+  };
   /** analog steer from touch, screen space; null = use the keyboard */
   steerAxis: number | null = null;
   /** hold throttle automatically (touch default — one less thing to reach) */
@@ -260,6 +359,10 @@ export class Game {
       zoneFlash: 0, rivals: [], crashed: 0, boosting: false, drafting: false,
       offTrack: false, hitFlash: 0, hazard: 0, hazardSide: 0, recover: 0, recoverPulse: 0,
       finalStretch: false, photoFinish: false,
+      introT: 0, introLine: '', introSub: '', introFade: 0,
+      reactWindow: 0, holeshot: false,
+      state: 'GROUNDED', stateLabel: 'ROLLING', stateT: 0, transitions: [],
+      pumpArmed: 0, lastBonk: '', lastBonkT: 0,
       splitDelta: 0, splitShow: 0, splitHasPb: false,
       ghostActive: false, ghostGap: 0, reducedMotion: false,
       trickText: '', trickHold: 0, finishData: null,
@@ -393,7 +496,7 @@ export class Game {
     const pal = RIDER_PALETTES[i % RIDER_PALETTES.length];
     const rig = createRider(pal);
     this.scene.add(rig.root);
-    this.scene.add(rig.shadow);
+    this.scene.add(rig.shadow, rig.contactF, rig.contactR);
     return {
       isPlayer, name: isPlayer ? 'YOU' : RIVAL_NAMES[(i - 1 + RIVAL_NAMES.length) % RIVAL_NAMES.length],
       colorHex: '#' + pal.jersey.toString(16).padStart(6, '0'),
@@ -401,7 +504,14 @@ export class Game {
       lean: 0, leanV: 0, yaw: 0, steerVis: 0, wheelSpin: 0, crash: 0, crashSpin: 0,
       suspension: 0, suspV: 0, bonkCd: 0, bonkSwing: 0, bonkDir: 1, stun: 0,
       grace: 0, lastObs: -1, obsCd: 0, crashMax: 1, recover: 0,
+      state: BikeState.GROUNDED, prevState: BikeState.GROUNDED,
+      stateT: 0, landTimer: 0, log: new TransitionLog(),
       crankAngle: 0, pedalling: 0, headYaw: 0, weight: 0,
+      chassisPitch: 0, pitchV: 0, contactF: true, contactR: true,
+      pump: 0, pumpArmed: 0,
+      mass: 86, swingT: 99, bonkCooldownPair: 0,
+      // the player rides "neutral"; rivals get personality below
+      stCadence: 1, stLean: 1, stWeight: 0, stHead: 1, stTwitch: 1,
       place: i + 1, finished: false, finishTime: 0,
       skill: 0, aiOffset: 0, aiSeed: this.rng.range(0, 100), aiHopCd: 0, aiCap: 30,
       corner: 1, aggression: 0,
@@ -432,6 +542,15 @@ export class Game {
       r.skill = T.skill + i * T.step + this.rng.range(-0.03, 0.03);
       r.corner = 0.62 + this.rng.range(0, 0.38);          // apex discipline
       r.aggression = clamp01(this.rng.range(0.3, 1.0) * T.aggro);
+      // Animation identity is tied to how they ride: a disciplined cornerer
+      // leans hard and looks through the turn; an aggressive one sits
+      // forward and fidgets. Stable across restarts via the racer's seed.
+      const sr = new RNG(Math.floor(r.aiSeed * 1000) + 17);
+      r.stCadence = sr.range(0.82, 1.24);
+      r.stLean = 0.78 + r.corner * sr.range(0.35, 0.62);
+      r.stWeight = sr.range(-0.22, 0.20) + r.aggression * 0.18;
+      r.stHead = 0.55 + r.corner * sr.range(0.5, 0.85);
+      r.stTwitch = sr.range(0.6, 1.5);
     }
   }
 
@@ -445,6 +564,11 @@ export class Game {
       r.v = 0; r.vx = 0; r.vy = 0; r.grounded = true; r.airTime = 0;
       r.lean = 0; r.leanV = 0; r.yaw = 0; r.crash = 0; r.stun = 0;
       r.grace = 0; r.lastObs = -1; r.obsCd = 0; r.recover = 0; r.crashMax = 1;
+      r.state = BikeState.GROUNDED; r.prevState = BikeState.GROUNDED;
+      r.stateT = 0; r.landTimer = 0; r.log.clear();
+      r.chassisPitch = 0; r.pitchV = 0; r.contactF = true; r.contactR = true;
+      r.pump = 0; r.pumpArmed = 0;
+      r.swingT = 99; r.bonkCooldownPair = 0;
       r.finished = false; r.finishTime = 0; r.place = i + 1;
       r.aiOffset = this.rng.range(-0.3, 0.3);
     });
@@ -466,6 +590,8 @@ export class Game {
     this.hud.splitDelta = 0;
     // dense, not sparse: JSON.stringify turns array holes into `null`, which
     // then slips past `!== undefined` guards and yields garbage deltas
+    this.shortcutsHit = 0;
+    this.scActive = null;
     this.splits = new Array(ZONES.length).fill(0);
     this.ghostSamples = [];
     this.ghostAccum = 0;
@@ -481,12 +607,33 @@ export class Game {
     this.onPhaseChange?.(p);
   }
 
+  /** Full cold open. Used for a fresh drop-in. */
   startRace() {
+    this.resetRace();
+    this.introT = 0;
+    this.introFired = false;
+    this.introReacted = false;
+    this.introSent = false;
+    this.introCount = -1;
+    this.frozen = true;
+    this.hud.holeshot = false;
+    this.setPhase('intro');
+    audio.resume();
+  }
+
+  /** Skip the cinematic — used by RUN IT BACK, where you've already seen it. */
+  quickRestart() {
     this.resetRace();
     this.setPhase('countdown');
     this.countTimer = 0;
     this.countStep = -1;
     audio.resume();
+  }
+
+  /** Let the player punch through the opening. */
+  skipIntro() {
+    if (this.hud.phase !== 'intro') return;
+    this.introT = Math.max(this.introT, INTRO.count - 0.05);
   }
 
   togglePause() {
@@ -547,7 +694,11 @@ export class Game {
     if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'Tab'].includes(k)) e.preventDefault();
     if (!this.keys[k]) this.pressed[k] = true;
     this.keys[k] = true;
-    if (k === 'Escape') this.togglePause();
+    // during the cold open Escape means "skip", not "pause"
+    if (k === 'Escape') {
+      if (this.hud.phase === 'intro') this.skipIntro();
+      else this.togglePause();
+    }
   };
   private onKeyUp = (e: KeyboardEvent) => { this.keys[e.code] = false; };
 
@@ -591,6 +742,8 @@ export class Game {
   private frame() {
     const dt = Math.min(this.clock.getDelta(), 0.05);
     this.lastDt = dt;
+    // the garage owns the screen (and its own GL context) while open
+    if (this.suspended) return;
     const phase = this.hud.phase;
 
     // time scaling
@@ -601,6 +754,21 @@ export class Game {
     const sdt = dt * this.timeScale;
     this.time += dt;
 
+    if (phase === 'intro') {
+      this.introT += dt;
+      if (this.tap('Enter')) this.skipIntro();
+      this.simulate(sdt, false);
+      this.updateIntro(dt);
+      this.updateWorldFx(dt);
+      this.dirtPool.update(sdt);
+      this.smokePool.update(sdt);
+      this.sparkPool.update(sdt);
+      this.updatePopups(dt);
+      this.syncHud();
+      this.renderer.render(this.scene, this.camera);
+      this.pressed = {};
+      return;
+    }
     if (phase === 'countdown') {
       this.countTimer += dt;
       const step = Math.floor(this.countTimer);
@@ -661,7 +829,7 @@ export class Game {
       if (o === me) continue;
       const t = o.finished
         ? o.finishTime
-        : this.raceTime + (TRACK_LENGTH - 20 - o.s) / Math.max(6, o.v);
+        : this.raceTime + (this.track.length - 20 - o.s) / Math.max(6, o.v);
       gap = Math.min(gap, Math.abs(t - me.finishTime));
     }
     this.finishGap = gap;
@@ -672,6 +840,7 @@ export class Game {
       airTotal: this.airTotal,
       gap: this.finishGap,
       splits: this.splits.slice(),
+      shortcuts: this.shortcutsHit,
     };
     this.setPhase('finish');
     this.startReplay();
@@ -687,7 +856,8 @@ export class Game {
     // ---- player input
     const p = this.player;
     const canControl = live && p.crash <= 0 && !p.finished;
-    const airborne = !p.grounded && p.airTime > 0.06;
+    // input gating now reads the state machine rather than re-deriving it
+    const airborne = isAirborne(p.state) && p.airTime > 0.06;
     let steer = 0, pedal = false, brake = false, tuck = false;
     if (canControl) {
       // NOTE: track-space +x points to SCREEN-LEFT (screen-right = forward x up = -x).
@@ -714,7 +884,7 @@ export class Game {
     }
 
     // bonk (ground only — in the air Q/E become whips)
-    if (canControl && p.bonkCd <= 0 && !airborne) {
+    if (canControl && p.bonkCd <= 0 && canBonk(p.state)) {
       if (this.tap('KeyQ')) this.doBonk(1);        // Q = swing screen-left (+x)
       else if (this.tap('KeyE')) this.doBonk(-1);  // E = swing screen-right (-x)
     }
@@ -733,9 +903,10 @@ export class Game {
       // an over-rotation and deservedly eat it.
       const ttg = this.timeToGround(p);
       const assist = 1 + (1 - clamp01(ttg / 0.9)) * 7;
-      if (spinDir !== 0) this.airSpin += spinDir * 7.8 * dt;
+      const ar = this.perf.airRate;
+      if (spinDir !== 0) this.airSpin += spinDir * 7.8 * ar * dt;
       else this.airSpin = this.levelOut(this.airSpin, 11 * assist * dt);
-      if (flipDir !== 0) this.airFlip += flipDir * 6.4 * dt;
+      if (flipDir !== 0) this.airFlip += flipDir * 6.4 * ar * dt;
       else this.airFlip = this.levelOut(this.airFlip, 9 * assist * dt);
       if (this.key('Space')) this.airPose += dt;
       const rot = Math.abs(this.airSpin) + Math.abs(this.airFlip);
@@ -759,6 +930,7 @@ export class Game {
       this.collideObstacles(p, dt);
       for (const r of this.racers) if (!r.isPlayer) this.collideObstacles(r, dt);
       this.checkNearMiss(dt);
+      this.updateShortcuts();
       this.scanHazards();
       this.updateDraft(dt);
     }
@@ -782,7 +954,7 @@ export class Game {
     if (live) this.updateEndgame(dt);
 
     // ---- zone announce
-    const zi = trk.zoneIndexAt(clamp01(p.s / TRACK_LENGTH));
+    const zi = trk.zoneIndexAt(clamp01(p.s / trk.length));
     if (zi !== this.lastZone && live) {
       const first = this.lastZone < 0;
       this.lastZone = zi;
@@ -816,6 +988,13 @@ export class Game {
     steer: number; pedal: boolean; brake: boolean; tuck: boolean; hop: boolean; boost: boolean; live: boolean;
   }) {
     const trk = this.track;
+
+    // ===== STATE RESOLUTION ================================================
+    // Runs before any early return, so CRASHING / FINISHED are genuinely
+    // entered rather than being states the machine can never reach.
+    if (r.landTimer > 0) r.landTimer -= dt;
+    this.applyState(r, dt, inp);
+
     if (r.finished) {
       // roll out
       r.v = damp(r.v, 3, 0.8, dt);
@@ -830,8 +1009,9 @@ export class Game {
       r.v = 0; r.vx = 0; r.vy = 0;
       r.y = trk.heightAt(r.s, r.x);
       r.grounded = true;
-      r.suspension = Math.sin(this.time * 9 + r.aiSeed) * 0.02;
-      this.poseRacer(r, dt, Math.sin(this.time * 2.2 + r.aiSeed) * 0.3);
+      r.suspension = Math.sin(this.time * 9 * r.stTwitch + r.aiSeed) * 0.02;
+      this.poseRacer(r, dt,
+        Math.sin(this.time * 2.2 * r.stTwitch + r.aiSeed) * 0.3 * r.stTwitch);
       return;
     }
 
@@ -888,19 +1068,27 @@ export class Game {
       return;
     }
     if (r.stun > 0) r.stun -= dt;
+    r.swingT += dt;
+    if (r.bonkCooldownPair > 0) r.bonkCooldownPair -= dt;
+
+    // physics reads the rules for whatever state was resolved above
+    const RULES = STATE_RULES[r.state];
 
     // ---- longitudinal
+    // garage upgrades only touch the player; rivals stay on the tuned baseline
+    const P = r.isPlayer ? this.perf : IDENTITY_PERF;
     let a = GRAV * Math.sin(pitch);
     const speed01 = clamp01(r.v / 40);
-    if (inp.pedal) a += lerp(11, 1.2, speed01);
-    if (inp.brake) a -= 30 * surf.grip;
-    if (r.stun > 0) a -= 8;
+    // throttle comes from the state, not the raw key
+    if (RULES.throttle) a += pedalForce(speed01) * P.accel;
+    a += RULES.thrust;
+    a -= RULES.retard * surf.grip;
     const dragK = DRAG_K * (inp.tuck ? TUCK_DRAG : 1);
     a -= dragK * r.v * r.v;
     a -= surf.drag * (r.v * 0.055 + 0.5);
-    if (inp.boost) a += 17;
-    if (!r.grounded) a += 0.6; // slight air acceleration keeps jumps flowing
-    if (r.v > SOFT_CAP) a -= (r.v - SOFT_CAP) * 5;
+    a -= RULES.scrub * Math.abs(r.vx) * 0.35;   // sliding costs momentum
+    const cap = SOFT_CAP + P.topCap;
+    if (r.v > cap) a -= (r.v - cap) * 5;
     if (!r.isPlayer && r.v > r.aiCap) a -= (r.v - r.aiCap) * 4;
     r.v = Math.max(0, r.v + a * dt);
 
@@ -908,38 +1096,88 @@ export class Game {
     // Committing to a bonk takes a hand off the bars: you briefly lose
     // steering authority, so swinging mid-corner at speed is a real gamble.
     const swingCost = r.bonkSwing > 0 ? 1 - clamp01(r.bonkSwing) * 0.45 : 1;
-    const airFactor = r.grounded ? 1 : 0.45;
-    const maxLatSpeed = lerp(15.5, 9.5, speed01) * airFactor * surf.grip * swingCost;
-    const maxLatAccel = (r.grounded ? 34 : 11) * surf.grip * swingCost;
+    const gripK = surf.grip * swingCost * P.grip * RULES.gripMul;
+    const maxLatSpeed = lerp(15.5, 9.5, speed01) * gripK;
+    const maxLatAccel = (r.grounded ? 34 : 11) * gripK;
     const desired = inp.steer * maxLatSpeed;
     let latA = clamp((desired - r.vx) * 7.5, -maxLatAccel, maxLatAccel);
     latA -= curv * r.v * r.v;                 // centrifugal
     latA += -GRAV * Math.sin(bank) * (r.grounded ? 1 : 0.15);  // bank support
     r.vx += latA * dt;
-    r.vx *= Math.exp(-(r.grounded ? 1.1 : 0.35) * dt);
+    r.vx *= Math.exp(-(r.grounded ? 1.1 : 0.35) * RULES.slipDamp * dt);
     r.x += r.vx * dt;
 
-    // ---- vertical
-    const gh = trk.heightAt(r.s, r.x);
+    // ---- vertical: TWO-WHEEL CONTACT ------------------------------------
+    // A bicycle touches the ground in two places, ~1.2m apart. Sampling one
+    // point makes the rider a floating dot; sampling both means a rock under
+    // the front wheel pitches you back, a lip under the rear kicks you up,
+    // and cresting a roller unweights the front before the rear. This is the
+    // single biggest contributor to "that reads as a bike".
+    const hF = trk.heightAt(r.s + AXLE_F, r.x);
+    const hR = trk.heightAt(r.s + AXLE_R, r.x);
+    // the chassis rests on whichever contact is higher
+    const gh = Math.max(hF, hR);
+    // ...and tilts to match the line between the two patches
+    const terrainPitch = Math.atan2(hF - hR, WHEELBASE);
+
     r.vy -= GRAV * dt;
     r.y += r.vy * dt;
     const wasAir = !r.grounded;
+
     if (r.y <= gh + 0.001) {
       const impact = -r.vy;
       r.y = gh;
-      // follow ground slope (launch off lips)
-      const ahead = trk.heightAt(r.s + 2.4, r.x);
-      const behind = trk.heightAt(r.s - 2.4, r.x);
-      const slopeF = (ahead - behind) / 4.8;
+      // which wheels are actually touching? (used by FX + landing quality)
+      r.contactF = hF >= hR - 0.05;
+      r.contactR = hR >= hF - 0.05;
+
+      // launch off lips, measured across the real wheelbase
+      const ahead = trk.heightAt(r.s + AXLE_F + 1.8, r.x);
+      const slopeF = (ahead - hR) / (AXLE_F + 1.8 - AXLE_R);
       const up = slopeF > 0.06 ? r.v * slopeF * 1.15 : 0;
       r.vy = up;
-      if (inp.hop) { r.vy += 7.6; if (r.isPlayer) audio.hop(); }
+
+      // ---- PUMPING: the core downhill momentum skill.
+      // Compress into a compression, extend over a crest. Timed right it
+      // adds real speed; timed wrong it scrubs. Reads brake (weight down)
+      // and hop (weight up) as the pump input.
+      const wantDown = inp.brake || (r.isPlayer && this.key('ShiftLeft', 'ShiftRight'));
+      const pumpTarget = wantDown ? 1 : inp.hop ? -1 : 0;
+      r.pump = damp(r.pump, pumpTarget, 9, dt);
+      // terrain curvature: >0 in a compression (valley), <0 over a crest
+      const curveT = (hF + hR) * 0.5 - trk.heightAt(r.s, r.x);
+      if (curveT > 0.012 && r.pump > 0.35) {
+        // loading the bike through a compression stores energy
+        r.pumpArmed = Math.min(1, r.pumpArmed + r.pump * curveT * 22 * dt);
+      } else if (curveT < -0.008 && r.pumpArmed > 0.05 && r.pump < 0.1) {
+        // releasing it over the crest converts to drive
+        const gain = r.pumpArmed * 9;
+        r.v += gain * dt * 8;
+        r.pumpArmed = Math.max(0, r.pumpArmed - dt * 2.4);
+        if (r.isPlayer && r.pumpArmed > 0.4 && Math.random() < dt * 6) {
+          this.style = Math.min(1, this.style + 0.1);
+        }
+      } else {
+        r.pumpArmed = Math.max(0, r.pumpArmed - dt * 0.7);
+      }
+
+      if (inp.hop) {
+        // a bunny hop loads the rear then springs: preloading pays off
+        r.vy += 7.6 + r.pumpArmed * 3.4;
+        r.pumpArmed = 0;
+        if (r.isPlayer) audio.hop();
+      }
       r.grounded = true;
-      if (wasAir) this.onLand(r, impact, slopeF);
+      if (wasAir) {
+        r.landTimer = STATE_TUNING.landWindow;
+        this.onLand(r, impact, slopeF);
+      }
       r.airTime = 0;
-      // suspension compression
+      // suspension compression, biased by which end took the hit
       if (impact > 1) { r.suspV -= Math.min(impact * 0.55, 9); }
     } else {
+      r.contactF = false;
+      r.contactR = false;
       if (r.grounded && r.y > gh + 0.08) r.grounded = false;
       if (!r.grounded) {
         r.airTime += dt;
@@ -950,13 +1188,20 @@ export class Game {
       }
     }
 
+    // ---- chassis pitch follows the contact line, sprung so it has weight
+    // rather than snapping. In the air it eases back toward level.
+    const pitchTargetT = r.grounded ? terrainPitch : 0;
+    r.pitchV += (-(r.chassisPitch - pitchTargetT) * 150 - r.pitchV * 17) * dt;
+    r.chassisPitch += r.pitchV * dt;
+    r.chassisPitch = clamp(r.chassisPitch, -0.55, 0.55);
+
     // ---- track bounds
     if (Math.abs(r.x) > hw + 20 || r.y < trk.heightAt(r.s, clamp(r.x, -hw, hw)) - 26) {
       this.respawn(r);
     }
 
     r.s += r.v * dt;
-    if (r.s >= TRACK_LENGTH - 20 && !r.finished) {
+    if (r.s >= this.track.length - 20 && !r.finished) {
       r.finished = true;
       r.finishTime = this.raceTime;
       if (r.isPlayer) {
@@ -988,10 +1233,11 @@ export class Game {
     if (inp.pedal && r.v < 22) wTarget += 0.45;
     if (!r.grounded) wTarget = wTarget * 0.3 - 0.15;
     if (r.stun > 0) wTarget -= 0.3;
-    r.weight = damp(r.weight, clamp(wTarget, -1, 1), 4.5, dt);
+    wTarget += r.stWeight;                                  // personal stance
+    r.weight = damp(r.weight, clamp(wTarget, -1, 1), 4.5 * r.stTwitch, dt);
     if (inp.pedal && r.grounded) {
       // cadence rises with speed but tops out; riders spin out in tall gears
-      const cadence = lerp(4.2, 11.5, clamp01(r.v / 26));
+      const cadence = lerp(4.2, 11.5, clamp01(r.v / 26)) * r.stCadence;
       r.crankAngle += cadence * dt;
     }
 
@@ -999,6 +1245,84 @@ export class Game {
     this.poseRacer(r, dt, inp.steer);
     if (r.isPlayer) this.playerFx(r, dt, inp, surf);
     else this.aiFx(r, dt, surf);
+  }
+
+  /**
+   * Build the snapshot, resolve the state, and fire enter/exit hooks.
+   * The resolve itself is pure — everything impure lives in the hooks.
+   */
+  private applyState(r: Racer, dt: number, inp: {
+    pedal: boolean; brake: boolean; boost: boolean;
+  }) {
+    const rotation = r.isPlayer
+      ? Math.abs(this.airSpin) + Math.abs(this.airFlip)
+      : 0;
+    const trickInput = r.isPlayer
+      ? this.key('KeyQ', 'KeyE', 'KeyJ', 'KeyK', 'ControlLeft')
+      : false;
+
+    const snap: StateSnapshot = {
+      finished: r.finished,
+      crashTimer: r.crash,
+      recoverTimer: r.grace > 0 && r.crash <= 0 && r.stun > 0 ? r.stun : 0,
+      stunTimer: r.stun,
+      grounded: r.grounded,
+      airTime: r.airTime,
+      landTimer: r.landTimer,
+      speed: r.v,
+      lateralSpeed: r.vx,
+      pedal: inp.pedal,
+      brake: inp.brake,
+      boost: inp.boost,
+      trickInput,
+      trickRotation: rotation,
+    };
+
+    const next = resolveState(snap);
+    if (next !== r.state) {
+      this.onStateExit(r, r.state);
+      r.prevState = r.state;
+      r.state = next;
+      r.stateT = 0;
+      r.log.push(r.prevState, next, this.raceTime);
+      this.onStateEnter(r, next);
+    } else {
+      r.stateT += dt;
+    }
+  }
+
+  /** One-shot effects when a state begins. */
+  private onStateEnter(r: Racer, st: BikeState) {
+    switch (st) {
+      case BikeState.DRIFTING:
+        if (r.isPlayer && r.v > 14) {
+          audio.scrape(0.5);
+          this.style = Math.min(1, this.style + 0.12);
+        }
+        break;
+      case BikeState.BOOSTING:
+        if (r.isPlayer) { audio.boost(); this.shakeAdd(0.5); }
+        break;
+      case BikeState.TRICKING:
+        if (r.isPlayer) this.style = Math.min(1, this.style + 0.1);
+        break;
+      case BikeState.LANDING:
+        // suspension bite is applied by onLand(); nothing extra here
+        break;
+    }
+  }
+
+  /** One-shot effects when a state ends. */
+  private onStateExit(r: Racer, st: BikeState) {
+    if (st === BikeState.DRIFTING && r.isPlayer) {
+      // reward a long committed slide
+      if (r.stateT > 0.8) {
+        const pts = 60 * r.stateT * this.comboMult();
+        this.addScore(pts);
+        this.boost = Math.min(100, this.boost + r.stateT * 6);
+        this.popup(`DRIFT +${Math.round(pts)}`, 'sub', null, '#7ef7ff');
+      }
+    }
   }
 
   private respawn(r: Racer) {
@@ -1030,13 +1354,17 @@ export class Game {
       const flipErr = Math.abs(((this.airFlip % TAU) + TAU + Math.PI) % TAU - Math.PI);
       // Small hops get a wide window (you had no time to correct); long,
       // committed airs are judged tightly. ~75deg down to ~50deg.
-      const tol = lerp(1.32, 0.88, clamp01((air - 0.35) / 1.4));
+      const tol = lerp(1.32, 0.88, clamp01((air - 0.35) / 1.4)) + this.perf.landTol;
       const misaligned = spinErr > tol || flipErr > tol;
       if (air > 0.45 && misaligned) {
         this.crashPlayer(flipErr > tol ? 'CASED IT' : 'SIDEWAYS LANDING');
         crashed = true;
       } else if (impact > 30 && landQual < 0.18) {
         this.crashPlayer('FLAT LANDING');
+        crashed = true;
+      } else if (r.chassisPitch > 0.34 && impact > 17) {
+        // came down on the front wheel with the nose buried
+        this.crashPlayer('OVER THE BARS');
         crashed = true;
       } else if (misaligned) {
         // survived it, but it was ugly — scrub speed and wobble
@@ -1060,6 +1388,14 @@ export class Game {
         // speed physics: reward smooth landings
         r.v -= impact * 0.11 * (1 - landQual) * 2.2;
         if (slopeF < -0.05) r.v += Math.min(4.5, impact * 0.10);
+        // rear-wheel-first is the clean way down: keeps drive, stays settled
+        if (r.chassisPitch < -0.08 && r.chassisPitch > -0.42) {
+          r.v += Math.min(2.6, impact * 0.06);
+          if (r.isPlayer && impact > 9) {
+            this.style = Math.min(1, this.style + 0.2);
+            this.boost = Math.min(100, this.boost + 5);
+          }
+        }
         r.v = Math.max(0, r.v);
       }
       this.airSpin = this.airFlip = this.airPose = 0;
@@ -1164,7 +1500,8 @@ export class Game {
           r.bonkCd = 1.6;
           r.bonkSwing = 1;
           r.bonkDir = Math.sign(dx) || 1;
-          this.racerBonked(other, r);
+          r.swingT = 0;
+          this.resolveContact(r, other, true);
         }
         break;
       }
@@ -1178,22 +1515,17 @@ export class Game {
     p.bonkCd = 0.36;
     p.bonkSwing = 1;
     p.bonkDir = dir;
+    p.swingT = 0;
     audio.whoosh(0.5);
     let hitSomething = false;
 
-    // rivals
+    // rivals — every rider-on-rider hit goes through the bonk resolver
     for (const r of this.racers) {
-      if (r.isPlayer || r.crash > 0) continue;
+      if (r.isPlayer || !canBeBonked(r.state)) continue;
       const ds = r.s - p.s, dx = r.x - p.x;
       if (ds > -2.6 && ds < 4.4 && dx * dir > 0 && Math.abs(dx) < 4.2 && Math.abs(r.y - p.y) < 2.6) {
         hitSomething = true;
-        const power = clamp01(p.v / 34) + 0.4;
-        r.vx += dir * 11 * power;
-        r.v *= 0.86;
-        r.stun = 0.7;
-        r.leanV += dir * 12;
-        this.bonkImpact(r.rig.root.position, power, dir, 'RIVAL BONK', 300);
-        if (Math.random() < 0.35 + power * 0.2) { this.crashRacer(r); this.popupAt(r.rig.root.position.clone(), 'WIPEOUT!', '#ff6a00', 26); }
+        this.resolveContact(p, r, true);
         break;
       }
     }
@@ -1240,6 +1572,139 @@ export class Game {
     }
   }
 
+  /** Snapshot a racer as a bonk body. */
+  private toBody(r: Racer): BonkBody {
+    return {
+      s: r.s, x: r.x, y: r.y, v: r.v, vx: r.vx,
+      mass: r.mass, state: r.state, swinging: r.swingT < 0.28,
+    };
+  }
+
+  /**
+   * THE single entry point for rider-on-rider contact. Classifies the hit,
+   * computes knockback from the impulse model, and applies every consequence
+   * (physics, score, audio, FX, crash roll) in one place.
+   */
+  private resolveContact(a: Racer, b: Racer, deliberate: boolean) {
+    if (!canBeBonked(a.state) || !canBeBonked(b.state)) return;
+    if (a.bonkCooldownPair > 0 || b.bonkCooldownPair > 0) return;
+
+    const trk = this.track;
+    const surf = trk.surfaceAt(b.s, b.x);
+    const res = resolveBonk(this.toBody(a), this.toBody(b), {
+      surfaceGrip: surf.grip,
+      halfWidth: trk.halfWidth(b.s),
+      // both riders swung at once -> DOUBLE BONK
+      simultaneous: a.swingT < 0.3 && b.swingT < 0.3,
+    });
+
+    // upgrades from the garage make the player hit harder
+    const gain = a.isPlayer ? this.perf.bonk : 1;
+
+    // ---- apply to the victim
+    b.vx += res.knockX * gain;
+    b.v = Math.max(0, b.v * res.victimSpeedMul - res.knockS * 0.1);
+    if (res.knockY > 0.4 && b.grounded) { b.vy += res.knockY * gain; b.grounded = false; }
+    b.stun = Math.max(b.stun, 0.4 + res.power * 0.5);
+    b.leanV += Math.sign(res.knockX) * (8 + res.power * 10);
+    b.suspV -= res.power * 5;
+
+    // ---- reaction on the aggressor (Newton's third)
+    a.vx += res.reactX * 0.7;
+    a.v *= res.aggressorSpeedMul;
+    if (res.type === BonkType.DOUBLE) {
+      a.stun = Math.max(a.stun, 0.35);
+      a.leanV -= Math.sign(res.knockX) * 7;
+    }
+
+    a.bonkCooldownPair = 0.35;
+    b.bonkCooldownPair = 0.35;
+
+    // WALL BONK: drive them off the course properly, and make the terrain
+    // finish the job rather than just relabelling a side hit
+    if (res.type === BonkType.WALL) {
+      b.vx += Math.sign(res.knockX) * 6;
+      b.v *= 0.82;
+      b.stun = Math.max(b.stun, 0.8);
+    }
+
+    const crashed = Math.random() < res.crashChance;
+    if (crashed) this.crashRacer(b);
+    if (res.type === BonkType.DOUBLE && Math.random() < res.crashChance * 0.6) {
+      if (a.isPlayer) this.crashPlayer('DOUBLE BONK'); else this.crashRacer(a);
+    }
+
+    // ---- presentation
+    const world = b.rig.root.position.clone();
+    const flavour = bonkFlavour(res.type, Math.random());
+    if (a.isPlayer) {
+      this.onPlayerBonk(res, world, flavour, crashed, deliberate);
+    } else if (b.isPlayer) {
+      this.onPlayerBonked(res, a, world);
+    } else {
+      this.onRivalBonk(res, b, world, flavour, crashed);
+    }
+  }
+
+  /** Player landed a bonk. */
+  private onPlayerBonk(
+    res: BonkResult, world: THREE.Vector3, flavour: string,
+    crashed: boolean, deliberate: boolean,
+  ) {
+    const mega = res.type === BonkType.MEGA || res.type === BonkType.WALL;
+    audio.bonk(clamp(0.6 + res.power, 0.5, 1.5), clamp(-Math.sign(res.knockX) * 0.5, -1, 1));
+    audio.duck(mega ? 0.6 : 0.42, mega ? 0.55 : 0.38);
+    this.hitStop = (mega ? 0.11 : 0.07) + res.power * 0.04;
+    this.shakeAdd((mega ? 0.9 : 0.55) + res.power * 0.4);
+    this.bonks++;
+    this.addCombo();
+
+    const pts = res.score * this.comboMult() * (deliberate ? 1 : 0.6);
+    this.addScore(pts);
+    this.boost = Math.min(100, this.boost + res.boost);
+    this.style = Math.min(1, this.style + (mega ? 0.5 : 0.3));
+
+    this.popupAt(world, `${flavour}  +${Math.round(pts)}`, res.colour, mega ? 34 : 28);
+    this.spawnImpactBurst(world, Math.sign(res.knockX), 0.6 + res.power);
+    audio.cheer(0.4 + res.power * 0.5);
+    this.hud.hitFlash = Math.max(this.hud.hitFlash, mega ? 0.75 : 0.5);
+    this.hud.lastBonk = res.type;
+    this.hud.lastBonkT = 1.6;
+    if (mega) this.slowmo = Math.max(this.slowmo, 0.5);
+    if (crashed) {
+      this.popupAt(world.clone().add(_v3.set(0, 1.4, 0)), 'WIPEOUT!', '#ff6a00', 24);
+    }
+  }
+
+  /** Player took a bonk. */
+  private onPlayerBonked(res: BonkResult, from: Racer, world: THREE.Vector3) {
+    audio.hitTaken(0.6 + res.power);
+    audio.duck(0.55, 0.5);
+    this.shakeAdd(0.7 + res.power * 0.5);
+    this.hitStop = 0.06;
+    this.breakCombo();
+    this.hud.hitFlash = 1;
+    this.popup(`${from.name}: ${res.label}`, 'bad', null, '#ff4d4d');
+    this.spawnImpactBurst(world, Math.sign(res.knockX), 0.8);
+  }
+
+  /** Two rivals collided — sell it only if the player can see it. */
+  private onRivalBonk(
+    res: BonkResult, victim: Racer, world: THREE.Vector3,
+    flavour: string, crashed: boolean,
+  ) {
+    const dist = Math.abs(victim.s - this.player.s);
+    if (dist > 110) return;
+    const near = 1 - clamp01(dist / 110);
+    audio.bonk(0.7 * (0.5 + res.power), clamp((victim.x - this.player.x) * 0.2, -1, 1));
+    this.spawnImpactBurst(world, Math.sign(res.knockX), 0.6 * res.power);
+    this.shakeAdd(0.12 * near);
+    if (dist < 70 && (crashed || res.type === BonkType.MEGA)) {
+      this.popupAt(world, flavour, res.colour, 20);
+      audio.cheer(0.4 * near);
+    }
+  }
+
   private bonkImpact(world: THREE.Vector3, power: number, dir: number, label: string, base: number) {
     // dir is track-space (+x = screen-left), stereo pan is -1=left, so negate
     audio.bonk(clamp(power, 0.5, 1.4), clamp(-dir * 0.5, -1, 1));
@@ -1258,58 +1723,35 @@ export class Game {
     this.hud.hitFlash = Math.max(this.hud.hitFlash, 0.5);
   }
 
-  /** Resolve a bonk landed by `from` on `victim` (either may be the player). */
-  private racerBonked(victim: Racer, from: Racer) {
-    const dir = Math.sign(victim.x - from.x) || 1;
-    const power = clamp01(from.v / 34) + 0.4;
-    victim.vx += dir * 9 * power;
-    victim.v *= 0.9;
-    victim.stun = 0.55;
-    victim.leanV += dir * 10;
 
-    if (victim.isPlayer) {
-      audio.hitTaken(1);
-      audio.duck(0.55, 0.5);
-      this.shakeAdd(0.9);
-      this.hitStop = 0.06;
-      this.breakCombo();
-      this.hud.hitFlash = 1;
-      this.popup(`${from.name} BONKED YOU!`, 'bad', null, '#ff4d4d');
-      this.spawnImpactBurst(victim.rig.root.position, dir, 0.9);
-      if (Math.random() < 0.14) this.crashPlayer('KNOCKED DOWN');
-      return;
-    }
-
-    // --- AI on AI: only sell it if the player can actually see it happen
-    const dist = Math.abs(victim.s - this.player.s);
-    if (dist > 110) {
-      if (Math.random() < 0.3) this.crashRacer(victim);
-      return;
-    }
-    const near = 1 - clamp01(dist / 110);
-    audio.bonk(0.8 * power, clamp((victim.x - this.player.x) * 0.2, -1, 1));
-    this.spawnImpactBurst(victim.rig.root.position, dir, 0.7 * power);
-    this.shakeAdd(0.12 * near);
-    if (Math.random() < 0.3) {
-      this.crashRacer(victim);
-      if (dist < 70) {
-        this.popupAt(victim.rig.root.position.clone(),
-          `${from.name} WRECKS ${victim.name}!`, '#ff9500', 20);
-        audio.cheer(0.45 * near);
-      }
-    } else if (dist < 55 && Math.random() < 0.5) {
-      this.popupAt(victim.rig.root.position.clone(), 'BONK!', '#ffd400', 18);
-    }
-  }
 
   // -------------------------------------------------------------------------
+  /**
+   * Natural (unintentional) contact. Gentle overlaps just push apart with a
+   * scrape; genuine impacts escalate into a real bonk through the same
+   * resolver the deliberate swings use, so ramming someone at speed is a
+   * FRONT BONK whether or not you pressed a button.
+   */
   private collideRacers(dt: number) {
     for (let i = 0; i < this.racers.length; i++) {
       for (let j = i + 1; j < this.racers.length; j++) {
         const a = this.racers[i], b = this.racers[j];
-        if (a.crash > 0 || b.crash > 0) continue;
+        if (!canBeBonked(a.state) || !canBeBonked(b.state)) continue;
+        if (a.bonkCooldownPair > 0 || b.bonkCooldownPair > 0) continue;
         const ds = Math.abs(a.s - b.s), dx = a.x - b.x;
         if (ds > 2.2 || Math.abs(dx) > 1.7 || Math.abs(a.y - b.y) > 2.2) continue;
+
+        // closing hard enough to count as an impact?
+        const closing = Math.hypot(a.v - b.v, a.vx - b.vx);
+        if (closing > 7) {
+          // whoever is arriving faster is the aggressor
+          const aFaster = (a.v - b.v) * (b.s - a.s) > 0 || Math.abs(a.vx) > Math.abs(b.vx);
+          if (aFaster) this.resolveContact(a, b, false);
+          else this.resolveContact(b, a, false);
+          continue;
+        }
+
+        // soft overlap: separate and scrape
         const push = (1.7 - Math.abs(dx)) * 9;
         const dir = Math.sign(dx) || 1;
         a.vx += dir * push * dt * 6;
@@ -1558,7 +2000,7 @@ export class Game {
   private updateEndgame(dt: number) {
     const p = this.player;
     if (p.finished) return;
-    const toGo = TRACK_LENGTH - 20 - p.s;
+    const toGo = this.track.length - 20 - p.s;
 
     // announce the run home once
     const inStretch = toGo < 340 && toGo > 0;
@@ -1588,6 +2030,53 @@ export class Game {
       this.shakeAdd(0.4);
     }
     void dt;
+  }
+
+  /**
+   * Commit-or-bail shortcut logic. You bank the saving only by riding the
+   * channel from the mouth to the exit; bailing back onto the tape early
+   * gives nothing, which is what makes taking one a decision.
+   */
+  private updateShortcuts() {
+    const p = this.player;
+    const trk = this.track;
+    const here = trk.shortcutAt(p.s, p.x);
+
+    if (!this.scActive) {
+      if (here && p.s < here.s0 + 40) {
+        this.scActive = { sc: here, entered: p.s };
+        this.popup(`${here.name}!`, 'sub', null, '#c0f000');
+        audio.whoosh(0.9);
+        this.style = Math.min(1, this.style + 0.25);
+      }
+      return;
+    }
+
+    const sc = this.scActive.sc;
+    // made it through
+    if (p.s >= sc.s1 - 2) {
+      const saved = sc.saving;
+      p.s += saved;
+      this.shortcutsHit++;
+      this.addCombo();
+      const pts = 340 * this.comboMult();
+      this.addScore(pts);
+      this.boost = Math.min(100, this.boost + 26);
+      this.style = 1;
+      this.popup(`SHORTCUT!  −${saved.toFixed(0)}m  +${Math.round(pts)}`, 'trick', null, '#c0f000');
+      audio.chime(9);
+      audio.cheer(0.8);
+      this.scActive = null;
+      return;
+    }
+    // bailed back onto the racing line, or crashed out of it
+    const bailed = p.crash > 0
+      || Math.abs(p.x) < trk.halfWidth(p.s) - 1.5
+      || Math.sign(p.x) !== sc.side;
+    if (bailed) {
+      this.popup('BAILED OUT', 'sub', null, '#ff9500');
+      this.scActive = null;
+    }
   }
 
   private comboMult() { return 1 + this.combo * 0.35; }
@@ -1623,25 +2112,33 @@ export class Game {
 
     // lean
     const curv = trk.curvatureAt(r.s);
-    const targetLean = clamp(curv * r.v * r.v * 0.021 + steerInput * 0.16 + r.vx * 0.028, -0.62, 0.62);
+    const targetLean = clamp(
+      (curv * r.v * r.v * 0.021 + steerInput * 0.16 + r.vx * 0.028) * r.stLean,
+      -0.62, 0.62);
     r.leanV += (targetLean - r.lean) * 46 * dt - r.leanV * 9 * dt;
     r.lean += r.leanV * dt;
     r.lean = clamp(r.lean, -0.95, 0.95);
     rig.lean.rotation.z = -r.lean;
 
-    // body pitch from ground slope change + air
-    const pitchTarget = r.grounded ? clamp(-r.vy * 0.012, -0.16, 0.16) : clamp(-r.vy * 0.016, -0.3, 0.3);
-    rig.body.rotation.x = damp(rig.body.rotation.x, pitchTarget, 8, dt);
+    // Body pitch: the chassis rides the line between the two contact patches,
+    // plus a small vertical-velocity lean. This is what makes the bike look
+    // like it's rolling over terrain instead of sliding along a curve.
+    const pitchTarget = (r.grounded ? clamp(-r.vy * 0.012, -0.16, 0.16) : clamp(-r.vy * 0.016, -0.3, 0.3))
+      - r.chassisPitch;
+    rig.body.rotation.x = damp(rig.body.rotation.x, pitchTarget, 14, dt);
     rig.body.position.y = r.suspension * 0.35;
 
     // ---- suspension travel ---------------------------------------------
     // The frame drops with `suspension`; the fork lowers and swingarm move
     // the opposite way by the same amount, so the wheels stay planted while
     // the bike visibly squats into hits.
+    // Differential travel: the end carrying the load compresses more, so a
+    // nose-down attitude dives the fork and a nose-up squats the shock.
     const comp = -r.suspension;                        // >0 when compressed
-    const travel = clamp(comp * 0.5, -0.035, 0.13);
+    const bias = clamp(r.chassisPitch * 1.5, -0.5, 0.5);
+    const travel = clamp((comp + Math.max(0, -bias) * 0.16) * 0.5, -0.035, 0.13);
     rig.forkLower.position.copy(FORK_AXIS).multiplyScalar(-travel);
-    const swing = clamp(comp * 0.38, -0.03, 0.15);
+    const swing = clamp((comp + Math.max(0, bias) * 0.16) * 0.38, -0.03, 0.15);
     rig.swingarm.rotation.x = swing;
     // re-aim the coil shock between its frame and swingarm mounts
     _v3.copy(SHOCK_LOWER).applyAxisAngle(_xAxis, swing).add(BB_POS);
@@ -1749,8 +2246,9 @@ export class Game {
     // ---- head: look where you're going, not where the bike points -----
     const lookTarget = r.crash > 0
       ? 0
-      : clamp(-trk.curvatureAt(r.s + 20 + r.v * 0.5) * 34 - r.yaw * 0.5, -0.75, 0.75);
-    r.headYaw = damp(r.headYaw, lookTarget, 5, dt);
+      : clamp((-trk.curvatureAt(r.s + 20 + r.v * 0.5) * 34 - r.yaw * 0.5) * r.stHead,
+        -0.75, 0.75);
+    r.headYaw = damp(r.headYaw, lookTarget, 5 * r.stTwitch, dt);
     rig.head.rotation.y = r.headYaw;
     // and tip the chin up over jumps
     rig.head.rotation.x = damp(rig.head.rotation.x,
@@ -1766,6 +2264,29 @@ export class Game {
     const sc = 1 + airH * 1.7;
     rig.shadow.scale.set(sc, sc, 1);
     (rig.shadow.material as THREE.MeshBasicMaterial).opacity = 0.85 * (1 - airH * 0.72);
+
+    // ---- per-wheel contact patches -------------------------------------
+    // These sit at the real axle offsets and conform to the ground, so the
+    // bike reads as planted rather than floating over a single blob.
+    const lift = clamp01((r.y - gh) / 1.1);          // tight fade with height
+    const contactOn = r.crash <= 0 && lift < 1;
+    const place = (m: THREE.Mesh, ds: number, spread: number) => {
+      m.visible = contactOn;
+      if (!contactOn) return;
+      const cs = r.s + ds;
+      const cx = r.x;
+      const cy = trk.heightAt(cs, cx);
+      m.position.copy(trk.worldPos(cs, cx, cy + 0.04, _v3));
+      trk.frameAt(cs, _f1, _f2, _f3);
+      m.quaternion.setFromRotationMatrix(_m1.makeBasis(_f2, _f3, _f1));
+      m.rotateX(-Math.PI / 2);
+      // smears out and softens as the wheel unweights
+      const s2 = spread * (1 + lift * 1.6);
+      m.scale.set(s2, s2 * (1 + Math.abs(r.vx) * 0.02), 1);
+      (m.material as THREE.MeshBasicMaterial).opacity = 0.8 * (1 - lift) * (1 - lift);
+    };
+    place(rig.contactF, 0.60, 1);
+    place(rig.contactR, -0.62, 1.1);
   }
 
   // -------------------------------------------------------------------------
@@ -1774,10 +2295,11 @@ export class Game {
     const zone = trk.zoneAt(r.s);
     const dirtColor = _c1.setHex(zone.dirt);
 
-    // roost from rear wheel
-    if (r.grounded && r.v > 4) {
-      const slip = Math.abs(r.vx) + (inp.brake ? 12 : 0) + Math.abs(inp.steer) * r.v * 0.14;
-      const rate = (2 + slip * 2.4 + r.v * 0.5) * surf.roost;
+    // roost from rear wheel — volume is a property of the state
+    const stRoost = roostFactor(r.state);
+    if (stRoost > 0 && r.v > 4) {
+      const slip = Math.abs(r.vx) + Math.abs(inp.steer) * r.v * 0.14;
+      const rate = (2 + slip * 2.4 + r.v * 0.5) * surf.roost * stRoost;
       this.roostAccum += rate * dt;
       const rear = trk.worldPos(r.s - 0.7, r.x, r.y + 0.15, _v1);
       trk.frameAt(r.s, _f1, _f2, _f3);
@@ -1936,13 +2458,247 @@ export class Game {
   }
 
   // -------------------------------------------------------------------------
+  /** Tear down the current course and generate a different mountain. */
+  loadMountain(id: string) {
+    const m = getMountain(id);
+    if (this.mountainId === id && this.track) return;
+    this.mountainId = id;
+
+    this.scene.remove(this.track.group);
+    this.track.group.traverse(o => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.geometry) mesh.geometry.dispose();
+      const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
+      if (Array.isArray(mat)) mat.forEach(x => x.dispose());
+      else mat?.dispose();
+    });
+
+    this.track = new Track(m.seed, m.length);
+    this.scene.add(this.track.build());
+    this.lastZone = -1;
+    this.menuTime = 0;
+    this.resetRace();
+    this.updateCamera(0.016, true);
+  }
+
+  /**
+   * Apply a garage loadout: swap the player's rig for one wearing the chosen
+   * cosmetics, and install the derived performance multipliers.
+   */
+  applyLoadout(l: Loadout) {
+    this.perf = computePerf(l);
+    const p = this.player;
+    if (!p) return;
+    const bike = getBike(l.bike);
+    // heft drives collision mass: a SLAB HEAVY under GRUD genuinely
+    // out-muscles a WISP CARBON in a shoulder-check
+    p.mass = riderMass(bike.base.land + bike.base.bonk, bike.base.bonk);
+    const old = p.rig;
+    this.scene.remove(old.root, old.shadow, old.contactF, old.contactR);
+    old.root.traverse(o => {
+      const m = o as THREE.Mesh;
+      if (m.geometry) m.geometry.dispose();
+      const mat = m.material as THREE.Material | THREE.Material[] | undefined;
+      if (Array.isArray(mat)) mat.forEach(x => x.dispose());
+      else mat?.dispose();
+    });
+    const rig = createRider(loadoutColors(l));
+    rig.frontWheel.scale.setScalar(bike.wheelScale);
+    rig.rearWheel.scale.setScalar(bike.wheelScale);
+    rig.bike.scale.set(bike.tubeScale * 0.5 + 0.5, 1, 1);
+    this.scene.add(rig.root, rig.shadow, rig.contactF, rig.contactR);
+    p.rig = rig;
+  }
+
+  /**
+   * The cold open. Riders are frozen on the gate while the camera does the
+   * talking; a rival rolls up, they trade a look, he goes, and you get about
+   * a second to answer before the count. Nailing that window is the first
+   * mechanic the game teaches, and it teaches it by making you do it.
+   */
+  private updateIntro(dt: number) {
+    const t = this.introT;
+    const p = this.player;
+    const h = this.hud;
+    h.introT = t;
+    h.introFade = clamp01(t / 1.1);
+
+    // --- the rival who challenges you is whoever starts nearest
+    const foe = this.racers.find(r => !r.isPlayer)!;
+
+    // ---------- staging ----------
+    if (t < INTRO.jump) {
+      // everyone held on the line
+      for (const r of this.racers) { r.v = 0; r.vx = 0; r.vy = 0; }
+      // rival slides up beside the player
+      if (t > INTRO.rival) {
+        const k = clamp01((t - INTRO.rival) / 1.5);
+        foe.s = lerp(p.s - 7, p.s + 0.35, smootherstep(k));
+        foe.x = lerp(p.x + 6.5, p.x + 2.5, smootherstep(k));
+        foe.y = this.track.heightAt(foe.s, foe.x);
+        foe.wheelSpin += (1 - k) * 7 * dt;
+      }
+      // the look: both heads turn toward each other
+      if (t > INTRO.glance) {
+        const k = clamp01((t - INTRO.glance) / 0.5);
+        p.headYaw = damp(p.headYaw, -0.85 * k, 7, dt);
+        foe.headYaw = damp(foe.headYaw, 0.85 * k, 7, dt);
+      }
+    }
+
+    // ---------- rival launches ----------
+    if (t >= INTRO.jump && t < INTRO.count) {
+      if (!this.introFired) {
+        this.introFired = true;
+        audio.hop();
+        audio.whoosh(1.2);
+        foe.pedalling = 1;
+      }
+      // he actually rides away, so the threat is real
+      foe.v = Math.min(16, foe.v + 17 * dt);
+      foe.s += foe.v * dt;
+      foe.y = this.track.heightAt(foe.s, foe.x);
+      foe.crankAngle += 11 * dt;
+      foe.wheelSpin += foe.v * dt / 0.36;
+      p.headYaw = damp(p.headYaw, -0.5, 6, dt);
+    }
+
+    // ---------- reaction window ----------
+    const inWindow = t >= INTRO.react && t < INTRO.react + 1.0;
+    h.reactWindow = inWindow ? 1 - (t - INTRO.react) / 1.0 : 0;
+    if (inWindow && !this.introReacted) {
+      if (this.tap('KeyW', 'ArrowUp', 'Space')) {
+        this.introReacted = true;
+        h.holeshot = true;
+        audio.chime(8);
+        audio.cheer(0.7);
+        this.shakeAdd(0.35);
+      }
+    }
+
+    // ---------- text beats ----------
+    if (t < INTRO.rival) {
+      h.introLine = '';
+      h.introSub = getMountain(this.mountainId).name;
+    } else if (t < INTRO.jump) {
+      h.introLine = '';
+      h.introSub = `${foe.name} SIZES YOU UP`;
+    } else if (t < INTRO.count) {
+      h.introLine = h.holeshot ? 'GO!' : 'READY…';
+      h.introSub = h.holeshot ? 'HOLESHOT' : 'HIT THROTTLE';
+    } else if (t < INTRO.send) {
+      const n = 3 - Math.floor(t - INTRO.count);
+      h.introLine = String(Math.max(1, n));
+      h.introSub = '';
+      if (n !== this.introCount && n >= 1 && n <= 3) {
+        this.introCount = n;
+        audio.countBeep(false);
+      }
+    } else {
+      h.introLine = 'SEND IT.';
+      h.introSub = '';
+      if (!this.introSent) {
+        this.introSent = true;
+        audio.countBeep(true);
+        audio.cheer(1.4);
+        audio.duck(0.7, 1.2);
+        this.shakeAdd(0.9);
+        // holeshot reward: a real head start you earned
+        if (h.holeshot) {
+          this.boost = Math.min(100, this.boost + 45);
+          this.player.v = 9;
+          this.popup('HOLESHOT!', 'trick', null, '#c0f000');
+          this.addScore(250);
+        }
+      }
+    }
+
+    // ---------- camera ----------
+    this.introCamera(t, dt);
+
+    if (t >= INTRO.end) {
+      h.introLine = ''; h.introSub = ''; h.reactWindow = 0;
+      this.frozen = false;
+      this.goFlash = 0.5;
+      this.setPhase('race');
+    }
+  }
+
+  private introCamera(t: number, dt: number) {
+    const trk = this.track;
+    const p = this.player;
+    const first = t < dt * 2;
+    const rate = first ? 999 : 3.2;
+    let cs: number, cx: number, ch: number, ls: number, lx: number, lh: number, fov: number;
+
+    if (t < INTRO.swing) {
+      // low and in front, looking back up at the rider against the sky
+      const k = clamp01(t / INTRO.swing);
+      cs = p.s + lerp(9, 5.5, k);
+      cx = p.x + lerp(3.4, 1.6, k);
+      ch = lerp(0.6, 1.5, k);
+      ls = p.s; lx = p.x; lh = 1.5;
+      fov = lerp(42, 50, k);
+    } else if (t < INTRO.rival) {
+      // swing around behind, revealing the drop
+      const k = smootherstep(clamp01((t - INTRO.swing) / (INTRO.rival - INTRO.swing)));
+      const a = lerp(0, Math.PI, k);
+      cs = p.s + Math.cos(a) * 6.5;
+      cx = p.x + Math.sin(a) * 5.0;
+      ch = lerp(1.5, 3.1, k);
+      ls = p.s + 14; lx = p.x; lh = 0.4;
+      fov = lerp(50, 62, k);
+    } else if (t < INTRO.jump) {
+      // two-shot: both riders in frame
+      cs = p.s - 5.4; cx = p.x - 1.4; ch = 2.5;
+      ls = p.s + 3; lx = p.x + 1.6; lh = 1.5;
+      fov = 52;
+    } else if (t < INTRO.send) {
+      // settle into the race chase
+      const k = smootherstep(clamp01((t - INTRO.jump) / (INTRO.send - INTRO.jump)));
+      cs = lerp(p.s - 5.4, p.s - 7.6, k);
+      cx = lerp(p.x - 1.4, p.x * 0.62, k);
+      ch = lerp(2.5, 2.9, k);
+      ls = lerp(p.s + 3, p.s + 12, k); lx = p.x * 0.55; lh = lerp(1.5, 1.9, k);
+      fov = lerp(52, 66, k);
+    } else {
+      // punch in on the launch
+      cs = p.s - 7.0; cx = p.x * 0.62; ch = 2.8;
+      ls = p.s + 13; lx = p.x * 0.55; lh = 1.9;
+      fov = 72;
+    }
+
+    const want = trk.worldPos(cs, cx, trk.heightAt(cs, cx) + ch, _v1);
+    this.camPos.x = damp(this.camPos.x, want.x, rate, dt);
+    this.camPos.y = damp(this.camPos.y, want.y, rate, dt);
+    this.camPos.z = damp(this.camPos.z, want.z, rate, dt);
+    const look = trk.worldPos(ls, lx, trk.heightAt(ls, lx) + lh, _v2);
+    this.camLook.x = damp(this.camLook.x, look.x, first ? 999 : 4.5, dt);
+    this.camLook.y = damp(this.camLook.y, look.y, first ? 999 : 4.5, dt);
+    this.camLook.z = damp(this.camLook.z, look.z, first ? 999 : 4.5, dt);
+
+    this.camera.position.copy(this.camPos);
+    if (this.shake > 0) {
+      this.shake = Math.max(0, this.shake - dt * 2.6);
+      const m = this.shake * this.shake * 0.9;
+      this.camera.position.x += (Math.random() * 2 - 1) * m;
+      this.camera.position.y += (Math.random() * 2 - 1) * m;
+    }
+    this.camera.lookAt(this.camLook);
+    this.camRoll = damp(this.camRoll, t < INTRO.swing ? 0.05 : 0, 3, dt);
+    this.camera.rotateZ(this.camRoll);
+    this.fov = damp(this.fov, fov, 4, dt);
+    this.camera.fov = this.fov;
+    this.camera.updateProjectionMatrix();
+  }
+
   /** Slow cinematic sweep down the mountain behind the main menu. */
   private cinematicCamera(dt: number) {
     const trk = this.track;
     this.menuTime += dt;
     const loop = 74;
     const t = (this.menuTime % loop) / loop;
-    const s = 40 + t * (TRACK_LENGTH - 260);
+    const s = 40 + t * (this.track.length - 260);
     const wob = Math.sin(this.menuTime * 0.42);
     const hw = trk.halfWidth(s);
     const x = wob * hw * 0.75;
@@ -1969,6 +2725,7 @@ export class Game {
 
   private updateCamera(dt: number, snap: boolean) {
     if (this.hud.phase === 'menu') { this.cinematicCamera(dt); return; }
+    if (this.hud.phase === 'intro') return;   // the cold open drives it
     if (this.replayData && this.hud.phase === 'finish') return;  // replay drives it
     const trk = this.track;
     const p = this.player;
@@ -2135,6 +2892,10 @@ export class Game {
     });
     rig.root.renderOrder = 3;
     (rig.shadow.material as THREE.MeshBasicMaterial).opacity = 0.22;
+    // the ghost is translucent and never runs the pose pass, so it gets the
+    // soft blob only — contact patches would read as solid smudges
+    rig.contactF.visible = false;
+    rig.contactR.visible = false;
     this.scene.add(rig.root);
     this.scene.add(rig.shadow);
     this.ghostRig = rig;
@@ -2341,7 +3102,7 @@ export class Game {
     h.speed = p.v * 3.6;
     h.place = p.place;
     h.total = this.racers.length;
-    h.progress = clamp01(p.s / TRACK_LENGTH);
+    h.progress = clamp01(p.s / this.track.length);
     h.time = this.raceTime;
     h.boost = this.boost;
     h.style = this.style;
@@ -2356,13 +3117,19 @@ export class Game {
     h.boosting = this.boosting;
     h.drafting = this.drafting;
     h.reducedMotion = this.reducedMotion;
+    h.state = p.state;
+    h.stateLabel = STATE_RULES[p.state].label;
+    h.stateT = p.stateT;
+    h.pumpArmed = p.pumpArmed;
+    if (h.lastBonkT > 0) h.lastBonkT -= this.lastDt;
+    if (this.debugStates) h.transitions = p.log.recent(8);
     h.recover = p.recover;
     h.recoverPulse = Math.max(0, h.recoverPulse - this.lastDt * 5);
     const z = this.track.zoneAt(p.s);
     h.zone = z.name; h.zoneSub = z.sub;
     h.rivals = this.racers.map(r => ({
       name: r.name, color: r.isPlayer ? '#ffffff' : r.colorHex,
-      progress: clamp01(r.s / TRACK_LENGTH), place: r.place,
+      progress: clamp01(r.s / this.track.length), place: r.place,
     }));
     // trick readout
     if (!p.grounded && p.airTime > 0.15) {
@@ -2391,7 +3158,14 @@ export class Game {
       }
     }
 
+    // the summit is exposed: wind swells through the opening, then the
+    // descent takes over and it becomes the rush of speed instead
+    const gale = h.phase === 'intro'
+      ? clamp01(this.introT / 2.2) * (1 - clamp01((this.introT - INTRO.jump) / 3))
+      : 0;
+
     audio.update(this.lastDt, {
+      gale,
       rivalNear: rvNear * rvNear,
       rivalPan: rvPan,
       rivalSpeed: rvSpeed,
@@ -2422,6 +3196,9 @@ const _c1 = new THREE.Color();
 const _c2 = new THREE.Color();
 const _yAxis = new THREE.Vector3(0, 1, 0);
 const _xAxis = new THREE.Vector3(1, 0, 0);
+const IDENTITY_PERF: Perf = {
+  topCap: 0, accel: 1, grip: 1, airRate: 1, landTol: 0, bonk: 1,
+};
 const _v3 = new THREE.Vector3();
 const _v4 = new THREE.Vector3();
 void smoothstep; void lerp; void ZONES;

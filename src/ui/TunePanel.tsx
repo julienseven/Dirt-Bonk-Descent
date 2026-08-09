@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { Track } from '../game/track';
 import { fullReport, type DiffReport } from '../game/tune';
 import { formatTime } from '../game/core';
+import { verifyStateMachine, type VerifyReport } from '../game/bikeState';
+import { verifyBonkSystem, type BonkVerify } from '../game/bonk';
 
 const SKILL_LABEL: Record<string, string> = {
   '0.45': 'CASUAL',
@@ -30,9 +32,13 @@ function verdict(d: string, skill: number, win: number): { txt: string; ok: bool
 export default function TunePanel() {
   const [data, setData] = useState<{ diff: string; rows: DiffReport[] }[] | null>(null);
   const [ms, setMs] = useState(0);
+  const [sm, setSm] = useState<VerifyReport | null>(null);
+  const [bk, setBk] = useState<BonkVerify | null>(null);
 
   useEffect(() => {
     const t0 = performance.now();
+    setSm(verifyStateMachine());
+    setBk(verifyBonkSystem());
     // build the same course the game uses, then race it many times headless
     const trk = new Track(20260114);
     const r = fullReport(trk);
@@ -49,6 +55,49 @@ export default function TunePanel() {
         same AI decisions, no rendering. Tricks, bonks and crashes are excluded so
         this reads purely on speed balance. 6 runs per skill level.
       </p>
+      {sm && (
+        <div className="mt-4 border-l-4 border-[#2fe6c8] bg-black/45 px-4 py-3">
+          <div className="hud-big text-[18px] text-white">STATE MACHINE</div>
+          <div className="mt-1 flex flex-wrap gap-x-6 gap-y-1 text-[12px]">
+            <span className="text-white/55">{sm.cases.toLocaleString()} cases</span>
+            <span style={{ color: sm.total ? '#7ef7c8' : '#ff6a6a' }}>
+              TOTAL {sm.total ? 'PASS' : 'FAIL'}
+            </span>
+            <span style={{ color: sm.nonDeterministic === 0 ? '#7ef7c8' : '#ff6a6a' }}>
+              DETERMINISTIC {sm.nonDeterministic === 0 ? 'PASS' : `FAIL (${sm.nonDeterministic})`}
+            </span>
+            <span style={{ color: sm.unreachable.length === 0 ? '#7ef7c8' : '#ffd400' }}>
+              REACHABLE {sm.reachable.length}/{sm.reachable.length + sm.unreachable.length}
+            </span>
+          </div>
+          {sm.unreachable.length > 0 && (
+            <div className="mt-1 text-[11px] text-[#ffd400]">
+              unreachable: {sm.unreachable.join(', ')}
+            </div>
+          )}
+        </div>
+      )}
+      {bk && (
+        <div className="mt-3 border-l-4 border-[#ff2e88] bg-black/45 px-4 py-3">
+          <div className="hud-big text-[18px] text-white">BONK SYSTEM</div>
+          <div className="mt-1 flex flex-wrap gap-x-6 gap-y-1 text-[12px]">
+            <span className="text-white/55">{bk.cases.toLocaleString()} collisions</span>
+            <span style={{ color: bk.deterministic ? '#7ef7c8' : '#ff6a6a' }}>
+              DETERMINISTIC {bk.deterministic ? 'PASS' : 'FAIL'}
+            </span>
+            <span style={{ color: bk.unreachable.length === 0 ? '#7ef7c8' : '#ff6a6a' }}>
+              ALL TYPES REACHABLE {bk.unreachable.length === 0 ? 'PASS' : 'FAIL'}
+            </span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-[11px]">
+            {Object.entries(bk.counts).map(([k, n]) => (
+              <span key={k} style={{ color: n === 0 ? '#ff6a6a' : 'rgba(255,255,255,.7)' }}>
+                {k}: {((n / bk.cases) * 100).toFixed(1)}%
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       {!data && <div className="hud-big mt-8 text-[20px] text-white/70">SIMULATING…</div>}
       {data && (
         <>

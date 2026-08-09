@@ -2,6 +2,8 @@
 // DIRT BONK DESCENT :: persistence (records, splits, settings)
 // ---------------------------------------------------------------------------
 
+import { type Loadout, DEFAULT_LOADOUT } from './garage';
+
 export type Difficulty = 'chill' | 'pro' | 'savage';
 
 export const DIFFICULTIES: { id: Difficulty; label: string; blurb: string; color: string }[] = [
@@ -88,6 +90,14 @@ export interface SaveData {
   /** accessibility */
   reducedMotion: boolean;
   showGhost: boolean;
+  /** garage */
+  coins: number;
+  loadout: Loadout;
+  /** progression */
+  xp: number;
+  mountain: string;
+  /** best time per mountain id */
+  mountainBest: Record<string, number>;
 }
 
 const KEY = 'dirt-bonk-descent.v1';
@@ -105,6 +115,11 @@ const DEFAULTS: SaveData = {
     typeof window !== 'undefined' &&
     window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true,
   showGhost: true,
+  coins: 0,
+  loadout: DEFAULT_LOADOUT,
+  xp: 0,
+  mountain: 'shalebeck',
+  mountainBest: {},
 };
 
 export function loadSave(): SaveData {
@@ -119,6 +134,17 @@ export function loadSave(): SaveData {
       best: p.best ?? {},
       bestScore: p.bestScore ?? {},
       ghost: p.ghost ?? {},
+      coins: p.coins ?? 0,
+      xp: p.xp ?? 0,
+      mountain: p.mountain ?? 'shalebeck',
+      mountainBest: p.mountainBest ?? {},
+      // merge so loadouts saved before a field existed still load
+      loadout: {
+        ...DEFAULT_LOADOUT,
+        ...(p.loadout ?? {}),
+        levels: p.loadout?.levels ?? {},
+        owned: p.loadout?.owned?.length ? p.loadout.owned : ['clunker'],
+      },
     };
   } catch {
     return { ...DEFAULTS };

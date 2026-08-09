@@ -130,6 +130,8 @@ export class GameAudio {
     speed01: number; grounded: boolean; offTrack: boolean; airborne: boolean;
     braking: boolean; crowdNear: number; intensity: number; paused: boolean;
     rivalNear?: number; rivalPan?: number; rivalSpeed?: number;
+    /** 0..1 exposed-summit gale, used by the cold open */
+    gale?: number;
   }) {
     if (!this.ready || !this.ctx) return;
     const t = this.ctx.currentTime;
@@ -140,9 +142,14 @@ export class GameAudio {
     this.roll.filter.frequency.setTargetAtTime(lerp(150, o.offTrack ? 520 : 900, sp), t, 0.1);
     this.roll.filter.Q.value = o.offTrack ? 0.6 : 1.6;
 
-    const windTarget = o.paused ? 0 : lerp(0.0, 0.30, Math.pow(sp, 1.7)) + (o.airborne ? 0.06 : 0);
-    this.wind.gain.gain.setTargetAtTime(windTarget, t, 0.12);
-    this.wind.filter.frequency.setTargetAtTime(lerp(320, 2600, sp), t, 0.15);
+    const gale = clamp01(o.gale ?? 0);
+    const windTarget = o.paused
+      ? 0
+      : lerp(0.0, 0.30, Math.pow(sp, 1.7)) + (o.airborne ? 0.06 : 0) + gale * 0.26;
+    this.wind.gain.gain.setTargetAtTime(windTarget, t, gale > 0 ? 0.5 : 0.12);
+    // a summit gale is broader and lower than the rush of speed
+    this.wind.filter.frequency.setTargetAtTime(
+      lerp(lerp(320, 2600, sp), 520, gale), t, 0.3);
 
     this.crowd.gain.gain.setTargetAtTime(o.paused ? 0 : clamp01(o.crowdNear) * 0.16, t, 0.35);
 

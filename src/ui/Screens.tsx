@@ -5,6 +5,7 @@ import {
   DIFFICULTIES, formatDelta, type Difficulty, type RecordResult, type SaveData,
 } from '../game/save';
 import { ZONES } from '../game/track';
+import { getMountain, levelFromXp } from '../game/mountains';
 
 const PLACE = ['', '1st', '2nd', '3rd', '4th', '5th', '6th'];
 
@@ -29,10 +30,13 @@ const CONTROLS: [string, React.ReactNode][] = [
 ];
 
 export function Menu({
-  save, onStart, onDifficulty, onToggleMusic, onToggleSfx, onToggleMotion, onToggleGhost,
+  save, onStart, onGarage, onMountains, onDifficulty,
+  onToggleMusic, onToggleSfx, onToggleMotion, onToggleGhost,
 }: {
   save: SaveData;
   onStart: () => void;
+  onGarage: () => void;
+  onMountains: () => void;
   onDifficulty: (d: Difficulty) => void;
   onToggleMusic: (v: boolean) => void;
   onToggleSfx: (v: boolean) => void;
@@ -73,6 +77,22 @@ export function Menu({
               <span className="title-skew block bg-[#ff2e88] px-10 py-4 transition-transform duration-150 group-hover:translate-x-1 group-hover:-translate-y-1"
                 style={{ boxShadow: '8px 8px 0 #000, 0 0 40px #ff2e8877' }}>
                 <span className="hud-big block text-[40px] leading-none text-white">DROP IN</span>
+              </span>
+            </button>
+            <button onClick={() => { audio.resume(); audio.uiClick(); onMountains(); }}
+              className="group mt-3 block w-full">
+              <span className="title-skew flex items-center justify-between gap-3 border-2 border-[#ffd400] px-6 py-2 transition-transform duration-150 group-hover:translate-x-1"
+                style={{ boxShadow: '5px 5px 0 #000' }}>
+                <span className="hud-big text-[24px] leading-none text-[#ffd400]">MOUNTAINS</span>
+                <span className="hud-label !text-[9px] text-white/60">{getMountain(save.mountain).name}</span>
+              </span>
+            </button>
+            <button onClick={() => { audio.resume(); audio.uiClick(); onGarage(); }}
+              className="group mt-2 block w-full">
+              <span className="title-skew flex items-center justify-between gap-3 border-2 border-[#2fe6c8] px-6 py-2 transition-transform duration-150 group-hover:translate-x-1"
+                style={{ boxShadow: '5px 5px 0 #000' }}>
+                <span className="hud-big text-[24px] leading-none text-[#2fe6c8]">GARAGE</span>
+                <span className="hud-label !text-[9px] text-[#ffd400]">{save.coins.toLocaleString()} SCRAP</span>
               </span>
             </button>
             <div className="mt-4 flex flex-wrap gap-2">
@@ -152,6 +172,8 @@ export function Menu({
         </div>
 
         <div className="slide-up compact-hide mt-6 flex flex-wrap gap-x-6 gap-y-1 text-[11px] font-bold uppercase tracking-[.18em] text-white/40" style={{ animationDelay: '.24s' }}>
+          <span><span className="text-[#ffd400]">Tip</span> — pump the terrain: hold <span className="text-white">SHIFT</span> into a dip, release over the crest for free speed</span>
+          <span><span className="text-[#ffd400]">Tip</span> — land rear wheel first to keep drive; nose-down goes over the bars</span>
           <span><span className="text-[#ffd400]">Tip</span> — release the trick key to level out before you land</span>
           <span><span className="text-[#ffd400]">Tip</span> — clip a rock's shoulder and you'll deflect; hit it square and you're down</span>
           <span><span className="text-[#ffd400]">Tip</span> — bonks, tricks and close shaves chain into one multiplier</span>
@@ -184,10 +206,11 @@ export function Pause({ onResume, onRestart, onQuit }: { onResume: () => void; o
 }
 
 export function Results({
-  game, save, result, onRestart, onMenu,
+  game, save, result, payout, xpGain, levelUp, onRestart, onMenu, onGarage,
 }: {
   game: Game; save: SaveData; result: RecordResult | null;
-  onRestart: () => void; onMenu: () => void;
+  payout: number; xpGain: number; levelUp: boolean;
+  onRestart: () => void; onMenu: () => void; onGarage: () => void;
 }) {
   const d = game.hud.finishData;
   if (!d) return null;
@@ -233,6 +256,36 @@ export function Results({
             style={{ textShadow: `0 8px 0 ${win ? '#ffd400' : '#ff2e88'}, 0 0 60px #00000099` }}>
             {PLACE[d.place]} PLACE
           </h2>
+          {(payout > 0 || xpGain > 0) && (() => {
+            const lv = levelFromXp(save.xp);
+            return (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <div className="inline-flex items-baseline gap-2 border-l-4 border-[#ffd400] bg-black/55 px-3 py-1">
+                  <span className="hud-big text-[26px] leading-none text-[#ffd400]">+{payout.toLocaleString()}</span>
+                  <span className="hud-label !text-[9px]">SCRAP</span>
+                </div>
+                <div className="inline-flex items-baseline gap-2 border-l-4 border-[#2fe6c8] bg-black/55 px-3 py-1">
+                  <span className="hud-big text-[26px] leading-none text-[#2fe6c8]">+{xpGain}</span>
+                  <span className="hud-label !text-[9px]">XP</span>
+                </div>
+                <div className="min-w-[150px]">
+                  <div className="flex items-baseline justify-between">
+                    <span className="hud-label !text-[8px]">LEVEL {lv.level}</span>
+                    <span className="hud-label !text-[8px]">{lv.into}/{lv.need}</span>
+                  </div>
+                  <div className="mt-[3px] h-[7px] border border-white/25 bg-black/60">
+                    <div className="h-full bg-gradient-to-r from-[#2fe6c8] to-[#ffd400] transition-[width] duration-700"
+                      style={{ width: `${Math.min(100, (lv.into / lv.need) * 100)}%` }} />
+                  </div>
+                </div>
+                {levelUp && (
+                  <span className="title-skew bg-[#2fe6c8] px-3 py-[3px]">
+                    <span className="hud-big text-[15px] text-black">LEVEL UP!</span>
+                  </span>
+                )}
+              </div>
+            );
+          })()}
           {(result?.timeRecord || result?.scoreRecord) && (
             <div className="mt-2 flex gap-2">
               {result.timeRecord && (
@@ -308,6 +361,10 @@ export function Results({
           <button onClick={() => { audio.uiClick(); onRestart(); }}
             className="title-skew bg-[#ffd400] px-8 py-3" style={{ boxShadow: '6px 6px 0 #000' }}>
             <span className="hud-big text-[26px] text-black">RUN IT BACK</span>
+          </button>
+          <button onClick={() => { audio.uiClick(); onGarage(); }}
+            className="title-skew border-2 border-[#2fe6c8] px-8 py-3" style={{ boxShadow: '6px 6px 0 #000' }}>
+            <span className="hud-big text-[26px] text-[#2fe6c8]">GARAGE</span>
           </button>
           <button onClick={() => { audio.uiClick(); onMenu(); }}
             className="title-skew border-2 border-white/40 px-8 py-3" style={{ boxShadow: '6px 6px 0 #000' }}>
