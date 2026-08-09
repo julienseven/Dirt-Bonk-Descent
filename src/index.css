@@ -1,0 +1,109 @@
+@import "tailwindcss";
+
+@layer base {
+  html, body, #root {
+    height: 100%; margin: 0; background: #06070a; overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body { font-family: 'Inter', system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
+  canvas { display: block; }
+}
+
+@layer components {
+  .hud-big {
+    font-family: Impact, 'Haettenschweiler', 'Arial Narrow Bold', 'Arial Black', sans-serif;
+    font-weight: 900;
+    letter-spacing: 0.01em;
+    text-shadow: 0 3px 0 rgba(0,0,0,.85), 0 0 18px rgba(0,0,0,.5);
+  }
+  .hud-label {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: .22em;
+    color: rgba(255,255,255,.62);
+    text-transform: uppercase;
+    text-shadow: 0 2px 3px rgba(0,0,0,.9);
+  }
+  .hud-mono {
+    font-family: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace;
+    font-weight: 800;
+    text-shadow: 0 2px 0 rgba(0,0,0,.85);
+  }
+  .hud-panel {
+    background: linear-gradient(180deg, rgba(10,12,16,.78), rgba(10,12,16,.55));
+    border-left: 3px solid #ffd400;
+    transform: skewX(-9deg);
+    backdrop-filter: blur(3px);
+  }
+  .hud-panel > * { transform: skewX(9deg); }
+}
+
+/* speed streaks */
+.speedlines {
+  background:
+    repeating-conic-gradient(from 0deg at 50% 52%,
+      rgba(255,255,255,0) 0deg 3deg,
+      rgba(255,255,255,.10) 3deg 3.5deg,
+      rgba(255,255,255,0) 3.5deg 7deg);
+  mask-image: radial-gradient(ellipse at 50% 52%, transparent 24%, black 78%);
+  -webkit-mask-image: radial-gradient(ellipse at 50% 52%, transparent 24%, black 78%);
+  animation: dashPulse .35s linear infinite;
+  mix-blend-mode: screen;
+}
+@keyframes dashPulse {
+  0%   { transform: scale(1);    opacity: .85; }
+  50%  { transform: scale(1.14); opacity: 1; }
+  100% { transform: scale(1.3);  opacity: 0; }
+}
+
+.grit {
+  background-image:
+    repeating-linear-gradient(115deg, rgba(255,212,0,.10) 0 14px, transparent 14px 28px);
+}
+
+.title-skew { transform: skewX(-9deg); }
+
+@keyframes wobble {
+  0%,100% { transform: rotate(-1.4deg) }
+  50%     { transform: rotate(1.4deg) }
+}
+.wobble { animation: wobble 3.2s ease-in-out infinite; }
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(22px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.slide-up { animation: slideUp .45s cubic-bezier(.2,.9,.25,1) both; }
+
+@keyframes scanline {
+  from { background-position: 0 0; }
+  to   { background-position: 0 100px; }
+}
+.scan {
+  background-image: repeating-linear-gradient(0deg, rgba(255,255,255,.045) 0 1px, transparent 1px 3px);
+  animation: scanline 4s linear infinite;
+}
+
+/* On touch devices the thumb pads own the bottom corners, so lift and
+   shrink the gauges out from under them. */
+@media (pointer: coarse) {
+  .hud-speedo {
+    bottom: 118px !important;
+    left: 4px !important;
+    transform: scale(.72);
+    transform-origin: bottom left;
+  }
+  .hud-boost {
+    bottom: 130px !important;
+    right: 4px !important;
+    transform: scale(.78);
+    transform-origin: bottom right;
+  }
+  .hud-descent { display: none; }
+}
+
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-thumb { background: #ffd40055; }
