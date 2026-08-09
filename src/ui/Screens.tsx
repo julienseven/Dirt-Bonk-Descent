@@ -208,10 +208,21 @@ export function Results({
   }
   const photo = isFinite(d.gap) && d.gap < 0.75;
   return (
-    <div className="screen-pad absolute inset-0 z-20 flex items-center justify-center" style={{ background: 'radial-gradient(ellipse at 50% 40%, rgba(6,8,12,.4) 0%, rgba(4,5,8,.93) 70%)' }}>
-      <div className="scan pointer-events-none absolute inset-0 opacity-50" />
+    <div className="screen-pad absolute inset-0 z-20 flex items-center justify-center"
+      style={{
+        // left-weighted so the replay flying behind stays visible on the right
+        background:
+          'linear-gradient(100deg, rgba(4,5,8,.94) 0%, rgba(4,5,8,.90) 46%, rgba(4,5,8,.55) 68%, rgba(4,5,8,.30) 100%)',
+      }}>
+      <div className="scan pointer-events-none absolute inset-0 opacity-30" />
+      <div className="pointer-events-none absolute right-5 top-4 flex items-center gap-2">
+        <span className="h-[9px] w-[9px] rounded-full bg-[#ff2e88]"
+          style={{ animation: 'wobble 1.2s ease-in-out infinite' }} />
+        <span className="hud-label !text-[10px]">REPLAY</span>
+      </div>
       <div className="screen-scroll relative max-h-full w-full px-6 py-4">
-       <div className="mx-auto w-full max-w-4xl">
+       {/* left-aligned on wide screens so the replay has room to breathe */}
+       <div className="mx-auto w-full max-w-4xl xl:mx-0 xl:ml-[4vw]">
         <div className="slide-up">
           <div className="title-skew inline-block px-5 py-1" style={{ background: win ? '#ffd400' : '#ff2e88' }}>
             <span className="hud-label !text-[12px] !tracking-[.4em] !text-black">

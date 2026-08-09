@@ -6,17 +6,24 @@ import {
   clamp, clamp01, damp, lerp, RNG, TAU, smoothstep, fbm1,
 } from './core';
 import { Track, TRACK_LENGTH, Obstacle, ZONES } from './track';
-import { createRider, RiderRig, RIDER_PALETTES } from './models';
+import {
+  createRider, RiderRig, RIDER_PALETTES,
+  BB_POS, SHOCK_UPPER, SHOCK_LOWER, SHOCK_BASE_LEN, FORK_AXIS,
+} from './models';
 import {
   ParticlePool, makeSoftTexture, makeChunkTexture, makeSkyTexture, makeCloudTexture,
 } from './fx';
 import { audio } from './audio';
 import {
   type Difficulty, type Ghost, DIFF_TUNING, GHOST_DT, encodeGhost,
+  SKILL_MIN, SKILL_MAX,
 } from './save';
 
-const GRAV = 30;
-const SOFT_CAP = 47;
+export const GRAV = 30;
+export const SOFT_CAP = 47;
+/** quadratic air drag; tucking multiplies this by TUCK_DRAG */
+export const DRAG_K = 0.0040;
+export const TUCK_DRAG = 0.58;
 
 export type Phase = 'menu' | 'countdown' | 'race' | 'finish' | 'paused';
 
@@ -105,6 +112,10 @@ interface Racer {
   obsCd: number;
   crashMax: number;    // full duration of the current tumble
   recover: number;     // 0..1 mash progress toward getting up early
+  crankAngle: number;  // drivetrain phase (freewheels when not pedalling)
+  pedalling: number;   // 0..1 smoothed, drives the leg cycle vs attack stance
+  headYaw: number;     // look-into-the-corner
+  weight: number;      // -1 hung off the back .. +1 forward over the bars
   place: number;
   finished: boolean;
   finishTime: number;
@@ -174,6 +185,11 @@ export class Game {
   private ghostRig: RiderRig | null = null;
   private ghostSamples: { s: number; x: number; y: number; lean: number }[] = [];
   private ghostAccum = 0;
+  // ---- results-screen replay
+  private replayData: Ghost | null = null;
+  private replayT = 0;
+  private replayShot = -1;
+  private camSnap = false;
   // trick state
   airSpin = 0; airFlip = 0; airPose = 0; airPeak = 0; airStartY = 0;
   trickBuffer: string[] = [];
@@ -385,6 +401,7 @@ export class Game {
       lean: 0, leanV: 0, yaw: 0, steerVis: 0, wheelSpin: 0, crash: 0, crashSpin: 0,
       suspension: 0, suspV: 0, bonkCd: 0, bonkSwing: 0, bonkDir: 1, stun: 0,
       grace: 0, lastObs: -1, obsCd: 0, crashMax: 1, recover: 0,
+      crankAngle: 0, pedalling: 0, headYaw: 0, weight: 0,
       place: i + 1, finished: false, finishTime: 0,
       skill: 0, aiOffset: 0, aiSeed: this.rng.range(0, 100), aiHopCd: 0, aiCap: 30,
       corner: 1, aggression: 0,
@@ -419,6 +436,7 @@ export class Game {
   }
 
   resetRace() {
+    this.stopReplay();
     const grid = [0, -1, 1, -2, 2, -3];
     this.racers.forEach((r, i) => {
       r.s = 10 - Math.abs(grid[i]) * 3.4;
@@ -614,7 +632,8 @@ export class Game {
         if (this.finishHold > 2.2) this.enterFinish();
       }
     } else if (phase === 'finish') {
-      this.simulate(sdt * 0.6, false);
+      if (this.replayData) this.updateReplay(dt);
+      else this.simulate(sdt * 0.6, false);
     } else {
       this.simulate(0, false);
     }
@@ -655,6 +674,7 @@ export class Game {
       splits: this.splits.slice(),
     };
     this.setPhase('finish');
+    this.startReplay();
     audio.cheer(1.3);
     for (let i = 0; i < 6; i++) setTimeout(() => audio.chime(i * 2), i * 130);
   }
@@ -875,7 +895,7 @@ export class Game {
     if (inp.pedal) a += lerp(11, 1.2, speed01);
     if (inp.brake) a -= 30 * surf.grip;
     if (r.stun > 0) a -= 8;
-    const dragK = 0.0040 * (inp.tuck ? 0.58 : 1);
+    const dragK = DRAG_K * (inp.tuck ? TUCK_DRAG : 1);
     a -= dragK * r.v * r.v;
     a -= surf.drag * (r.v * 0.055 + 0.5);
     if (inp.boost) a += 17;
@@ -953,6 +973,26 @@ export class Game {
           }
         }
       }
+    }
+
+    // ---- drivetrain: a DH bike freewheels, so the cranks only turn while
+    // the rider is actually putting power down.
+    r.pedalling = damp(r.pedalling, inp.pedal && r.grounded ? 1 : 0, 9, dt);
+
+    // ---- fore/aft weight shift. Riders get back over the rear wheel on
+    // steeps and under braking, and move forward to drive on the flat.
+    let wTarget = 0;
+    wTarget -= clamp01((pitch - 0.14) / 0.20) * 0.85;      // steepness
+    if (inp.brake) wTarget -= 0.7;
+    if (inp.tuck) wTarget += 0.35;
+    if (inp.pedal && r.v < 22) wTarget += 0.45;
+    if (!r.grounded) wTarget = wTarget * 0.3 - 0.15;
+    if (r.stun > 0) wTarget -= 0.3;
+    r.weight = damp(r.weight, clamp(wTarget, -1, 1), 4.5, dt);
+    if (inp.pedal && r.grounded) {
+      // cadence rises with speed but tops out; riders spin out in tall gears
+      const cadence = lerp(4.2, 11.5, clamp01(r.v / 26));
+      r.crankAngle += cadence * dt;
     }
 
     // ---- visuals
@@ -1086,11 +1126,13 @@ export class Game {
     targetX = clamp(targetX, -hw * 0.86, hw * 0.86);
     const steer = clamp((targetX - r.x) * 0.42 - r.vx * 0.18, -1, 1);
 
-    // rubber-band: keeps the pack breathing around the player without cheating
+    // rubber-band: keeps the pack breathing around the player without cheating.
+    // bandK is per-difficulty so the band can't erase the difficulty choice.
     const rel = this.player.s - r.s;
-    const band = clamp(rel * 0.0024, -0.10, 0.15);
-    const skill = clamp(r.skill + band, 0.58, 1.06);
-    r.aiCap = 24.5 + skill * 15;                      // ~33 - 41 m/s ceiling
+    const bk = DIFF_TUNING[this.difficulty].bandK;
+    const band = clamp(rel * 0.0024 * bk, -0.10 * bk, 0.15 * bk);
+    const skill = clamp(r.skill + band, SKILL_MIN, SKILL_MAX);
+    r.aiCap = 24.5 + skill * 15;
     const wantSpeed = r.aiCap;
     // weaker riders bleed more speed through corners, so gaps open naturally
     const grip = 15 + r.corner * 9;
@@ -1592,23 +1634,53 @@ export class Game {
     rig.body.rotation.x = damp(rig.body.rotation.x, pitchTarget, 8, dt);
     rig.body.position.y = r.suspension * 0.35;
 
+    // ---- suspension travel ---------------------------------------------
+    // The frame drops with `suspension`; the fork lowers and swingarm move
+    // the opposite way by the same amount, so the wheels stay planted while
+    // the bike visibly squats into hits.
+    const comp = -r.suspension;                        // >0 when compressed
+    const travel = clamp(comp * 0.5, -0.035, 0.13);
+    rig.forkLower.position.copy(FORK_AXIS).multiplyScalar(-travel);
+    const swing = clamp(comp * 0.38, -0.03, 0.15);
+    rig.swingarm.rotation.x = swing;
+    // re-aim the coil shock between its frame and swingarm mounts
+    _v3.copy(SHOCK_LOWER).applyAxisAngle(_xAxis, swing).add(BB_POS);
+    _v4.subVectors(_v3, SHOCK_UPPER);
+    const shockLen = _v4.length() || SHOCK_BASE_LEN;
+    rig.shock.position.copy(SHOCK_UPPER).addScaledVector(_v4, 0.5);
+    rig.shock.quaternion.setFromUnitVectors(_yAxis, _v4.divideScalar(shockLen));
+    rig.shock.scale.y = shockLen / SHOCK_BASE_LEN;
+
     // trick rotations for the player
     if (r.isPlayer) {
       rig.spin.rotation.y = damp(rig.spin.rotation.y, this.airSpin, 30, dt);
       rig.flip.rotation.x = damp(rig.flip.rotation.x, this.airFlip, 26, dt);
-      // superman pose
+      // superman pose stacks on top of the weight shift
       const poseAmt = clamp01(this.airPose * 3);
-      rig.rider.position.z = damp(rig.rider.position.z, -poseAmt * 0.62, 12, dt);
-      rig.rider.position.y = damp(rig.rider.position.y, poseAmt * 0.26, 12, dt);
+      rig.rider.position.z = damp(rig.rider.position.z,
+        -poseAmt * 0.62 + r.weight * 0.17, 12, dt);
+      rig.rider.position.y = damp(rig.rider.position.y,
+        poseAmt * 0.26 - clamp01(-r.weight) * 0.07, 12, dt);
       rig.legL.rotation.x = damp(rig.legL.rotation.x, poseAmt * 1.35, 12, dt);
       rig.legR.rotation.x = damp(rig.legR.rotation.x, poseAmt * 1.35, 12, dt);
-      rig.torso.rotation.x = damp(rig.torso.rotation.x, poseAmt * 0.5, 12, dt);
+      // torso pitch is resolved below, together with the weight shift
     } else if (!r.grounded && r.airTime > 0.35) {
       // rivals throw a little style too
       rig.flip.rotation.x = damp(rig.flip.rotation.x, -Math.min(r.airTime, 0.9) * 0.55, 8, dt);
     } else {
       rig.flip.rotation.x = damp(rig.flip.rotation.x, 0, 9, dt);
       rig.spin.rotation.y = damp(rig.spin.rotation.y, 0, 9, dt);
+    }
+    if (!r.isPlayer) {
+      rig.rider.position.z = damp(rig.rider.position.z, r.weight * 0.17, 10, dt);
+      rig.rider.position.y = damp(rig.rider.position.y,
+        -clamp01(-r.weight) * 0.07, 10, dt);
+    }
+    // hips drop and the chest comes up as the rider gets behind the saddle
+    if (r.crash <= 0) {
+      rig.torso.rotation.x = damp(rig.torso.rotation.x,
+        clamp01(-r.weight) * 0.26 - clamp01(r.weight) * 0.20
+        + (r.isPlayer ? clamp01(this.airPose * 3) * 0.5 : 0), 7, dt);
     }
 
     // crash tumble
@@ -1625,7 +1697,32 @@ export class Game {
     r.wheelSpin += r.v * dt / 0.36;
     rig.frontWheel.rotation.x = r.wheelSpin;
     rig.rearWheel.rotation.x = r.wheelSpin;
-    rig.cranks.rotation.x = r.wheelSpin * 0.30;
+    // ---- drivetrain + legs -------------------------------------------
+    // Coasting settles the cranks level (feet balanced on the pedals, the
+    // downhill attack stance); pedalling cycles the legs against them.
+    if (r.pedalling > 0.02) {
+      rig.cranks.rotation.x = r.crankAngle;
+    } else {
+      const level = Math.round(r.crankAngle / Math.PI) * Math.PI;
+      r.crankAngle = damp(r.crankAngle, level, 7, dt);
+      rig.cranks.rotation.x = r.crankAngle;
+    }
+    if (r.crash <= 0) {
+      // left crank sits half a revolution behind the right
+      const cyc = r.pedalling;
+      const phL = r.crankAngle + Math.PI;
+      const phR = r.crankAngle;
+      // suspension compression pulls the knees up a touch
+      const absorb = -r.suspension * 0.55;
+      const poseAmt = r.isPlayer ? clamp01(this.airPose * 3) : 0;
+      if (poseAmt < 0.05) {
+        const thigh = 0.30, knee = 0.55;
+        rig.legL.rotation.x = Math.cos(phL) * thigh * cyc + absorb;
+        rig.legR.rotation.x = Math.cos(phR) * thigh * cyc + absorb;
+        rig.shinL.rotation.x = -(Math.cos(phL - 1.2) * 0.5 + 0.5) * knee * cyc - absorb * 0.8;
+        rig.shinR.rotation.x = -(Math.cos(phR - 1.2) * 0.5 + 0.5) * knee * cyc - absorb * 0.8;
+      }
+    }
 
     // bonk swing animation
     if (r.bonkSwing > 0) {
@@ -1637,12 +1734,27 @@ export class Game {
       arm.rotation.y = swing * 0.6;
       rig.torso.rotation.y = swing * 0.32;
     } else {
-      rig.armL.rotation.z = damp(rig.armL.rotation.z, 0, 10, dt);
-      rig.armR.rotation.z = damp(rig.armR.rotation.z, 0, 10, dt);
-      rig.armL.rotation.y = damp(rig.armL.rotation.y, 0, 10, dt);
-      rig.armR.rotation.y = damp(rig.armR.rotation.y, 0, 10, dt);
-      rig.torso.rotation.y = damp(rig.torso.rotation.y, 0, 10, dt);
+      // Hands stay on the grips: as the fork turns, the inside arm pulls back
+      // and the outside arm pushes out. Without this the bars rotate away
+      // from the hands and the whole rig reads as detached.
+      const st = r.steerVis;
+      rig.armL.rotation.y = damp(rig.armL.rotation.y, -st * 0.34, 12, dt);
+      rig.armR.rotation.y = damp(rig.armR.rotation.y, -st * 0.34, 12, dt);
+      rig.armL.rotation.z = damp(rig.armL.rotation.z, st * 0.20, 12, dt);
+      rig.armR.rotation.z = damp(rig.armR.rotation.z, st * 0.20, 12, dt);
+      // shoulders counter-rotate slightly into the turn
+      rig.torso.rotation.y = damp(rig.torso.rotation.y, -st * 0.16, 9, dt);
     }
+
+    // ---- head: look where you're going, not where the bike points -----
+    const lookTarget = r.crash > 0
+      ? 0
+      : clamp(-trk.curvatureAt(r.s + 20 + r.v * 0.5) * 34 - r.yaw * 0.5, -0.75, 0.75);
+    r.headYaw = damp(r.headYaw, lookTarget, 5, dt);
+    rig.head.rotation.y = r.headYaw;
+    // and tip the chin up over jumps
+    rig.head.rotation.x = damp(rig.head.rotation.x,
+      r.grounded ? 0 : clamp(-r.vy * 0.012, -0.22, 0.22), 6, dt);
 
     // shadow
     const gh = trk.heightAt(r.s, r.x);
@@ -1857,6 +1969,7 @@ export class Game {
 
   private updateCamera(dt: number, snap: boolean) {
     if (this.hud.phase === 'menu') { this.cinematicCamera(dt); return; }
+    if (this.replayData && this.hud.phase === 'finish') return;  // replay drives it
     const trk = this.track;
     const p = this.player;
     const speed01 = clamp01(p.v / 42);
@@ -2094,6 +2207,77 @@ export class Game {
     this.hud.ghostGap = this.player.s - s;
   }
 
+  /**
+   * Results-screen replay: fly a cinematic camera along the run we just
+   * recorded, cutting between angles so it reads like a highlight reel.
+   */
+  private updateReplay(dt: number) {
+    const g = this.replayData;
+    if (!g || g.frames.length < 8) return;
+    const n = g.frames.length / 4;
+    this.replayT += dt;
+    const dur = g.time;
+    if (this.replayT > dur) this.replayT = 0;
+
+    // pick a shot; each lasts a few seconds then cuts
+    const SHOT = 4.2;
+    const shot = Math.floor(this.replayT / SHOT) % 4;
+    if (shot !== this.replayShot) {
+      this.replayShot = shot;
+      this.camSnap = true;
+    }
+
+    const raw = this.replayT / g.dt;
+    const i = clamp(Math.floor(raw), 0, n - 2);
+    const t = clamp01(raw - i);
+    const a = i * 4, b = a + 4;
+    const s = lerp(g.frames[a], g.frames[b], t);
+    const x = lerp(g.frames[a + 1], g.frames[b + 1], t);
+    const y = lerp(g.frames[a + 2], g.frames[b + 2], t);
+
+    const trk = this.track;
+    // put the rider where the replay says, so the camera has a subject
+    const p = this.player;
+    p.s = s; p.x = x; p.y = y;
+    this.poseRacer(p, dt, 0);
+
+    let cs = s, cx = x, ch = 3;
+    switch (shot) {
+      case 0: cs = s - 8.5; cx = x * 0.6; ch = 3.0; break;   // chase
+      case 1: cs = s + 11; cx = x * 0.4; ch = 2.4; break;    // look back
+      case 2: cs = s - 2; cx = x + 9; ch = 4.5; break;       // side pan
+      case 3: cs = s - 5; cx = x * 0.5; ch = 9.0; break;     // high crane
+    }
+    const want = trk.worldPos(cs, cx, trk.heightAt(cs, cx) + ch, _v1);
+    const rate = this.camSnap ? 999 : 3.4;
+    this.camPos.x = damp(this.camPos.x, want.x, rate, dt);
+    this.camPos.y = damp(this.camPos.y, want.y, rate, dt);
+    this.camPos.z = damp(this.camPos.z, want.z, rate, dt);
+
+    const look = trk.worldPos(s, x, trk.heightAt(s, x) + 1.4, _v2);
+    this.camLook.x = damp(this.camLook.x, look.x, this.camSnap ? 999 : 5, dt);
+    this.camLook.y = damp(this.camLook.y, look.y, this.camSnap ? 999 : 5, dt);
+    this.camLook.z = damp(this.camLook.z, look.z, this.camSnap ? 999 : 5, dt);
+    this.camSnap = false;
+
+    this.camera.position.copy(this.camPos);
+    this.camera.lookAt(this.camLook);
+    this.camera.rotateZ(shot === 2 ? 0.06 : 0);
+    this.fov = damp(this.fov, shot === 3 ? 52 : 64, 3, dt);
+    this.camera.fov = this.fov;
+    this.camera.updateProjectionMatrix();
+  }
+
+  /** Begin replaying the run that just finished. */
+  startReplay() {
+    this.replayData = this.takeGhost();
+    this.replayT = 0;
+    this.replayShot = -1;
+    this.camSnap = true;
+  }
+
+  stopReplay() { this.replayData = null; }
+
   /** Package this run's samples if it's worth keeping. */
   takeGhost(): Ghost | null {
     if (this.ghostSamples.length < 8) return null;
@@ -2192,7 +2376,25 @@ export class Game {
       h.trickHold = clamp01(p.airTime / 2);
     } else { h.trickText = ''; h.trickHold = 0; }
 
+    // nearest rival, for positional tyre roll
+    let rvNear = 0, rvPan = 0, rvSpeed = 0;
+    for (const r of this.racers) {
+      if (r.isPlayer || r.finished || r.crash > 0 || !r.grounded) continue;
+      const ds = Math.abs(r.s - p.s);
+      if (ds > 26) continue;
+      const near = 1 - ds / 26;
+      if (near > rvNear) {
+        rvNear = near;
+        // track +x is screen-left, so negate for stereo
+        rvPan = clamp(-(r.x - p.x) * 0.28, -1, 1);
+        rvSpeed = clamp01(r.v / 40);
+      }
+    }
+
     audio.update(this.lastDt, {
+      rivalNear: rvNear * rvNear,
+      rivalPan: rvPan,
+      rivalSpeed: rvSpeed,
       speed01: clamp01(p.v / 42),
       grounded: p.grounded,
       offTrack: h.offTrack,
@@ -2219,4 +2421,7 @@ const _m1 = new THREE.Matrix4();
 const _c1 = new THREE.Color();
 const _c2 = new THREE.Color();
 const _yAxis = new THREE.Vector3(0, 1, 0);
+const _xAxis = new THREE.Vector3(1, 0, 0);
+const _v3 = new THREE.Vector3();
+const _v4 = new THREE.Vector3();
 void smoothstep; void lerp; void ZONES;

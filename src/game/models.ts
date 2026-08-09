@@ -41,6 +41,9 @@ export interface RiderRig {
   flip: THREE.Group;        // pitch rotations (flips)
   bike: THREE.Group;
   fork: THREE.Group;        // steering
+  forkLower: THREE.Group;   // telescoping lowers + front wheel
+  swingarm: THREE.Group;    // rear triangle, pivots at the BB
+  shock: THREE.Mesh;        // re-aimed each frame between its mounts
   frontWheel: THREE.Mesh;
   rearWheel: THREE.Mesh;
   cranks: THREE.Group;
@@ -51,10 +54,25 @@ export interface RiderRig {
   armR: THREE.Group;
   legL: THREE.Group;
   legR: THREE.Group;
+  shinL: THREE.Group;
+  shinR: THREE.Group;
   shadow: THREE.Mesh;
 }
 
 const PIVOT_Y = 0.72;
+
+// --- suspension geometry (bike-local space, +Z is forward) ----------------
+/** Bottom-bracket / swingarm pivot. */
+export const BB_POS = new THREE.Vector3(0, 0.30, -0.06);
+/** Rear axle, expressed relative to the swingarm pivot. */
+export const SWING_AXLE = new THREE.Vector3(0, 0.06, -0.56);
+/** Shock mounts: upper is on the frame, lower rides the swingarm. */
+export const SHOCK_UPPER = new THREE.Vector3(0, 0.93, -0.33);
+export const SHOCK_LOWER = new THREE.Vector3(0, 0.02, -0.30);
+export const SHOCK_BASE_LEN = SHOCK_UPPER.distanceTo(
+  SHOCK_LOWER.clone().add(BB_POS));
+/** Unit vector from the fork crown down to the front axle. */
+export const FORK_AXIS = new THREE.Vector3(0, -0.28, 0.10).normalize();
 
 /** Wheel with its axle along local X so it spins on rotation.x. */
 function makeWheel(tyre: THREE.Material, rim: THREE.Material, hub: THREE.Material): THREE.Mesh {
@@ -100,14 +118,40 @@ export function createRider(c: RiderColors): RiderRig {
   const HEAD_T = V(0, 0.86, 0.44);    // head tube top
   const HEAD_B = V(0, 0.62, 0.50);    // head tube bottom
   const SEAT_T = V(0, 0.98, -0.40);
-  const REAR_AX = V(0, 0.36, -0.62);
 
   bike.add(tube(BB, HEAD_B, 0.045, mFrame));            // down tube
   bike.add(tube(SEAT_T, HEAD_T, 0.040, mFrame));        // top tube
   bike.add(tube(BB, SEAT_T, 0.042, mFrame));            // seat tube
-  bike.add(tube(BB, REAR_AX, 0.032, mFrame));           // chainstay
-  bike.add(tube(SEAT_T, REAR_AX, 0.028, mFrame));       // seatstay
   bike.add(tube(HEAD_B, HEAD_T, 0.05, mDark));          // head tube
+
+  // ---- rear suspension: swingarm pivoting at the BB, driven by a coil
+  // shock. The seatstay is replaced by the shock, which is how a real
+  // full-suspension DH bike reads.
+  const swingarm = new THREE.Group();
+  swingarm.position.copy(BB);
+  bike.add(swingarm);
+  swingarm.add(tube(V(0, 0, 0), SWING_AXLE.clone(), 0.036, mFrame));
+  swingarm.add(tube(V(0, 0.02, -0.16), V(0, 0.10, -0.30), 0.026, mFrame));
+  const rocker = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.13, 0.07), mHub);
+  rocker.position.copy(SHOCK_LOWER);
+  swingarm.add(rocker);
+
+  const shock = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.05, 0.05, SHOCK_BASE_LEN, 8), mHub);
+  // rest transform, so rigs that never run the pose pass (the ghost) still
+  // show the shock correctly seated between its mounts
+  {
+    const lo = SHOCK_LOWER.clone().add(BB_POS);
+    const dir = lo.clone().sub(SHOCK_UPPER);
+    shock.position.copy(SHOCK_UPPER).addScaledVector(dir, 0.5);
+    shock.quaternion.setFromUnitVectors(
+      new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+  }
+  bike.add(shock);
+  const shockShaft = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.022, 0.022, SHOCK_BASE_LEN * 0.5, 6), mRim);
+  shockShaft.position.y = -SHOCK_BASE_LEN * 0.42;
+  shock.add(shockShaft);
   // saddle
   const saddle = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.06, 0.32), mDark);
   saddle.position.set(0, 1.02, -0.42); saddle.rotation.x = -0.12;
@@ -122,8 +166,15 @@ export function createRider(c: RiderColors): RiderRig {
   fork.position.copy(HEAD_B);
   bike.add(fork);
   const AX = V(0, -0.26, 0.10);
-  fork.add(tube(V(0, 0.02, 0), V(-0.11, AX.y, AX.z), 0.034, mDark));
-  fork.add(tube(V(0, 0.02, 0), V(0.11, AX.y, AX.z), 0.034, mDark));
+  // crown + stanchions stay with the frame; the lowers slide over them
+  const crown = new THREE.Mesh(new THREE.BoxGeometry(0.31, 0.07, 0.11), mDark);
+  crown.position.set(0, 0.02, 0.012);
+  fork.add(crown);
+  [-1, 1].forEach(s => {
+    fork.add(tube(
+      V(s * 0.11, 0.02, 0.0),
+      V(s * 0.11, AX.y * 0.62, AX.z * 0.62), 0.028, mRim));
+  });
   // handlebar
   const stem = tube(V(0, 0.24, 0), V(0, 0.30, 0.06), 0.03, mDark); fork.add(stem);
   const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.026, 0.68, 6), mFrame);
@@ -138,13 +189,24 @@ export function createRider(c: RiderColors): RiderRig {
   plate.position.set(0, 0.40, 0.05); plate.rotation.x = 0.25;
   fork.add(plate);
 
+  const forkLower = new THREE.Group();
+  fork.add(forkLower);
+  [-1, 1].forEach(s => {
+    forkLower.add(tube(
+      V(s * 0.11, AX.y * 0.55, AX.z * 0.55),
+      V(s * 0.11, AX.y, AX.z), 0.042, mDark));
+  });
+  const arch = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.06, 0.07), mDark);
+  arch.position.set(0, AX.y * 0.72, AX.z * 0.72);
+  forkLower.add(arch);
+
   const frontWheel = makeWheel(mTyre, mRim, mHub);
   frontWheel.position.copy(AX);
-  fork.add(frontWheel);
+  forkLower.add(frontWheel);
 
   const rearWheel = makeWheel(mTyre, mRim, mHub);
-  rearWheel.position.copy(REAR_AX);
-  bike.add(rearWheel);
+  rearWheel.position.copy(SWING_AXLE);
+  swingarm.add(rearWheel);
 
   const cranks = new THREE.Group();
   cranks.position.copy(BB);
@@ -232,9 +294,11 @@ export function createRider(c: RiderColors): RiderRig {
     shin.add(shoe);
     g.add(shin);
     rider.add(g);
-    return g;
+    return { hip: g, shin };
   };
-  const legL = mkLeg(-1), legR = mkLeg(1);
+  const legLp = mkLeg(-1), legRp = mkLeg(1);
+  const legL = legLp.hip, legR = legRp.hip;
+  const shinL = legLp.shin, shinR = legRp.shin;
 
   // contact shadow
   const shadowTex = (() => {
@@ -256,7 +320,11 @@ export function createRider(c: RiderColors): RiderRig {
 
   root.traverse(o => { if ((o as THREE.Mesh).isMesh) { o.castShadow = false; o.receiveShadow = false; } });
 
-  return { root, lean, body, spin, flip, bike, fork, frontWheel, rearWheel, cranks, rider, torso, head, armL, armR, legL, legR, shadow };
+  return {
+    root, lean, body, spin, flip, bike, fork, forkLower, swingarm, shock,
+    frontWheel, rearWheel, cranks,
+    rider, torso, head, armL, armR, legL, legR, shinL, shinR, shadow,
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -10,12 +10,31 @@ export const DIFFICULTIES: { id: Difficulty; label: string; blurb: string; color
   { id: 'savage', label: 'BONE RATTLER', blurb: 'They will not forgive you', color: '#ff2e88' },
 ];
 
-/** Base skill and aggression band per difficulty. */
-export const DIFF_TUNING: Record<Difficulty, { skill: number; step: number; aggro: number }> = {
-  chill:  { skill: 0.62, step: 0.045, aggro: 0.45 },
-  pro:    { skill: 0.74, step: 0.055, aggro: 0.75 },
-  savage: { skill: 0.85, step: 0.052, aggro: 1.15 },
+/**
+ * Base skill / aggression per difficulty.
+ *
+ * `skill` maps to a speed ceiling via aiCap = 24.5 + skill*15 (m/s). Analysis
+ * of the drag model puts a competent player at ~38-42 m/s tucked and ~33
+ * un-tucked, so the top rival's cap is set relative to that:
+ *   chill  top ~33 m/s  (a good line beats them comfortably)
+ *   pro    top ~37 m/s  (a real fight)
+ *   savage top ~41 m/s  (needs near-perfect tucking and corner exits)
+ *
+ * `bandK` scales the rubber band. At 1.0 the band moves skill by up to +/-0.15
+ * = 2.25 m/s, which was large enough to erase the gap between difficulties —
+ * so chill damps it (you can run away) and savage amplifies it (they hunt).
+ */
+export const DIFF_TUNING: Record<
+  Difficulty, { skill: number; step: number; aggro: number; bandK: number }
+> = {
+  chill:  { skill: 0.427, step: 0.028, aggro: 0.45, bandK: 0.35 },
+  pro:    { skill: 0.657, step: 0.042, aggro: 0.75, bandK: 1.00 },
+  savage: { skill: 0.893, step: 0.048, aggro: 1.15, bandK: 1.35 },
 };
+
+/** Hard limits on rival skill after the rubber band is applied. */
+export const SKILL_MIN = 0.40;
+export const SKILL_MAX = 1.30;
 
 export interface RunRecord {
   time: number;

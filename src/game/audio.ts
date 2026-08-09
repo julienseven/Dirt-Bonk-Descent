@@ -29,6 +29,8 @@ export class GameAudio {
   private roll!: Loop;      // dirt / tire rumble
   private wind!: Loop;      // air rush
   private crowd!: Loop;     // ambient crowd bed
+  private rival!: Loop;     // nearest rival's tyres
+  private rivalPan: StereoPannerNode | null = null;
   private ready = false;
   private musicTimer = 0;
   private step = 0;
@@ -70,6 +72,14 @@ export class GameAudio {
     this.roll = this.makeLoop('bandpass', 320, 0, 1.1);
     this.wind = this.makeLoop('lowpass', 700, 0, 0.7);
     this.crowd = this.makeLoop('bandpass', 900, 0, 3.4);
+    // nearest-rival tyre roll, panned to their side of you
+    this.rival = this.makeLoop('bandpass', 300, 0, 1.3);
+    if (ctx.createStereoPanner) {
+      this.rivalPan = ctx.createStereoPanner();
+      this.rival.gain.disconnect();
+      this.rival.gain.connect(this.rivalPan);
+      this.rivalPan.connect(this.sfxBus);
+    }
     this.ready = true;
   }
 
@@ -119,6 +129,7 @@ export class GameAudio {
   update(dt: number, o: {
     speed01: number; grounded: boolean; offTrack: boolean; airborne: boolean;
     braking: boolean; crowdNear: number; intensity: number; paused: boolean;
+    rivalNear?: number; rivalPan?: number; rivalSpeed?: number;
   }) {
     if (!this.ready || !this.ctx) return;
     const t = this.ctx.currentTime;
@@ -134,6 +145,15 @@ export class GameAudio {
     this.wind.filter.frequency.setTargetAtTime(lerp(320, 2600, sp), t, 0.15);
 
     this.crowd.gain.gain.setTargetAtTime(o.paused ? 0 : clamp01(o.crowdNear) * 0.16, t, 0.35);
+
+    // a rival alongside you should be audible before you see them
+    const rn = clamp01(o.rivalNear ?? 0);
+    this.rival.gain.gain.setTargetAtTime(o.paused ? 0 : rn * 0.17, t, 0.12);
+    this.rival.filter.frequency.setTargetAtTime(
+      lerp(190, 780, clamp01(o.rivalSpeed ?? 0)), t, 0.15);
+    if (this.rivalPan) {
+      this.rivalPan.pan.setTargetAtTime(clamp(o.rivalPan ?? 0, -1, 1), t, 0.1);
+    }
 
     this.intensity = o.intensity;
     if (this.musicOn && !o.paused) this.tickMusic(dt);

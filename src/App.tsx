@@ -3,6 +3,7 @@ import { Game, type Phase } from './game/game';
 import Hud from './ui/Hud';
 import TouchControls from './ui/TouchControls';
 import { Menu, Pause, Results, Loading } from './ui/Screens';
+import TunePanel from './ui/TunePanel';
 import { audio } from './game/audio';
 import {
   loadSave, writeSave, commitRun, type SaveData, type Difficulty, type RecordResult,
@@ -14,6 +15,14 @@ const isTouch = () =>
   window.matchMedia('(pointer: coarse)').matches;
 
 export default function App() {
+  // ?tune opens the headless balance harness instead of the game
+  if (typeof window !== 'undefined' && window.location.search.includes('tune')) {
+    return <TunePanel />;
+  }
+  return <GameApp />;
+}
+
+function GameApp() {
   const mount = useRef<HTMLDivElement>(null);
   const [game, setGame] = useState<Game | null>(null);
   const [phase, setPhase] = useState<Phase>('menu');
