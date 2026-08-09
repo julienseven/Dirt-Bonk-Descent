@@ -36,6 +36,7 @@ function GameApp() {
   const [game, setGame] = useState<Game | null>(null);
   const [phase, setPhase] = useState<Phase>('menu');
   const [pct, setPct] = useState(0);
+  const [fatal, setFatal] = useState<string | null>(null);
   const [save, setSave] = useState<SaveData>(() => loadSave());
   const [lastResult, setLastResult] = useState<RecordResult | null>(null);
   const [garage, setGarage] = useState(false);
@@ -57,6 +58,7 @@ function GameApp() {
     const tick = setInterval(() => { p = Math.min(92, p + 11); setPct(p); }, 60);
     const id = setTimeout(() => {
       if (!alive || !mount.current) return;
+      try {
       g = new Game(mount.current);
       g.onPhaseChange = ph => setPhase(ph);
       const s = saveRef.current;
@@ -73,6 +75,14 @@ function GameApp() {
       clearInterval(tick);
       setPct(100);
       setGame(g);
+      } catch (err) {
+        // Never hang on the loading screen. A throw during construction
+        // used to leave setGame() unreached and the bar stuck forever,
+        // which reads as "the game is broken" with no way to diagnose it.
+        clearInterval(tick);
+        console.error('[DirtBonkDescent] startup failed:', err);
+        setFatal(err instanceof Error ? err.message : String(err));
+      }
     }, 60);
     return () => {
       alive = false;
@@ -200,7 +210,28 @@ function GameApp() {
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#06070a]">
       <div ref={mount} className="absolute inset-0" />
-      {!game && <Loading pct={pct} />}
+      {/* portrait phones can't fit the pads and the HUD; ask for landscape */}
+      <div className="rotate-hint">
+        <div className="hud-big text-[34px] text-[#ffd400]" style={{ textShadow: '0 4px 0 #000' }}>
+          ROTATE YOUR DEVICE
+        </div>
+        <div className="hud-label !text-[10px]">DIRT BONK DESCENT IS PLAYED IN LANDSCAPE</div>
+        <div className="mt-2 text-[40px]">📱</div>
+      </div>
+      {!game && !fatal && <Loading pct={pct} />}
+      {fatal && (
+        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 bg-[#06070a] px-8 text-center">
+          <div className="hud-big text-[32px] text-[#ff4d4d]" style={{ textShadow: '0 4px 0 #000' }}>
+            COULDN'T DROP IN
+          </div>
+          <div className="hud-label !text-[10px]">THE MOUNTAIN FAILED TO BUILD</div>
+          <code className="mt-2 max-w-lg text-[11px] leading-snug text-white/50">{fatal}</code>
+          <button onClick={() => window.location.reload()}
+            className="title-skew mt-3 border-2 border-[#ffd400] px-6 py-2">
+            <span className="hud-big text-[18px] text-[#ffd400]">RETRY</span>
+          </button>
+        </div>
+      )}
       {game && <Hud game={game} />}
       {game && (phase === 'race' || phase === 'countdown' || phase === 'intro') && (
         <TouchControls game={game} visible={touch.current} />

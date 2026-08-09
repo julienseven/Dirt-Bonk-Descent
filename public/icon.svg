@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d3f78"/>
+      <stop offset="0.55" stop-color="#93c6e4"/>
+      <stop offset="1" stop-color="#eec085"/>
+    </linearGradient>
+    <linearGradient id="dirt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a8814f"/>
+      <stop offset="1" stop-color="#6b4a2c"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="64" height="64" rx="12" fill="url(#sky)"/>
+
+  <!-- distant ridges: paler with distance, the game's core depth cue -->
+  <path d="M0 30 L11 19 L20 27 L30 15 L41 26 L52 17 L64 28 L64 40 L0 40 Z"
+        fill="#7d97b8" opacity="0.55"/>
+  <path d="M0 35 L13 24 L26 33 L38 22 L50 32 L64 24 L64 44 L0 44 Z"
+        fill="#4c6b8a" opacity="0.8"/>
+
+  <!-- the descent: a diagonal trail sweeping to the bottom right -->
+  <path d="M-2 44 Q18 46 30 52 T66 58 L66 66 L-2 66 Z" fill="url(#dirt)"/>
+  <path d="M-2 47 Q18 49 30 55 T66 61" stroke="#5a3f26" stroke-width="2"
+        fill="none" opacity="0.6"/>
+
+  <!-- rider silhouette, leaning hard: reads at 16px -->
+  <g transform="translate(26 30) rotate(-14)">
+    <!-- roost -->
+    <path d="M-4 12 q-9 1 -14 6 q7 -1 12 -3 z" fill="#d8bb8a" opacity="0.85"/>
+    <!-- wheels -->
+    <circle cx="-7" cy="10" r="5.4" fill="none" stroke="#16161a" stroke-width="2.6"/>
+    <circle cx="9" cy="10" r="5.4" fill="none" stroke="#16161a" stroke-width="2.6"/>
+    <!-- frame -->
+    <path d="M-7 10 L1 3 L9 10 M1 3 L2 10 L-7 10" stroke="#ffd400"
+          stroke-width="2.2" fill="none" stroke-linejoin="round"/>
+    <!-- rider: shoulders forward, big helmet -->
+    <path d="M-1 2 L4 -4 L9 -1" stroke="#ff2e88" stroke-width="3.4"
+          fill="none" stroke-linecap="round"/>
+    <circle cx="4" cy="-7" r="4.2" fill="#fff0d0"/>
+    <path d="M1.2 -8.6 L7 -8.6" stroke="#2fe6c8" stroke-width="1.8"
+          stroke-linecap="round"/>
+  </g>
+
+  <!-- impact star: the BONK -->
+  <path d="M50 20 l2.4 5.2 5.6 .7 -4.2 3.9 1.1 5.6 -4.9 -2.8 -4.9 2.8 1.1 -5.6 -4.2 -3.9 5.6 -.7 z"
+        fill="#ffd400" stroke="#101014" stroke-width="1.4" stroke-linejoin="round"/>
+</svg>

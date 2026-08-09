@@ -372,7 +372,7 @@ export default function Hud({ game }: { game: Game }) {
 
       {/* top-left: place + clock. "vs your best" readouts stack under the
           clock they refer to, rather than sprawling across the top edge. */}
-      <div className="absolute left-5 top-4 flex items-start gap-3">
+      <div className="hud-topleft absolute left-5 top-4 flex items-start gap-3">
         <div className="hud-panel px-4 py-2">
           <div className="hud-label">POS</div>
           <div ref={placeNum} className="hud-big text-[46px] leading-[0.86] text-white">1st</div>
@@ -392,7 +392,7 @@ export default function Hud({ game }: { game: Game }) {
       </div>
 
       {/* top-right: score + combo */}
-      <div className="absolute right-5 top-4 flex flex-col items-end gap-2">
+      <div className="hud-topright absolute right-5 top-4 flex flex-col items-end gap-2">
         <div className="hud-panel px-4 py-2 text-right">
           <div className="hud-label">STYLE POINTS</div>
           <div ref={scoreTxt} className="hud-big text-[34px] leading-none text-[#ffd400]">0</div>
@@ -487,11 +487,11 @@ export default function Hud({ game }: { game: Game }) {
         style={{ transition: 'opacity .3s', clipPath: 'inset(90% 0 0 0)', borderRadius: 9999 }} />
 
       {/* why you're on the floor */}
-      <div ref={crashWhy} className="hud-label absolute left-1/2 top-[50%] -translate-x-1/2 whitespace-nowrap !text-[11px] !tracking-[.22em] text-[#ffd400] opacity-0"
+      <div ref={crashWhy} className="hud-crashwhy hud-label absolute left-1/2 top-[50%] -translate-x-1/2 whitespace-nowrap !text-[11px] !tracking-[.22em] text-[#ffd400] opacity-0"
         style={{ transition: 'opacity .2s', textShadow: '0 2px 4px #000' }} />
 
       {/* crash recovery prompt */}
-      <div ref={recWrap} className="absolute left-1/2 top-[58%] w-[300px] -translate-x-1/2 text-center opacity-0"
+      <div ref={recWrap} className="hud-recover absolute left-1/2 top-[58%] w-[300px] -translate-x-1/2 text-center opacity-0"
         style={{ transition: 'opacity .15s' }}>
         <div className="hud-big text-[26px] leading-none text-white" style={{ textShadow: '0 3px 0 #000' }}>
           MASH <span ref={recKey} className="inline-block rounded-[4px] border-b-[3px] border-black/70 px-2 text-black" style={{ background: '#fff' }}>W</span> TO GET UP
@@ -503,7 +503,7 @@ export default function Hud({ game }: { game: Game }) {
       </div>
 
       {/* state machine debug (?states) */}
-      <div ref={dbgWrap} className="absolute left-5 top-[128px] hidden border-l-4 border-[#2fe6c8] bg-black/78 px-3 py-2 backdrop-blur">
+      <div ref={dbgWrap} className="hud-debug absolute left-5 top-[128px] hidden border-l-4 border-[#2fe6c8] bg-black/78 px-3 py-2 backdrop-blur">
         <div className="hud-label !text-[8px]">BIKE STATE</div>
         <div ref={dbgState} className="hud-big text-[22px] leading-none text-white">GROUNDED</div>
         <div ref={dbgT} className="hud-mono mt-[2px] whitespace-pre text-[10px] text-white/55" />
@@ -513,7 +513,7 @@ export default function Hud({ game }: { game: Game }) {
 
       {/* hazard telegraph */}
       <div ref={hazEdge} className="absolute inset-y-0 left-0 w-full opacity-0" style={{ transition: 'opacity .1s' }} />
-      <div ref={hazWrap} className="absolute left-1/2 top-[60%] flex items-center gap-3 opacity-0"
+      <div ref={hazWrap} className="hud-hazard absolute left-1/2 top-[60%] flex items-center gap-3 opacity-0"
         style={{ transform: 'translate(-50%,-50%)', transition: 'opacity .12s' }}>
         <div ref={hazArrow} className="hud-big text-[40px] leading-none text-[#ff9500]"
           style={{ textShadow: '0 3px 0 #000' }}>▲</div>

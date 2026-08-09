@@ -176,10 +176,10 @@ export class GarageScene {
     }
     const rig = createRider(loadoutColors(l), getBuild(RIDER_BUILD_OF[l.rider] ?? 'allround'));
     const bike = getBike(l.bike);
-    // silhouette differences between bikes
+    // Wheels only. Scaling rig.bike would move the cranks and bars away
+    // from the rider's feet and hands — the preview must match the race.
     rig.frontWheel.scale.setScalar(bike.wheelScale);
     rig.rearWheel.scale.setScalar(bike.wheelScale);
-    rig.bike.scale.set(bike.tubeScale * 0.5 + 0.5, 1, 1);
     rig.shadow.visible = false;
     rig.contactF.visible = false;
     rig.contactR.visible = false;

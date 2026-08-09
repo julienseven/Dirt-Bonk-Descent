@@ -362,10 +362,14 @@ export function makeDirty(
         roughnessFactor = mix(roughnessFactor, 0.95,
           clamp(uDirt * uDirtExposure * 0.8, 0.0, 0.85));`);
   };
-  // force a program rebuild so the injection takes effect
-  m.customProgramCacheKey = () => 'dirt';
+  // Cache key must be UNIQUE per material, not a constant. Three appends
+  // this to the program key, so returning the same string everywhere lets
+  // materials that should compile separately collide onto one program.
+  const id = `dirt${++dirtSeq}`;
+  m.customProgramCacheKey = () => id;
   m.needsUpdate = true;
 }
+let dirtSeq = 0;
 
 /** Create a dirt controller and wire every material under `root` to it. */
 export function attachDirt(root: THREE.Object3D): DirtHandle {
@@ -380,11 +384,11 @@ export function attachDirt(root: THREE.Object3D): DirtHandle {
     if (!mm) return;
     const list = Array.isArray(mm) ? mm : [mm];
     for (const m of list) {
-      // skip the silhouette shells: they're flat black by design
-      if ((m as THREE.MeshBasicMaterial).side === THREE.BackSide) continue;
+      // only Standard materials carry the chunks this injection patches;
+      // anything else would silently no-op or break its shader
+      if (!(m as THREE.MeshStandardMaterial).isMeshStandardMaterial) continue;
       if (seen.has(m)) continue;
       seen.add(m);
-      // tyres and lower frame get dirtier than a helmet does
       makeDirty(m, shared, 1);
     }
   });
@@ -395,6 +399,52 @@ export function attachDirt(root: THREE.Object3D): DirtHandle {
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// WORLD MATERIALS
+//
+// ART CONSISTENCY: the rider and bike use MeshStandardMaterial, which has a
+// specular term. Lambert does not — it is purely diffuse. Mixing the two
+// means the character is lit by a different model than the world around it,
+// and no amount of colour matching fixes that: the rider will always look
+// pasted on because light behaves differently on them.
+//
+// These are the world's counterparts, sharing the same roughness vocabulary
+// as RIDER_MAT so everything belongs to one lighting model. Roughness values
+// are deliberately HIGH — the world should be matte so the rider and bike
+// remain the most visually active things on screen.
+// ---------------------------------------------------------------------------
+
+export const WORLD_MAT = {
+  /** bark, planks, bridge timber */
+  wood: (color: number) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.92, metalness: 0.0,
+  }),
+  /** stone, cliffs, boulders */
+  rock: (color: number) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.88, metalness: 0.02,
+  }),
+  /** foliage: fully matte so canopies read as mass, not surface */
+  leaf: (color: number) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.97, metalness: 0.0,
+  }),
+  /** painted course furniture — barriers, signs, bales */
+  paint: (color: number) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.72, metalness: 0.03,
+  }),
+  /** scaffold, gantries, posts: the world's only semi-reflective class */
+  metal: (color: number) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.55, metalness: 0.7,
+  }),
+  /** dirt, mud, gravel — the trail surface itself */
+  ground: (color: number) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.95, metalness: 0.0,
+  }),
+  /** cloth: spectator clothing, banners */
+  fabric: (color: number) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.9, metalness: 0.0,
+  }),
+} as const;
 
 export function disposeRiderMaterials() {
   for (const t of cache.values()) t.dispose();

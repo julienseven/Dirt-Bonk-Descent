@@ -121,6 +121,65 @@ export function makeTapeTexture(colA = '#ffd400', colB = '#161616'): THREE.Textu
   return t;
 }
 
+/** Seamless ripple bands for flowing water. Scrolled via texture offset. */
+export function makeRippleTexture(): THREE.Texture {
+  const S = 128;
+  const c = document.createElement('canvas'); c.width = c.height = S;
+  const g = c.getContext('2d')!;
+  g.fillStyle = '#9fc8d8';
+  g.fillRect(0, 0, S, S);
+  // horizontal crests, wrapped so the tile is seamless vertically
+  for (let i = 0; i < 26; i++) {
+    const y = (i / 26) * S;
+    const a = 0.10 + Math.abs(Math.sin(i * 1.7)) * 0.22;
+    g.strokeStyle = `rgba(255,255,255,${a})`;
+    g.lineWidth = 1 + Math.abs(Math.sin(i * 2.3)) * 2.5;
+    g.beginPath();
+    for (let x = 0; x <= S; x += 4) {
+      const yy = y + Math.sin((x / S) * Math.PI * 4 + i) * 2.5;
+      x === 0 ? g.moveTo(x, yy) : g.lineTo(x, yy);
+    }
+    g.stroke();
+  }
+  // darker troughs for depth
+  for (let i = 0; i < 14; i++) {
+    const y = (i / 14) * S + 3;
+    g.strokeStyle = 'rgba(30,70,90,0.16)';
+    g.lineWidth = 2;
+    g.beginPath(); g.moveTo(0, y); g.lineTo(S, y); g.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+
+/** Grass tuft alpha: a few tapered blades on a transparent field. */
+export function makeTuftTexture(): THREE.Texture {
+  const S = 64;
+  const c = document.createElement('canvas'); c.width = c.height = S;
+  const g = c.getContext('2d')!;
+  const rng = new RNG(515);
+  g.clearRect(0, 0, S, S);
+  for (let i = 0; i < 11; i++) {
+    const x0 = rng.range(6, S - 6);
+    const lean = rng.range(-11, 11);
+    const top = rng.range(6, 26);
+    const w = rng.range(2.2, 4.4);
+    const v = Math.floor(rng.range(190, 255));
+    g.fillStyle = `rgba(${v},${v},${v},1)`;
+    g.beginPath();
+    g.moveTo(x0 - w / 2, S);
+    g.lineTo(x0 + w / 2, S);
+    g.lineTo(x0 + lean + 0.6, top);
+    g.closePath();
+    g.fill();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
 /** Chequered start/finish strip. */
 export function makeCheckerTexture(): THREE.Texture {
   const W = 256, H = 64;
@@ -164,13 +223,17 @@ export function makeSkyTexture(): THREE.Texture {
   const W = 32, H = 256;
   const c = document.createElement('canvas'); c.width = W; c.height = H;
   const g = c.getContext('2d')!;
+  // Late afternoon: deep blue zenith falling through pale haze into a warm
+  // band at the horizon. The warm/cool split is what makes distant peaks
+  // read as far away rather than merely small.
   const grd = g.createLinearGradient(0, 0, 0, H);
-  grd.addColorStop(0.00, '#1a3f7a');
-  grd.addColorStop(0.28, '#3f7fc4');
-  grd.addColorStop(0.52, '#8fc4e8');
-  grd.addColorStop(0.70, '#d9e6ec');
-  grd.addColorStop(0.84, '#f3dcb4');
-  grd.addColorStop(1.00, '#e6b483');
+  grd.addColorStop(0.00, '#1d3f78');
+  grd.addColorStop(0.26, '#4a86c6');
+  grd.addColorStop(0.50, '#93c6e4');
+  grd.addColorStop(0.66, '#d6e2e4');
+  grd.addColorStop(0.78, '#f0d9ac');
+  grd.addColorStop(0.90, '#eec085');
+  grd.addColorStop(1.00, '#d99b62');
   g.fillStyle = grd; g.fillRect(0, 0, W, H);
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;

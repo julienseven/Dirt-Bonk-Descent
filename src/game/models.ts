@@ -2,7 +2,7 @@
 // DIRT BONK DESCENT :: geometry builders (rider rig, scenery, props)
 // ---------------------------------------------------------------------------
 import * as THREE from 'three';
-import { RNG } from './core';
+import { RNG, TAU } from './core';
 import { RIDER_MAT, attachDirt, type DirtHandle } from './riderMaterials';
 
 export interface RiderColors {
@@ -466,30 +466,60 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
   chin.position.set(0, -0.13, 0.10);
   head.add(chin);
 
+  // ---- CONTACT POINTS, resolved in BIKE space ------------------------
+  // The grips live under `fork`, which sits at HEAD_B, so their true
+  // position is HEAD_B + local offset. Solving against the local offset
+  // alone (as an earlier pass did) puts the hands ~0.6m short and 0.3m low.
+  // GRIP_BIKE / PEDAL_BIKE are the single source of truth for where the
+  // rider must reach; both arms and legs derive from them.
+  const GRIP_LOCAL = V(0.28, 0.31, 0.07);
+  const GRIP_BIKE = V(
+    GRIP_LOCAL.x,
+    HEAD_B.y + GRIP_LOCAL.y,
+    HEAD_B.z + GRIP_LOCAL.z,
+  );
+  // torso group origin — everything on the rider is relative to this
+  const TORSO_AT = V(0, 0.92, -0.26);
+
   const mkArm = (s: number) => {
     const g = new THREE.Group();
-    g.position.set(s * 0.21 * B.shoulders, 0.46, 0.20);
-    const upper = tube(V(0, 0, 0), V(s * 0.07, -0.20, 0.22), 0.062 * B.limbs, mJersey);
+    // NOTE: arms are parented to `rider`, NOT `torso`. Their positions are
+    // already in rider space (which is bike space), so no torso offset is
+    // subtracted here — unlike the legs below, which are also on `rider`
+    // but were authored relative to the hip.
+    const shoulder = V(s * 0.21 * B.shoulders, TORSO_AT.y + 0.46, TORSO_AT.z + 0.20);
+    g.position.copy(shoulder);
+    // grip expressed in this arm group's own space
+    const grip = V(
+      s * GRIP_BIKE.x - shoulder.x,
+      GRIP_BIKE.y - shoulder.y,
+      GRIP_BIKE.z - shoulder.z,
+    );
+    // elbow: 55% of the way out, dropped and flared so the arm bends
+    const elbow = V(grip.x * 0.5 + s * 0.05, grip.y * 0.45 - 0.06, grip.z * 0.45);
+    const upper = tube(V(0, 0, 0), elbow, 0.062 * B.limbs, mJersey);
     g.add(upper);
     // ---- ELBOW PAD: a hard angular cap mid-limb
     if (B.pads) {
       const pad = new THREE.Mesh(
         new THREE.BoxGeometry(0.13 * B.limbs, 0.13, 0.13), mArmour);
-      pad.position.set(s * 0.07, -0.19, 0.22);
+      pad.position.copy(elbow);
       g.add(pad);
     }
     const fore = new THREE.Group();
-    fore.position.set(s * 0.07, -0.20, 0.22);
-    fore.add(tube(V(0, 0, 0), V(s * 0.05, -0.16, 0.26), 0.052 * B.limbs, mSkin));
+    fore.position.copy(elbow);
+    // remaining reach from the elbow to the grip
+    const hand = V(grip.x - elbow.x, grip.y - elbow.y, grip.z - elbow.z);
+    fore.add(tube(V(0, 0, 0), hand, 0.052 * B.limbs, mSkin));
     // ---- GLOVE: oversized so the hands stay visible at speed
     const glove = new THREE.Mesh(
       new THREE.BoxGeometry(0.13 * B.limbs, 0.13, 0.15), mGlove);
-    glove.position.set(s * 0.05, -0.17, 0.28);
+    glove.position.copy(hand);
     fore.add(glove);
     // knuckle plate catches the light and reads as a fist
     const knuckle = new THREE.Mesh(
       new THREE.BoxGeometry(0.12 * B.limbs, 0.05, 0.06), RIDER_MAT.armour(c.accent));
-    knuckle.position.set(s * 0.05, -0.13, 0.33);
+    knuckle.position.set(hand.x, hand.y + 0.04, hand.z + 0.05);
     fore.add(knuckle);
     g.add(fore);
     rider.add(g);
@@ -499,12 +529,27 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
 
   const mkLeg = (s: number) => {
     const g = new THREE.Group();
-    g.position.set(s * 0.13 * B.bulk, 0.92, -0.26);
-    const thighL = 0.34 * B.legs;
-    g.add(tube(V(0, 0, 0), V(s * 0.02, -thighL, 0.10), 0.085 * B.limbs, mPants));
+    // SYNC: the pedal orbits the bottom bracket at crank radius, so the
+    // foot target is BB + (+/-0.10 outboard, -0.29 down at rest). Solving
+    // for X alone (an earlier pass) left the feet floating well above and
+    // behind the cranks. All three axes are resolved here.
+    const hip = V(s * 0.13 * B.bulk, TORSO_AT.y, TORSO_AT.z);
+    g.position.copy(hip);
+    const PEDAL_BIKE = V(s * 0.10, BB.y - 0.29, BB.z);
+    // pedal expressed in this leg group's space
+    const foot = V(
+      PEDAL_BIKE.x - hip.x,
+      PEDAL_BIKE.y - hip.y,
+      PEDAL_BIKE.z - hip.z,
+    );
+    // knee sits forward of the straight hip->foot line, which is what
+    // makes the leg read as bent over the cranks rather than stiff
+    const knee = V(foot.x * 0.5, foot.y * 0.52, foot.z * 0.5 + 0.16);
+    g.add(tube(V(0, 0, 0), knee, 0.085 * B.limbs, mPants));
     const shin = new THREE.Group();
-    shin.position.set(s * 0.02, -thighL, 0.10);
-    shin.add(tube(V(0, 0, 0), V(0, -0.30 * B.legs, -0.06), 0.062 * B.limbs, mPants));
+    shin.position.copy(knee);
+    const lower = V(foot.x - knee.x, foot.y - knee.y, foot.z - knee.z);
+    shin.add(tube(V(0, 0, 0), lower, 0.062 * B.limbs, mPants));
     // ---- KNEE PAD: chunky forward-facing block, the classic DH shape
     if (B.pads) {
       const kp = new THREE.Mesh(
@@ -513,14 +558,14 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
       shin.add(kp);
     }
     // ---- BOOT: deliberately oversized. Small feet disappear at speed and
-    // make the whole rider read as spindly.
+    // make the whole rider read as spindly. Sits ON the pedal.
     const shoe = new THREE.Mesh(
       new THREE.BoxGeometry(0.15 * B.limbs, 0.11, 0.29), mBoot);
-    shoe.position.set(0, -0.32 * B.legs, -0.02);
+    shoe.position.copy(lower);
     shin.add(shoe);
     const sole = new THREE.Mesh(
       new THREE.BoxGeometry(0.16 * B.limbs, 0.04, 0.31), RIDER_MAT.boot(c.accent));
-    sole.position.set(0, -0.37 * B.legs, -0.02);
+    sole.position.set(lower.x, lower.y - 0.05, lower.z);
     shin.add(sole);
     g.add(shin);
     rider.add(g);
@@ -575,30 +620,21 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
 
   root.traverse(o => { if ((o as THREE.Mesh).isMesh) { o.castShadow = false; o.receiveShadow = false; } });
 
-  // overall build scale, applied to the rider only so every bike still fits
-  // its wheels and the drivetrain geometry stays valid
-  rider.scale.setScalar(B.scale);
+  // NOTE: deliberately NOT scaling the rider group here. The hands are
+  // placed to reach the bars and the feet to reach the pedals, and the bike
+  // is not scaled with them — so a group-level scale detached the limbs
+  // from the contact points. Build variation comes from the per-part
+  // multipliers (shoulders / bulk / limbs / legs / helmet) instead, which
+  // preserve those contacts.
 
-  // ---- SILHOUETTE PASS -------------------------------------------------
-  // Priority 1 is rider readability. Inverted-hull backfaces draw a dark
-  // outline behind the rig, so the character stays legible against dirt,
-  // sky, crowd or trees without relying on lighting contrast alone.
-  // Cheap: no post-processing, no second render target.
-  const outlineMat = new THREE.MeshBasicMaterial({
-    color: 0x0b0d12, side: THREE.BackSide, fog: true,
-  });
-  const outlineTargets: THREE.Mesh[] = [];
-  root.traverse(o => {
-    const m = o as THREE.Mesh;
-    // skip tiny parts: outlining them just thickens the model
-    if (m.isMesh && m.geometry) outlineTargets.push(m);
-  });
-  for (const m of outlineTargets) {
-    const shell = new THREE.Mesh(m.geometry, outlineMat);
-    shell.scale.setScalar(1.055);
-    shell.renderOrder = -1;
-    m.add(shell);
-  }
+  // NOTE: an inverted-hull outline pass used to live here and was removed.
+  // It scaled a duplicate of every mesh by 1.055, which works for closed
+  // blobs but is wrong for this rig: the frame is built from `tube()`
+  // cylinders whose geometry is centred on the mesh origin, so uniform
+  // scaling made every tube 5.5% LONGER as well as fatter. The frame
+  // visibly came apart at its joints and the mesh count doubled.
+  // Rider readability is carried by the material contrast and contact
+  // shadows instead.
 
   return {
     root, lean, body, spin, flip, bike, fork, forkLower, swingarm, shock,
@@ -614,9 +650,71 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
 // Scenery geometry
 // ---------------------------------------------------------------------------
 
-export function pineFoliageGeo(): THREE.BufferGeometry {
-  const g = new THREE.ConeGeometry(1, 2.4, 7, 1);
-  g.translate(0, 1.2, 0);
+/**
+ * Pine canopy variants. A single cone repeated across a whole forest is the
+ * most visible kind of asset repetition there is, because the silhouette is
+ * identical at every distance. These four differ in tier count, taper and
+ * raggedness so the treeline reads as a forest rather than a stamp.
+ *
+ *   0  single spire    — young, narrow
+ *   1  two-tier        — the classic shape
+ *   2  three-tier      — old and layered
+ *   3  broken top      — storm-damaged, asymmetric
+ */
+export function pineFoliageGeo(variant = 0): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = [];
+  switch (variant % 4) {
+    case 1: {
+      const lo = new THREE.ConeGeometry(1.05, 1.7, 7, 1);
+      lo.translate(0, 0.85, 0);
+      const hi = new THREE.ConeGeometry(0.7, 1.5, 7, 1);
+      hi.translate(0, 1.95, 0);
+      parts.push(lo, hi);
+      break;
+    }
+    case 2: {
+      const a = new THREE.ConeGeometry(1.15, 1.3, 8, 1); a.translate(0, 0.65, 0);
+      const b = new THREE.ConeGeometry(0.85, 1.2, 8, 1); b.translate(0, 1.5, 0);
+      const c = new THREE.ConeGeometry(0.52, 1.1, 8, 1); c.translate(0, 2.35, 0);
+      parts.push(a, b, c);
+      break;
+    }
+    case 3: {
+      // snapped crown: squat, wide, leaning
+      const lo = new THREE.ConeGeometry(1.2, 1.5, 7, 1);
+      lo.translate(0, 0.75, 0);
+      const stub = new THREE.ConeGeometry(0.55, 0.8, 6, 1);
+      stub.rotateZ(0.34);
+      stub.translate(0.22, 1.7, 0);
+      parts.push(lo, stub);
+      break;
+    }
+    default: {
+      const g = new THREE.ConeGeometry(0.92, 2.7, 7, 1);
+      g.translate(0, 1.35, 0);
+      parts.push(g);
+    }
+  }
+  return mergeGeos(parts);
+}
+
+/** Trunk variants: straight, tapered, and a leaning one. */
+export function pineTrunkVariant(variant = 0): THREE.BufferGeometry {
+  const g = new THREE.CylinderGeometry(
+    0.13 + (variant % 3) * 0.03, 0.22 + (variant % 3) * 0.04, 1.6, 5);
+  g.translate(0, 0.8, 0);
+  if (variant % 4 === 3) g.rotateZ(0.09);
+  return g;
+}
+
+/**
+ * FAR-BAND pine. Two crossed billboards' worth of geometry collapsed into a
+ * single low cone — 7 tris instead of 40+. Used beyond the mid band where
+ * the tree is a silhouette and nothing more.
+ */
+export function pineImpostorGeo(): THREE.BufferGeometry {
+  const g = new THREE.ConeGeometry(1.0, 2.6, 4, 1);
+  g.translate(0, 1.3, 0);
   return g;
 }
 export function pineTrunkGeo(): THREE.BufferGeometry {
@@ -639,29 +737,118 @@ export function broadleafGeo(): THREE.BufferGeometry {
   return g;
 }
 
-export function rockGeo(seed = 5): THREE.BufferGeometry {
-  const g = new THREE.IcosahedronGeometry(1, 1);
-  const p = g.attributes.position as THREE.BufferAttribute;
+export type RockFamily = 'pebble' | 'boulder' | 'landmark' | 'formation';
+
+/**
+ * Rock families differ in SHAPE, not just scale — a scaled-up pebble still
+ * reads as a pebble. Detail level also rises with size, since a massive
+ * formation occupies far more screen area than a trailside stone.
+ *
+ *   pebble     rounded, low detail, flattish
+ *   boulder    chunky and irregular — the obstacle read
+ *   landmark   tall and angular, visible from distance
+ *   formation  jagged spires, communicates mountain scale
+ */
+export function rockGeo(seed = 5, family: RockFamily = 'boulder'): THREE.BufferGeometry {
   const rng = new RNG(seed);
+  const detail = family === 'pebble' ? 0 : family === 'formation' ? 2 : 1;
+  const g = new THREE.IcosahedronGeometry(1, detail);
+  const p = g.attributes.position as THREE.BufferAttribute;
+
   for (let i = 0; i < p.count; i++) {
-    const f = 0.62 + rng.next() * 0.7;
-    p.setXYZ(i, p.getX(i) * f * 1.15, Math.max(0, p.getY(i)) * f * 0.86, p.getZ(i) * f * 1.1);
+    let x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    switch (family) {
+      case 'pebble': {
+        const f = 0.75 + rng.next() * 0.4;
+        p.setXYZ(i, x * f * 1.2, Math.max(0, y) * f * 0.55, z * f * 1.15);
+        break;
+      }
+      case 'landmark': {
+        // vertical bias with hard facets: reads as a standing stone
+        const f = 0.7 + rng.next() * 0.5;
+        const facet = Math.round(x * 3) / 3;
+        p.setXYZ(i, facet * f * 0.9, Math.max(0, y) * (1.5 + rng.next() * 0.9),
+          Math.round(z * 3) / 3 * f * 0.9);
+        break;
+      }
+      case 'formation': {
+        // spiky: push vertices out along their own normal at random
+        const spike = 0.75 + Math.pow(rng.next(), 2) * 1.6;
+        p.setXYZ(i, x * spike * 0.85,
+          Math.max(-0.1, y) * spike * (1.6 + rng.next()), z * spike * 0.85);
+        break;
+      }
+      default: {
+        const f = 0.62 + rng.next() * 0.7;
+        p.setXYZ(i, x * f * 1.15, Math.max(0, y) * f * 0.86, z * f * 1.1);
+      }
+    }
+    void x; void y; void z;
   }
   g.computeVertexNormals();
   return g;
 }
 
-export function bushGeo(): THREE.BufferGeometry {
-  const g = new THREE.IcosahedronGeometry(0.8, 0);
-  const p = g.attributes.position as THREE.BufferAttribute;
-  const rng = new RNG(21);
-  for (let i = 0; i < p.count; i++) {
-    const f = 0.6 + rng.next() * 0.8;
-    p.setXYZ(i, p.getX(i) * f, Math.max(-0.1, p.getY(i)) * f, p.getZ(i) * f);
+/** A pool of distinct geometries for a family, to break up repetition. */
+export function rockFamily(family: RockFamily, count = 4): THREE.BufferGeometry[] {
+  const out: THREE.BufferGeometry[] = [];
+  for (let i = 0; i < count; i++) out.push(rockGeo(11 + i * 137, family));
+  return out;
+}
+
+/** Bush variants: differing lump counts and spread. */
+export function bushGeo(variant = 0): THREE.BufferGeometry {
+  const rng = new RNG(21 + variant * 137);
+  const lumps = 1 + (variant % 3);
+  const parts: THREE.BufferGeometry[] = [];
+  for (let k = 0; k < lumps; k++) {
+    const g = new THREE.IcosahedronGeometry(0.8 / (1 + k * 0.35), 0);
+    const p = g.attributes.position as THREE.BufferAttribute;
+    for (let i = 0; i < p.count; i++) {
+      const f = 0.6 + rng.next() * 0.8;
+      p.setXYZ(i, p.getX(i) * f, Math.max(-0.1, p.getY(i)) * f, p.getZ(i) * f);
+    }
+    g.computeVertexNormals();
+    g.translate(
+      rng.range(-0.45, 0.45) * k,
+      0.35 - k * 0.06,
+      rng.range(-0.45, 0.45) * k);
+    parts.push(g);
   }
-  g.computeVertexNormals();
-  g.translate(0, 0.35, 0);
-  return g;
+  return mergeGeos(parts);
+}
+
+/** Small ground plants: a low fan of leaves, cheap and readable up close. */
+export function plantGeo(variant = 0): THREE.BufferGeometry {
+  const rng = new RNG(707 + variant * 53);
+  const parts: THREE.BufferGeometry[] = [];
+  const n = 3 + (variant % 3);
+  for (let i = 0; i < n; i++) {
+    const leaf = new THREE.ConeGeometry(0.10, rng.range(0.35, 0.62), 4, 1);
+    leaf.translate(0, rng.range(0.16, 0.3), 0);
+    leaf.rotateZ(rng.range(-0.7, 0.7));
+    leaf.rotateY((i / n) * TAU + rng.range(-0.3, 0.3));
+    parts.push(leaf);
+  }
+  return mergeGeos(parts);
+}
+
+/** Fallen branch: a forked stick lying on the ground. */
+export function branchGeo(variant = 0): THREE.BufferGeometry {
+  const rng = new RNG(311 + variant * 91);
+  const parts: THREE.BufferGeometry[] = [];
+  const main = new THREE.CylinderGeometry(0.05, 0.08, rng.range(1.6, 2.8), 5);
+  main.rotateZ(Math.PI / 2);
+  main.translate(0, 0.07, 0);
+  parts.push(main);
+  const forks = 1 + (variant % 2);
+  for (let i = 0; i < forks; i++) {
+    const f = new THREE.CylinderGeometry(0.03, 0.045, rng.range(0.5, 1.0), 4);
+    f.rotateZ(Math.PI / 2 + rng.range(-0.8, 0.8));
+    f.translate(rng.range(-0.6, 0.6), 0.06, rng.range(-0.3, 0.3));
+    parts.push(f);
+  }
+  return mergeGeos(parts);
 }
 
 /** Grass tuft billboard cross. */
@@ -796,11 +983,9 @@ export function driftGeo(): THREE.BufferGeometry {
 
 /** Merge a set of geometries that share no attributes beyond position/normal. */
 function mergeGeos(list: THREE.BufferGeometry[]): THREE.BufferGeometry {
-  let vCount = 0, iCount = 0;
-  for (const g of list) {
-    vCount += g.attributes.position.count;
-    iCount += g.index ? g.index.count : 0;
-  }
+  let vCount = 0;
+  for (const g of list) vCount += g.attributes.position.count;
+
   const pos = new Float32Array(vCount * 3);
   const nor = new Float32Array(vCount * 3);
   const idx: number[] = [];
@@ -810,15 +995,25 @@ function mergeGeos(list: THREE.BufferGeometry[]): THREE.BufferGeometry {
     const n = g.attributes.normal.array as ArrayLike<number>;
     pos.set(p as never, vo * 3);
     nor.set(n as never, vo * 3);
-    const gi = g.index!.array as ArrayLike<number>;
-    for (let i = 0; i < gi.length; i++) idx.push(gi[i] + vo);
-    vo += g.attributes.position.count;
+    const count = g.attributes.position.count;
+    // CRITICAL: several Three primitives are NON-indexed — ConeGeometry with
+    // 4+ radial segments among them. Assuming g.index exists throws and
+    // takes the whole track build (and therefore the loading screen) with it.
+    if (g.index) {
+      const gi = g.index.array as ArrayLike<number>;
+      for (let i = 0; i < gi.length; i++) idx.push(gi[i] + vo);
+    } else {
+      // synthesise a trivial index for the vertex run
+      for (let i = 0; i < count; i++) idx.push(vo + i);
+    }
+    vo += count;
     g.dispose();
   }
   const out = new THREE.BufferGeometry();
   out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
   out.setIndex(idx);
+  out.computeVertexNormals();
   return out;
 }
 

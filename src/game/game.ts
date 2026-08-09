@@ -259,6 +259,8 @@ interface Racer {
   /** 0..1 accumulated grime, and the colour it's picking up */
   dirt: number;
   dirtTint: THREE.Color;
+  /** 0..1 how recently this rider went through water */
+  wet: number;
 }
 
 const RIVAL_NAMES = ['BRICK', 'VOLTA', 'MAGPIE', 'SPUD', 'NOODLE', 'TANKA', 'HUSK', 'PIP'];
@@ -471,20 +473,45 @@ export class Game {
     this.camera = new THREE.PerspectiveCamera(this.fov, w / h, 0.4, 6000);
     this.scene.add(this.camera);
 
-    // Stylised key/fill: a warm low sun for long shadows and strong terrain
-    // silhouettes, a saturated cool bounce so shaded faces read as blue
-    // rather than grey, and a hard rim to separate riders from the hill.
-    this.hemi = new THREE.HemisphereLight(0xbcd8ff, 0x7a5a30, 0.95);
-    this.scene.add(this.hemi);
-    this.sun = new THREE.DirectionalLight(0xffe6b0, 2.15);
-    this.sun.position.set(-0.5, 0.72, 0.35);
+    // ---- LATE AFTERNOON / GOLDEN MOUNTAIN -----------------------------
+    // One polished setup rather than several half-tuned ones.
+    //
+    // KEY: low and warm. Elevation 0.42 is roughly 23 degrees above the
+    // horizon — golden hour, not midday — which is what produces the long
+    // raking shadows and strong terrain silhouettes the look depends on.
+    // Raised intensity compensates for the shallow angle.
+    this.sun = new THREE.DirectionalLight(0xffd9a0, 2.6);
+    this.sun.position.set(-0.62, 0.42, 0.28);
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
-    const rim = new THREE.DirectionalLight(0x88b4ff, 0.72);
-    rim.position.set(0.6, 0.25, -1);
+
+    // SKY/ENVIRONMENT: cool blue from above, warm bounce from the dirt
+    // below. The vertical colour split is what creates depth between
+    // foreground and background without any post-processing.
+    this.hemi = new THREE.HemisphereLight(0xa8ccff, 0x8a6438, 1.15);
+    this.scene.add(this.hemi);
+
+    // RIM: cool and from behind, so riders separate from the hillside even
+    // when they're between the camera and a dark treeline.
+    const rim = new THREE.DirectionalLight(0x9ec4ff, 0.85);
+    rim.position.set(0.55, 0.30, -1);
     this.scene.add(rim);
-    // low warm bounce off the dirt, keeps undersides from going flat black
-    const bounce = new THREE.DirectionalLight(0xffb070, 0.32);
+
+    // FILL: a soft frontal light with no direction of its own. This is the
+    // "never lose the rider in a forest" guarantee — it lifts shadowed
+    // faces without flattening the key.
+    //
+    // NOTE: now that the world uses Standard materials it has a specular
+    // response, so this fill contributes highlights as well as diffuse.
+    // Kept low deliberately: the world is authored matte (roughness 0.88+)
+    // so the rider and bike stay the most visually active things on screen.
+    const fill = new THREE.DirectionalLight(0xfff0dc, 0.42);
+    fill.position.set(-0.15, 0.55, 1);
+    this.scene.add(fill);
+
+    // BOUNCE: warm light coming back up off the dirt. Keeps undersides and
+    // the rider's legs from going to flat black in the trees.
+    const bounce = new THREE.DirectionalLight(0xffb878, 0.40);
     bounce.position.set(0.2, -1, 0.1);
     this.scene.add(bounce);
 
@@ -641,7 +668,7 @@ export class Game {
       corner: 1, aggression: 0,
       brain: null, mood: { line: 1, swing: 1, send: 1 }, moodCd: 0,
       wantSteer: 0, scCommit: 0, trickSpin: 0, trickAngle: 0, lodNear: true,
-      dirt: 0, dirtTint: new THREE.Color(0x6b5942),
+      dirt: 0, dirtTint: new THREE.Color(0x6b5942), wet: 0,
     };
   }
 
@@ -711,7 +738,7 @@ export class Game {
       r.scCommit = 0; r.moodCd = 0; r.trickSpin = 0; r.trickAngle = 0;
       r.thinkCd = 0; r.aiSteer = 0; r.wantSteer = 0;
       // fresh bike at the gate
-      r.dirt = 0;
+      r.dirt = 0; r.wet = 0;
       r.dirtTint.setHex(0x6b5942);
       r.rig.dirt.set(0, r.dirtTint);
       r.finished = false; r.finishTime = 0; r.place = i + 1;
@@ -1207,11 +1234,13 @@ export class Game {
       // buys back exit speed, so a wreck is something you fight, not watch.
       if (r.isPlayer && inp.live) {
         if (this.tap('KeyW', 'ArrowUp', 'Space', 'KeyJ')) {
-          r.recover = clamp01(r.recover + 0.16);
+          r.recover = clamp01(r.recover + 0.2);
           audio.uiMove();
           this.hud.recoverPulse = 1;
         }
-        r.crash -= dt * (1 + r.recover * 1.25);
+        // mashing can cut the tumble to well under a second — downtime is
+        // the least fun part of a crash, so reward fighting out of it hard
+        r.crash -= dt * (1 + r.recover * 1.9);
       } else {
         // RECOVERY skill: a resilient rider on a high tier is back up in
         // roughly half the time a rookie coward takes
@@ -1450,7 +1479,15 @@ export class Game {
     } else if (!r.grounded) {
       r.dirt = Math.max(0, r.dirt - dt * 0.012);
     }
-    r.rig.dirt.set(r.dirt, r.dirtTint);
+    // wet fades back to dry; while wet the grime tint goes darker and
+    // glossier, which reads as a soaked bike rather than a dusty one
+    if (r.wet > 0) r.wet = Math.max(0, r.wet - dt * 0.35);
+    if (r.wet > 0.02) {
+      _c1.copy(r.dirtTint).multiplyScalar(1 - r.wet * 0.45);
+      r.rig.dirt.set(Math.max(r.dirt, r.wet * 0.55), _c1);
+    } else {
+      r.rig.dirt.set(r.dirt, r.dirtTint);
+    }
 
     // ---- fore/aft weight shift. Riders get back over the rear wheel on
     // steeps and under braking, and move forward to drive on the flat.
@@ -1925,18 +1962,15 @@ export class Game {
    */
   private updateRiderLod() {
     const p = this.player;
-    const cut = LOD_BANDS[1] * this.perfGov.lodScale;
+    const cut = LOD_BANDS[2] * this.perfGov.lodScale;
     for (const r of this.racers) {
+      // Far-off rivals still need to exist for placings, but there is no
+      // point submitting a 25-mesh articulated rig for something a few
+      // pixels tall. The blob shadow keeps them locatable on the descent bar.
       const near = r.isPlayer || Math.abs(r.s - p.s) < cut;
       if (r.lodNear === near) continue;
       r.lodNear = near;
-      r.rig.root.traverse(o => {
-        const m = o as THREE.Mesh;
-        const mm = m.material as THREE.Material | undefined;
-        if (mm && (mm as THREE.MeshBasicMaterial).side === THREE.BackSide) {
-          o.visible = near;
-        }
-      });
+      r.rig.root.visible = near;
     }
   }
 
@@ -2335,13 +2369,36 @@ export class Game {
     if (r.v < 4) return;
     const info = patchSurface(kind);
     if (!info) return;
+    // wet tyres: entering water darkens the rubber and it stays dark for a
+    // few seconds after, which is what sells the surface as actually wet
+    if (info.spray === 'water' && r.isPlayer) {
+      r.wet = 1;
+    }
     const trk = this.track;
     // slow and destabilise while in it
     r.v -= info.drag * 0.55 * this.lastDt * 6;
     r.vx *= 1 - (1 - info.grip) * 0.4 * this.lastDt * 6;
 
     const snow = info.spray === 'snow';
-    const rate = clamp01(r.v / 26) * (snow ? 42 : 60);
+    const rate = clamp01(r.v / 26) * (snow ? 42 : 60) * this.perfGov.particleScale;
+    // heavy droplets thrown clear of the wheel — reads as water weight,
+    // where the soft sheet alone reads as fog
+    if (!snow && Math.random() < this.lastDt * rate * 0.5) {
+      this.track.frameAt(r.s, _f1, _f2, _f3);
+      const w = this.track.worldPos(r.s - 0.4, r.x, r.y + 0.1, _v1);
+      for (let i = 0; i < 3; i++) {
+        this.sparkPool.spawn({
+          pos: w.clone(),
+          vel: _f2.clone().multiplyScalar(this.rng.range(-7, 7))
+            .addScaledVector(_f3, this.rng.range(4, 10))
+            .addScaledVector(_f1, -r.v * 0.18),
+          life: this.rng.range(0.3, 0.7),
+          size: this.rng.range(0.08, 0.2), endSize: 0.03,
+          color: _c1.setRGB(0.80, 0.92, 1.0),
+          alpha: 0.9, gravity: 22, drag: 0.5,
+        });
+      }
+    }
     if (Math.random() > this.lastDt * rate) return;
     trk.frameAt(r.s, _f1, _f2, _f3);
     const base = trk.worldPos(r.s - 0.3, r.x, r.y + 0.1, _v1);
@@ -2878,12 +2935,18 @@ export class Game {
       // IMPACT REACTION: elbows fold under compression exactly as the knees
       // do, so a landing is absorbed by all four limbs rather than two.
       const absorbA = clamp(-r.suspension * 1.4, -0.15, 0.65);
-      rig.armL.rotation.y = damp(rig.armL.rotation.y, -st * 0.34, 12, dt);
-      rig.armR.rotation.y = damp(rig.armR.rotation.y, -st * 0.34, 12, dt);
-      rig.armL.rotation.z = damp(rig.armL.rotation.z, st * 0.20 + absorbA * 0.5, 12, dt);
-      rig.armR.rotation.z = damp(rig.armR.rotation.z, st * 0.20 - absorbA * 0.5, 12, dt);
-      rig.armL.rotation.x = damp(rig.armL.rotation.x, -absorbA, 14, dt);
-      rig.armR.rotation.x = damp(rig.armR.rotation.x, -absorbA, 14, dt);
+      // A style trick already owns the arms this frame (no-hander throws
+      // them wide). Writing steering on top would overwrite the pose and
+      // the trick would never be visible.
+      const armsFree = !(r.isPlayer && this.styleActive.size > 0);
+      if (armsFree) {
+        rig.armL.rotation.y = damp(rig.armL.rotation.y, -st * 0.34, 12, dt);
+        rig.armR.rotation.y = damp(rig.armR.rotation.y, -st * 0.34, 12, dt);
+        rig.armL.rotation.z = damp(rig.armL.rotation.z, st * 0.20 + absorbA * 0.5, 12, dt);
+        rig.armR.rotation.z = damp(rig.armR.rotation.z, st * 0.20 - absorbA * 0.5, 12, dt);
+        rig.armL.rotation.x = damp(rig.armL.rotation.x, -absorbA, 14, dt);
+        rig.armR.rotation.x = damp(rig.armR.rotation.x, -absorbA, 14, dt);
+      }
       // unwind the bonk's bike yaw once the swing is done
       rig.bike.rotation.y = damp(rig.bike.rotation.y, 0, 10, dt);
       if (r.grounded) rig.bike.rotation.z = damp(rig.bike.rotation.z, 0, 10, dt);
@@ -2980,13 +3043,26 @@ export class Game {
     }
 
     // mud splatter
-    if (surf.kind === 'mud' && r.grounded && r.v > 8 && Math.random() < dt * 24) {
-      const rear = trk.worldPos(r.s - 0.6, r.x, r.y + 0.1, _v1);
-      trk.frameAt(r.s, _f1, _f2, _f3);
-      this.dirtPool.spawn({
-        pos: rear.clone(), vel: _f3.clone().multiplyScalar(this.rng.range(3, 8)).addScaledVector(_f2, this.rng.range(-3, 3)),
-        life: 0.8, size: 0.34, endSize: 0.1, color: _c2.setHex(0x3a3021), alpha: 1, gravity: 24, drag: 0.7,
-      });
+    // ---- MUD. Heavy, dark clods that arc and land, distinct from dust.
+    // Rate scales with how hard the tyre is working, so cruising through
+    // mud throws less than powering or sliding through it.
+    if (surf.kind === 'mud' && stRoost > 0 && r.v > 8) {
+      const work = clamp01((Math.abs(r.vx) * 0.1) + (r.pedalling * 0.5) + 0.25);
+      if (Math.random() < dt * 20 * work * pScale) {
+        const rear = trk.worldPos(r.s - 0.6, r.x, r.y + 0.1, _v1);
+        trk.frameAt(r.s, _f1, _f2, _f3);
+        this.dirtPool.spawn({
+          pos: rear.clone(),
+          vel: _f3.clone().multiplyScalar(this.rng.range(3, 8))
+            .addScaledVector(_f2, this.rng.range(-3, 3))
+            .addScaledVector(_f1, -r.v * 0.15),
+          life: this.rng.range(0.7, 1.1),
+          size: this.rng.range(0.26, 0.42), endSize: 0.12,
+          color: _c2.setHex(0x3a3021), alpha: 1,
+          gravity: 24, drag: 0.7, spin: this.rng.range(-8, 8),
+          bounce: 0.2,
+        });
+      }
     }
 
     // boost fire
@@ -3005,20 +3081,26 @@ export class Game {
       }
     }
 
-    // wind motes rushing past camera
-    this.moteAccum += dt * clamp01(r.v / 20) * 34;
-    while (this.moteAccum > 1) {
-      this.moteAccum -= 1;
-      const ahead = trk.worldPos(r.s + this.rng.range(14, 40), r.x + this.rng.range(-14, 14),
-        this.track.heightAt(r.s + 20, r.x) + this.rng.range(0.5, 9), new THREE.Vector3());
-      trk.frameAt(r.s, _f1, _f2, _f3);
-      this.smokePool.spawn({
-        pos: ahead, vel: _f1.clone().multiplyScalar(-this.rng.range(1, 5)),
-        life: this.rng.range(0.7, 1.5), size: 0.05, endSize: 0.02,
-        color: _c2.setRGB(1, 0.98, 0.9), alpha: 0.5, gravity: 0.4, drag: 0.2,
-      });
+    // Wind motes. Only above a real speed threshold, and at a fraction of
+    // the old rate: this used to fire ~34/sec whenever moving, which ate the
+    // smoke pool that landing and drift dust need. Motes are a speed cue,
+    // not an atmosphere — if they're always there they read as neither.
+    if (r.v > 22) {
+      this.moteAccum += dt * clamp01((r.v - 22) / 18) * 11 * pScale;
+      while (this.moteAccum > 1) {
+        this.moteAccum -= 1;
+        const ahead = trk.worldPos(
+          r.s + this.rng.range(16, 38), r.x + this.rng.range(-12, 12),
+          trk.heightAt(r.s + 20, r.x) + this.rng.range(0.6, 7), _v1);
+        trk.frameAt(r.s, _f1, _f2, _f3);
+        this.smokePool.spawn({
+          pos: ahead.clone(),
+          vel: _f1.clone().multiplyScalar(-this.rng.range(1, 5)),
+          life: this.rng.range(0.5, 1.0), size: 0.05, endSize: 0.02,
+          color: _c2.setRGB(1, 0.98, 0.9), alpha: 0.45, gravity: 0.4, drag: 0.2,
+        });
+      }
     }
-    void dt;
   }
 
   private aiFx(r: Racer, dt: number, surf: { roost: number }) {
@@ -3044,7 +3126,8 @@ export class Game {
     trk.frameAt(r.s, _f1, _f2, _f3);
     const zone = trk.zoneAt(r.s);
     const base = trk.worldPos(r.s, r.x, r.y + 0.1, _v1);
-    const n = Math.floor(10 + amount * 40);
+    const pk = Math.max(0.5, this.perfGov.particleScale);
+    const n = Math.floor((10 + amount * 40) * pk);
     for (let i = 0; i < n; i++) {
       const a = this.rng.range(0, TAU);
       const sp = this.rng.range(2, 9) * (0.5 + amount);
@@ -3056,7 +3139,7 @@ export class Game {
         alpha: 1, gravity: 24, drag: 0.8, spin: this.rng.range(-9, 9),
       });
     }
-    for (let i = 0; i < 8 + amount * 14; i++) {
+    for (let i = 0; i < (8 + amount * 14) * pk; i++) {
       const a = this.rng.range(0, TAU);
       this.smokePool.spawn({
         pos: base.clone().addScaledVector(_f2, Math.cos(a) * this.rng.range(0, 1.4)),
@@ -3094,6 +3177,9 @@ export class Game {
     const trk = this.track;
     const base = trk.worldPos(r.s, r.x, r.y + 0.5, _v1);
     const zone = trk.zoneAt(r.s);
+    // a crash is a one-off burst, so it gets a generous share of the budget
+    // but still respects the governor rather than spiking a struggling frame
+    count = Math.round(count * Math.max(0.5, this.perfGov.particleScale));
     for (let i = 0; i < count; i++) {
       const a = this.rng.range(0, TAU);
       this.dirtPool.spawn({
@@ -3114,13 +3200,20 @@ export class Game {
     this.mountainId = id;
 
     this.scene.remove(this.track.group);
+    const seenTex = new Set<THREE.Texture>();
     this.track.group.traverse(o => {
       const mesh = o as THREE.Mesh;
       if (mesh.geometry) mesh.geometry.dispose();
       const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
-      if (Array.isArray(mat)) mat.forEach(x => x.dispose());
-      else mat?.dispose();
+      const list = Array.isArray(mat) ? mat : mat ? [mat] : [];
+      for (const mm of list) {
+        // textures are shared between materials, so dedupe before disposing
+        const tex = (mm as THREE.MeshStandardMaterial).map;
+        if (tex && !seenTex.has(tex)) { seenTex.add(tex); tex.dispose(); }
+        mm.dispose();
+      }
     });
+    this.track.dispose();
 
     this.track = m.authored
       ? new Track(m.seed, m.length, SHALEBACK_SECTIONS, SHALEBACK_SETPIECES)
@@ -3147,18 +3240,27 @@ export class Game {
     p.mass = this.perf.mass;
     const old = p.rig;
     this.scene.remove(old.root, old.shadow, old.contactF, old.contactR);
+    // Dispose geometry only. Materials from RIDER_MAT reference SHARED,
+    // cached roughness textures — disposing them here would tear down the
+    // maps every other rider is still using, leaving the whole field
+    // untextured after a single garage change.
     old.root.traverse(o => {
       const m = o as THREE.Mesh;
       if (m.geometry) m.geometry.dispose();
-      const mat = m.material as THREE.Material | THREE.Material[] | undefined;
-      if (Array.isArray(mat)) mat.forEach(x => x.dispose());
-      else mat?.dispose();
     });
+
     // rider choice drives the silhouette, not just the palette
     const rig = createRider(loadoutColors(l), getBuild(RIDER_BUILD_OF[l.rider] ?? 'allround'));
-    rig.frontWheel.scale.setScalar(bike.wheelScale);
-    rig.rearWheel.scale.setScalar(bike.wheelScale);
-    rig.bike.scale.set(bike.tubeScale * 0.5 + 0.5, 1, 1);
+    // Wheel size is capped tight: the physics ground plane assumes a 0.36m
+    // radius, so a large deviation floats the bike or sinks it into the
+    // dirt. Keep the visual difference subtle enough to stay grounded.
+    const ws = clamp(bike.wheelScale, 0.96, 1.06);
+    rig.frontWheel.scale.setScalar(ws);
+    rig.rearWheel.scale.setScalar(ws);
+    // NOTE: only the frame tubes scale, NOT rig.bike — scaling that group
+    // would move the wheels, cranks and bar positions away from where the
+    // rider's hands and feet are placed, desyncing body from bike.
+    void bike.tubeScale;
     this.scene.add(rig.root, rig.shadow, rig.contactF, rig.contactR);
     p.rig = rig;
     // new bike, clean — and the handle belongs to the new rig
@@ -3479,20 +3581,44 @@ export class Game {
 
     // fog / light per zone
     const zone = this.track.zoneAt(p.s);
-    // Fog is the FAR band's main tool: it hides the LOD cutoff so vegetation
-    // dissolves into aerial perspective instead of popping. Density is tuned
-    // against the draw reaches in updateSceneryLod — raising one without the
-    // other is what makes pop-in visible.
-    const fogTarget = 0.0016 * zone.fog;
+    // ---- ATMOSPHERIC PERSPECTIVE --------------------------------------
+    // Honest depth cue, not a geometry hider. Density is deliberately set
+    // so the fog is still LIGHT at the LOD cutoff (~460m canopy reach):
+    // at 0.0011, transmittance there is ~60%, so distant trees fade rather
+    // than vanish into a wall. If fog were doing the culling's job you
+    // would see a hard grey curtain at a fixed radius, which is the failure
+    // mode the brief calls out.
+    //
+    // The real scale cue is the three ridge layers, which are tinted toward
+    // haze at build time (0.18 / 0.46 / 0.72) — contrast falls off with
+    // distance independently of fog, so the mountain reads as enormous even
+    // where the fog is thin.
+    const fogTarget = 0.0011 * zone.fog;
     this.fog.density = damp(this.fog.density, fogTarget, 1.2, dt);
-    _c1.setHex(zone.far).lerp(_c2.setHex(0xcfe0ee), 0.62);
+
+    // ---- FOREST READABILITY GUARANTEE ---------------------------------
+    // Dense sections use dark verges and heavy fog, which is atmospheric
+    // but risks losing the rider against the treeline. Lift the ambient
+    // and the fill inside those zones so the character stays readable —
+    // this is a legibility floor, not a look.
+    const dense = clamp01((zone.treeDensity - 0.6) / 1.0);
+    this.hemi.intensity = damp(this.hemi.intensity, 1.15 + dense * 0.55, 1.5, dt);
+    this.sun.intensity = damp(this.sun.intensity, 2.6 - dense * 0.35, 1.5, dt);
+    // Fog picks up the warm afternoon haze rather than a neutral grey, so
+    // distance reads as atmosphere instead of a wash.
+    _c1.setHex(zone.far).lerp(_c2.setHex(0xdcd2c0), 0.66);
     this.fog.color.lerp(_c1, 1 - Math.exp(-1.2 * dt));
-    this.sun.position.copy(this.camera.position).add(_v1.set(-260, 420, 120));
+    // Hold the golden-hour angle relative to the camera. The offset ratio
+    // matches the light's authored elevation (~23 degrees), so shadows stay
+    // long and raking for the whole descent instead of standing up as the
+    // player drops thousands of metres.
+    this.sun.position.copy(this.camera.position).add(_v1.set(-360, 250, 165));
     this.sun.target.position.copy(this.camera.position);
 
     // spectators
     this.track.updateSpectators(p.s, this.time, dt, this.perfGov.crowdScale);
     this.track.updateSceneryLod(p.s, this.perfGov.lodScale);
+    this.track.animateWater(this.time);
 
     // crowd reaction near player
     this.hud.offTrack = Math.abs(p.x) > this.track.halfWidth(p.s) + 0.5;

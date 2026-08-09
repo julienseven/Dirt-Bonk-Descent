@@ -57,42 +57,42 @@ export interface CrashProfile {
 export const CRASH_PROFILES: Record<CrashCause, CrashProfile> = {
   [CrashCause.BAD_LANDING]: {
     calls: ['CASED IT!', 'HEAVY LANDING!', 'FOLDED IT!'],
-    duration: 1.5, pop: 4.0, tumble: 6.5, roll: 1.2, spin: 2.0,
+    duration: 1.05, pop: 4.0, tumble: 6.5, roll: 1.2, spin: 2.0,
     slide: 0.7, bikeEject: false, shake: 1.15, hitStop: 0.09,
     debris: 26, slowmo: 0, colour: '#ff9500',
   },
   [CrashCause.HIGH_SPEED]: {
     // the big one: everything separates and keeps going
     calls: ['YARD SALE!', 'CARTWHEEL!', 'FULL SEND, FULL STOP'],
-    duration: 2.0, pop: 7.5, tumble: 11.0, roll: 5.5, spin: 7.0,
+    duration: 1.45, pop: 7.5, tumble: 11.0, roll: 5.5, spin: 7.0,
     slide: 2.6, bikeEject: true, shake: 1.7, hitStop: 0.14,
     debris: 44, slowmo: 0.55, colour: '#ff2e88',
   },
   [CrashCause.FAILED_TRICK]: {
     // came down mid-rotation: keeps rotating into the dirt
     calls: ['DIDN\'T STICK IT!', 'OVER-COOKED!', 'ROTATION FAIL'],
-    duration: 1.7, pop: 5.5, tumble: 9.0, roll: 3.5, spin: 9.5,
+    duration: 1.2, pop: 5.5, tumble: 9.0, roll: 3.5, spin: 9.5,
     slide: 1.2, bikeEject: true, shake: 1.25, hitStop: 0.10,
     debris: 32, slowmo: 0.35, colour: '#7ef7ff',
   },
   [CrashCause.OFF_TRACK]: {
     // long quiet fall — the joke is the silence
     calls: ['GONE!', 'SEE YOU DOWN THERE', 'WRONG WAY!'],
-    duration: 1.9, pop: 1.0, tumble: 3.0, roll: 2.0, spin: 3.5,
+    duration: 1.3, pop: 1.0, tumble: 3.0, roll: 2.0, spin: 3.5,
     slide: 0.4, bikeEject: false, shake: 0.5, hitStop: 0.0,
     debris: 10, slowmo: 0, colour: '#9fd0ff',
   },
   [CrashCause.OBSTACLE]: {
     // dead stop: pitched straight over the front
     calls: ['OVER THE BARS!', 'FULL STOP!', 'ATE IT!'],
-    duration: 1.6, pop: 6.0, tumble: 13.0, roll: 0.6, spin: 1.2,
+    duration: 1.15, pop: 6.0, tumble: 13.0, roll: 0.6, spin: 1.2,
     slide: 0.5, bikeEject: true, shake: 1.5, hitStop: 0.13,
     debris: 34, slowmo: 0.4, colour: '#ff4d4d',
   },
   [CrashCause.ATTACKED]: {
     // knocked sideways: barrel roll away from the hit
     calls: ['BONKED OFF!', 'TAKEN OUT!', 'MUGGED!'],
-    duration: 1.55, pop: 4.5, tumble: 2.0, roll: 10.5, spin: 4.0,
+    duration: 1.1, pop: 4.5, tumble: 2.0, roll: 10.5, spin: 4.0,
     slide: 1.6, bikeEject: false, shake: 1.3, hitStop: 0.11,
     debris: 28, slowmo: 0.3, colour: '#ffd400',
   },

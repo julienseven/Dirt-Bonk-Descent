@@ -130,6 +130,39 @@
     transform-origin: bottom right;
   }
   .hud-descent { display: none; }
+  /* debug panel would sit under the left thumb */
+  .hud-debug { display: none; }
+  /* pull centre prompts above the pad cluster */
+  .hud-recover { top: 44% !important; }
+  .hud-hazard { top: 50% !important; }
+  .hud-crashwhy { top: 38% !important; }
+}
+
+/* Short landscape phones: the HUD corners crowd fast, so shrink the
+   readouts rather than letting them overlap the play area. */
+@media (pointer: coarse) and (max-height: 460px) {
+  .hud-speedo { transform: scale(.52); bottom: 120px !important; }
+  .hud-boost { transform: scale(.56); bottom: 130px !important; }
+  .hud-topleft { transform: scale(.8); transform-origin: top left; }
+  .hud-topright { transform: scale(.8); transform-origin: top right; }
+}
+
+/* Very narrow portrait: warn rather than render an unplayable layout. */
+.rotate-hint { display: none; }
+@media (pointer: coarse) and (orientation: portrait) {
+  .rotate-hint {
+    display: flex;
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 14px;
+    background: #06070a;
+    text-align: center;
+    padding: 24px;
+  }
 }
 
 ::-webkit-scrollbar { width: 8px; }
