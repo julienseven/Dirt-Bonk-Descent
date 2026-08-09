@@ -2,7 +2,10 @@
 
 @layer base {
   html, body, #root {
-    height: 100%; margin: 0; background: #06070a; overflow: hidden;
+    height: 100%;
+    /* dvh tracks the collapsing mobile URL bar; % and vh do not */
+    height: 100dvh;
+    margin: 0; background: #06070a; overflow: hidden;
     overscroll-behavior: none;
     touch-action: none;
     -webkit-tap-highlight-color: transparent;
@@ -87,19 +90,43 @@
   animation: scanline 4s linear infinite;
 }
 
+/* Full-screen menus must scroll on short/landscape phones, and must opt back
+   into vertical panning since the page globally sets touch-action: none. */
+.screen-scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Landscape phones are wide but very short — reclaim vertical space. */
+@media (max-height: 560px) {
+  .screen-pad { padding-top: 14px; padding-bottom: 14px; align-items: flex-start; }
+  .compact-hide { display: none; }
+  .compact-title { font-size: clamp(30px, 6.5vw, 52px) !important; }
+  .compact-tight { margin-top: 10px !important; }
+  .compact-gap { gap: 12px !important; }
+}
+
+@media (pointer: coarse) {
+  /* keyboard legend is noise on a touch device */
+  .keys-only { display: none; }
+}
+
 /* On touch devices the thumb pads own the bottom corners, so lift and
    shrink the gauges out from under them. */
 @media (pointer: coarse) {
+  /* steering strip owns the lower-left, action cluster the lower-right */
   .hud-speedo {
-    bottom: 118px !important;
-    left: 4px !important;
-    transform: scale(.72);
+    bottom: 136px !important;
+    left: 2px !important;
+    transform: scale(.66);
     transform-origin: bottom left;
   }
   .hud-boost {
-    bottom: 130px !important;
-    right: 4px !important;
-    transform: scale(.78);
+    bottom: 148px !important;
+    right: 2px !important;
+    transform: scale(.7);
     transform-origin: bottom right;
   }
   .hud-descent { display: none; }

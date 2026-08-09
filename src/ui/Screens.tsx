@@ -45,25 +45,26 @@ export function Menu({
   const pbScore = save.bestScore[save.difficulty] ?? 0;
 
   return (
-    <div className="absolute inset-0 z-20 flex items-center justify-center" style={{ background: 'radial-gradient(ellipse at 50% 40%, rgba(6,8,12,.35) 0%, rgba(4,5,8,.92) 75%)' }}>
+    <div className="screen-pad absolute inset-0 z-20 flex items-center justify-center" style={{ background: 'radial-gradient(ellipse at 50% 40%, rgba(6,8,12,.35) 0%, rgba(4,5,8,.92) 75%)' }}>
       <div className="scan pointer-events-none absolute inset-0 opacity-60" />
-      <div className="relative mx-6 w-full max-w-5xl">
+      <div className="screen-scroll relative max-h-full w-full px-6 py-4">
+       <div className="mx-auto w-full max-w-5xl">
         <div className="slide-up">
-          <div className="title-skew inline-block bg-[#ffd400] px-5 py-1">
+          <div className="title-skew compact-hide inline-block bg-[#ffd400] px-5 py-1">
             <span className="hud-label !text-[12px] !tracking-[.5em] !text-black">ARCADE DOWNHILL MAYHEM</span>
           </div>
-          <h1 className="wobble hud-big mt-2 text-[clamp(46px,10vw,132px)] leading-[0.82] text-white"
+          <h1 className="wobble hud-big compact-title mt-2 text-[clamp(46px,10vw,132px)] leading-[0.82] text-white"
             style={{ textShadow: '0 8px 0 #ff2e88, 0 16px 0 #00000088, 0 0 70px #ff2e8855' }}>
             DIRT<span className="text-[#ffd400]"> BONK </span>DESCENT
           </h1>
-          <p className="mt-3 max-w-xl text-[15px] leading-snug text-white/70">
+          <p className="compact-hide mt-3 max-w-xl text-[15px] leading-snug text-white/70">
             4.6 kilometres straight down a mountain. Six racers, no rules, and a fist for anything
             that gets close. Bonk rivals, plow the crowd, stomp flips, chain it all into boost — and get
             to the bottom first.
           </p>
         </div>
 
-        <div className="mt-7 grid gap-6 md:grid-cols-[auto_1fr] md:items-end">
+        <div className="compact-tight compact-gap mt-7 grid gap-6 md:grid-cols-[auto_1fr] md:items-end">
           <div className="slide-up" style={{ animationDelay: '.08s' }}>
             <button
               onClick={() => { audio.resume(); audio.uiClick(); onStart(); }}
@@ -139,7 +140,7 @@ export function Menu({
             )}
           </div>
 
-          <div className="slide-up grid grid-cols-2 gap-x-6 gap-y-[6px] rounded-sm border-l-4 border-[#2fe6c8] bg-black/55 p-4 backdrop-blur"
+          <div className="slide-up keys-only grid grid-cols-2 gap-x-6 gap-y-[6px] rounded-sm border-l-4 border-[#2fe6c8] bg-black/55 p-4 backdrop-blur"
             style={{ animationDelay: '.16s' }}>
             {CONTROLS.map(([label, keys]) => (
               <div key={label} className="flex items-center justify-between gap-3">
@@ -150,13 +151,14 @@ export function Menu({
           </div>
         </div>
 
-        <div className="slide-up mt-6 flex flex-wrap gap-x-6 gap-y-1 text-[11px] font-bold uppercase tracking-[.18em] text-white/40" style={{ animationDelay: '.24s' }}>
+        <div className="slide-up compact-hide mt-6 flex flex-wrap gap-x-6 gap-y-1 text-[11px] font-bold uppercase tracking-[.18em] text-white/40" style={{ animationDelay: '.24s' }}>
           <span><span className="text-[#ffd400]">Tip</span> — release the trick key to level out before you land</span>
           <span><span className="text-[#ffd400]">Tip</span> — clip a rock's shoulder and you'll deflect; hit it square and you're down</span>
           <span><span className="text-[#ffd400]">Tip</span> — bonks, tricks and close shaves chain into one multiplier</span>
           <span><span className="text-[#ffd400]">Tip</span> — land on downslopes to keep speed; tuck the straights</span>
           <span><span className="text-[#ffd400]">Tip</span> — go down? mash to get up fast and you'll keep your momentum</span>
         </div>
+       </div>
       </div>
     </div>
   );
@@ -206,9 +208,10 @@ export function Results({
   }
   const photo = isFinite(d.gap) && d.gap < 0.75;
   return (
-    <div className="absolute inset-0 z-20 flex items-center justify-center" style={{ background: 'radial-gradient(ellipse at 50% 40%, rgba(6,8,12,.4) 0%, rgba(4,5,8,.93) 70%)' }}>
+    <div className="screen-pad absolute inset-0 z-20 flex items-center justify-center" style={{ background: 'radial-gradient(ellipse at 50% 40%, rgba(6,8,12,.4) 0%, rgba(4,5,8,.93) 70%)' }}>
       <div className="scan pointer-events-none absolute inset-0 opacity-50" />
-      <div className="relative mx-6 w-full max-w-4xl">
+      <div className="screen-scroll relative max-h-full w-full px-6 py-4">
+       <div className="mx-auto w-full max-w-4xl">
         <div className="slide-up">
           <div className="title-skew inline-block px-5 py-1" style={{ background: win ? '#ffd400' : '#ff2e88' }}>
             <span className="hud-label !text-[12px] !tracking-[.4em] !text-black">
@@ -254,9 +257,10 @@ export function Results({
                 <div className="mb-3 max-h-[132px] overflow-y-auto pr-1">
                   {ZONES.map((z, i) => {
                     const t = d.splits[i];
-                    if (i === 0 || t === undefined) return null;
+                    // 0 / null / undefined all mean "no split recorded"
+                    if (i === 0 || !t) return null;
                     const prev = prevSplits[i];
-                    const delta = prev !== undefined ? t - prev : null;
+                    const delta = prev ? t - prev : null;
                     return (
                       <div key={z.name} className="flex items-baseline justify-between gap-2 py-[2px]">
                         <span className="hud-label !tracking-[.08em] !text-[9px]">{z.name}</span>
@@ -299,6 +303,7 @@ export function Results({
             <span className="hud-big text-[26px] text-white/80">MENU</span>
           </button>
         </div>
+       </div>
       </div>
     </div>
   );

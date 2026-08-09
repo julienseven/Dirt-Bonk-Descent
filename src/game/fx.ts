@@ -260,6 +260,8 @@ export class ParticlePool {
   private bnc: Float32Array;
   private gy: Float32Array;
   private cursor = 0;
+  /** highest slot index ever used since the pool last fully drained */
+  private hi = -1;
   live = 0;
 
   constructor(count: number, map: THREE.Texture, blending: THREE.Blending, depthWrite = false) {
@@ -302,6 +304,7 @@ export class ParticlePool {
 
   spawn(o: SpawnOpts) {
     const i = this.cursor;
+    if (i > this.hi) this.hi = i;
     this.cursor = (this.cursor + 1) % this.N;
     const i3 = i * 3;
     this.pos[i3] = o.pos.x; this.pos[i3 + 1] = o.pos.y; this.pos[i3 + 2] = o.pos.z;
@@ -322,7 +325,10 @@ export class ParticlePool {
 
   update(dt: number) {
     let live = 0;
-    for (let i = 0; i < this.N; i++) {
+    // Only sweep slots that have actually been used. An idle 2600-slot pool
+    // was costing a full pass every frame to find nothing.
+    const end = this.hi + 1;
+    for (let i = 0; i < end; i++) {
       if (this.life[i] <= 0) { this.col[i * 4 + 3] = 0; continue; }
       live++;
       this.life[i] -= dt;
@@ -353,6 +359,8 @@ export class ParticlePool {
       if (this.life[i] <= 0) this.col[i4 + 3] = 0;
     }
     this.live = live;
+    // fully drained -> collapse the sweep range until something spawns again
+    if (live === 0) { this.hi = -1; this.cursor = 0; }
     (this.geo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     (this.geo.attributes.aColor as THREE.BufferAttribute).needsUpdate = true;
     (this.geo.attributes.aSize as THREE.BufferAttribute).needsUpdate = true;
@@ -361,5 +369,8 @@ export class ParticlePool {
 
   clear() {
     for (let i = 0; i < this.N; i++) { this.life[i] = 0; this.col[i * 4 + 3] = 0; }
+    this.hi = -1;
+    this.cursor = 0;
+    (this.geo.attributes.aColor as THREE.BufferAttribute).needsUpdate = true;
   }
 }

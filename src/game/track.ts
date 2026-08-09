@@ -65,6 +65,8 @@ export interface Obstacle {
 
 export interface Spectator {
   s: number; x: number;
+  /** ground height cached at build time — they don't move unless bonked */
+  baseH: number;
   color: number;
   phase: number;
   state: 0 | 1;             // 0 idle, 1 bonked
@@ -498,6 +500,7 @@ export class Track {
           this.spectators.push({
             s: s + rng.range(-1.6, 1.6),
             x: side * (hw + 1.45 + r * rng.range(1.0, 1.8) + rng.range(0, 0.5)),
+            baseH: 0,
             color: SPECTATOR_COLORS[rng.int(0, SPECTATOR_COLORS.length - 1)],
             phase: rng.range(0, TAU), state: 0, t: 0,
             vx: 0, vy: 0, vs: 0, spin: 0, ox: 0, oy: 0, os: 0, rot: 0,
@@ -508,6 +511,9 @@ export class Track {
       s += gap;
     }
     this.spectators.sort((a, b) => a.s - b.s);
+    // resolve ground height once; heightAt() is the single most expensive
+    // call in the frame and these never move on their own
+    for (const sp of this.spectators) sp.baseH = this.heightAt(sp.s, sp.x);
   }
 
   /** Index of the first obstacle at or beyond `s` (list is sorted by s). */
@@ -884,7 +890,8 @@ export class Track {
     const sp = this.spectators[i];
     const [body, head, legs, arms] = this.specMeshes;
     const s = sp.s + sp.os, x = sp.x + sp.ox;
-    const h = this.heightAt(s, x) + sp.oy;
+    // only a bonked spectator has actually moved, so only they need a resolve
+    const h = (sp.state === 1 ? this.heightAt(s, x) : sp.baseH) + sp.oy;
     this.worldPos(s, x, h, _p);
     this.frameAt(s, _fwd, _right, _up);
     _q.setFromUnitVectors(_yAxis, _up);
@@ -906,6 +913,28 @@ export class Track {
     arms.setMatrixAt(i, _m4);
   }
 
+  /**
+   * Stand everyone back up and re-pose the full list. Needed on restart:
+   * the per-frame path only touches a window, so a spectator bonked last run
+   * would otherwise stay face-down forever.
+   */
+  resetSpectators() {
+    for (const sp of this.spectators) {
+      sp.state = 0; sp.t = 0; sp.rot = 0;
+      sp.ox = sp.oy = sp.os = 0;
+      sp.vx = sp.vy = sp.vs = sp.spin = 0;
+    }
+    if (!this.specMeshes.length) return;
+    for (let i = 0; i < this.spectators.length; i++) this.poseSpectator(i, 0);
+    for (const m of this.specMeshes) {
+      const attr = m.instanceMatrix as THREE.InstancedBufferAttribute & {
+        clearUpdateRanges?: () => void;
+      };
+      attr.clearUpdateRanges?.();
+      attr.needsUpdate = true;
+    }
+  }
+
   /** Animate spectators in a window around the player. */
   updateSpectators(playerS: number, time: number, dt: number) {
     if (!this.specMeshes.length) return;
@@ -914,7 +943,8 @@ export class Track {
     let a = 0, b = list.length - 1;
     while (a < b) { const m = (a + b) >> 1; if (list[m].s < lo) a = m + 1; else b = m; }
 
-    for (let i = a; i < list.length; i++) {
+    let i = a;
+    for (; i < list.length; i++) {
       const sp = list[i];
       if (sp.s > hi) break;
       if (sp.state === 1) {
@@ -930,8 +960,26 @@ export class Track {
       }
       this.poseSpectator(i, time);
     }
-    this.specWindow.a = a; this.specWindow.b = Math.min(list.length, a + 900);
-    this.specMeshes.forEach(m => (m.instanceMatrix.needsUpdate = true));
+    // Upload only the slice we touched. Flagging the whole attribute would
+    // re-send every spectator matrix (~1MB/frame) to move a few hundred.
+    const lastTouched = Math.min(i - 1, list.length - 1);
+    this.specWindow.a = a; this.specWindow.b = lastTouched;
+    const count = Math.max(0, lastTouched - a + 1);
+    for (const m of this.specMeshes) {
+      const attr = m.instanceMatrix as THREE.InstancedBufferAttribute & {
+        addUpdateRange?: (s: number, c: number) => void;
+        clearUpdateRanges?: () => void;
+        updateRange?: { offset: number; count: number };
+      };
+      if (count > 0 && typeof attr.addUpdateRange === 'function') {
+        attr.clearUpdateRanges?.();
+        attr.addUpdateRange(a * 16, count * 16);
+      } else if (count > 0 && attr.updateRange) {
+        attr.updateRange.offset = a * 16;
+        attr.updateRange.count = count * 16;
+      }
+      attr.needsUpdate = true;
+    }
   }
 
   /**

@@ -228,6 +228,12 @@ export class Game {
   private nearMissCd = 0;
   onPhaseChange?: (p: Phase) => void;
   quality: 'high' | 'low' = 'high';
+  mobile = false;
+  /** analog steer from touch, screen space; null = use the keyboard */
+  steerAxis: number | null = null;
+  /** hold throttle automatically (touch default — one less thing to reach) */
+  autoPedal = false;
+  private resizeTimer = 0;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -250,8 +256,16 @@ export class Game {
     const w = this.container.clientWidth || window.innerWidth;
     const h = this.container.clientHeight || window.innerHeight;
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // Phones report DPR 3 and choke on MSAA at that resolution. Coarse
+    // pointer is a good proxy for "mobile GPU" and costs nothing to check.
+    const coarse = typeof window.matchMedia === 'function'
+      && window.matchMedia('(pointer: coarse)').matches;
+    this.mobile = coarse;
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: !coarse,
+      powerPreference: 'high-performance',
+    });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, coarse ? 1.5 : 2));
     this.renderer.setSize(w, h);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -324,8 +338,11 @@ export class Game {
     this.resetRace();
 
     window.addEventListener('resize', this.onResize);
+    window.addEventListener('orientationchange', this.onResize);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
+    window.addEventListener('blur', this.onBlur);
+    document.addEventListener('visibilitychange', this.onVisibility);
   }
 
   private buildRidges(): THREE.Mesh {
@@ -414,7 +431,7 @@ export class Game {
       r.aiOffset = this.rng.range(-0.3, 0.3);
     });
     this.track.obstacles.forEach(o => { o.hit = 0; o.ox = o.oy = o.os = 0; o.vx = o.vy = o.vs = 0; });
-    this.track.spectators.forEach(s => { s.state = 0; s.ox = s.oy = s.os = 0; s.rot = 0; });
+    this.track.resetSpectators();
     this.track.refreshProps();
     this.raceTime = 0; this.boost = 0; this.style = 0; this.combo = 0; this.comboTime = 0;
     this.score = 0; this.bonks = 0; this.tricksLanded = 0; this.topSpeed = 0;
@@ -429,7 +446,9 @@ export class Game {
     this.hud.photoFinish = false;
     this.hud.splitShow = 0;
     this.hud.splitDelta = 0;
-    this.splits = [];
+    // dense, not sparse: JSON.stringify turns array holes into `null`, which
+    // then slips past `!== undefined` guards and yields garbage deltas
+    this.splits = new Array(ZONES.length).fill(0);
     this.ghostSamples = [];
     this.ghostAccum = 0;
     this.hud.ghostGap = 0;
@@ -472,8 +491,11 @@ export class Game {
     this.running = false;
     cancelAnimationFrame(this.raf);
     window.removeEventListener('resize', this.onResize);
+    window.removeEventListener('orientationchange', this.onResize);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
+    window.removeEventListener('blur', this.onBlur);
+    document.removeEventListener('visibilitychange', this.onVisibility);
     if (this.ghostRig) {
       this.scene.remove(this.ghostRig.root, this.ghostRig.shadow);
       this.ghostRig = null;
@@ -487,11 +509,19 @@ export class Game {
   }
 
   private onResize = () => {
-    const w = this.container.clientWidth || window.innerWidth;
-    const h = this.container.clientHeight || window.innerHeight;
-    this.renderer.setSize(w, h);
-    this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
+    const apply = () => {
+      const w = this.container.clientWidth || window.innerWidth;
+      const h = this.container.clientHeight || window.innerHeight;
+      if (w < 2 || h < 2) return;
+      this.renderer.setSize(w, h);
+      this.camera.aspect = w / h;
+      this.camera.updateProjectionMatrix();
+    };
+    apply();
+    // iOS reports the old viewport during orientationchange; re-read once
+    // the rotation has settled.
+    clearTimeout(this.resizeTimer);
+    this.resizeTimer = window.setTimeout(apply, 250);
   };
 
   private onKeyDown = (e: KeyboardEvent) => {
@@ -502,6 +532,25 @@ export class Game {
     if (k === 'Escape') this.togglePause();
   };
   private onKeyUp = (e: KeyboardEvent) => { this.keys[e.code] = false; };
+
+  /** Losing focus with a key held would otherwise leave it stuck down. */
+  private onBlur = () => { this.keys = {}; this.pressed = {}; };
+
+  /** Backgrounded tabs shouldn't keep racing (and rAF stalls anyway). */
+  private onVisibility = () => {
+    if (document.hidden) {
+      this.keys = {}; this.pressed = {};
+      if (this.hud.phase === 'race') this.setPhase('paused');
+    }
+  };
+
+  /**
+   * Analog steer from a slide strip, in SCREEN space (-1 left .. +1 right).
+   * Pass null to hand control back to the keyboard.
+   */
+  setSteerAxis(v: number | null) {
+    this.steerAxis = v === null ? null : clamp(v, -1, 1);
+  }
 
   /** Touch/on-screen controls feed the same input path as the keyboard. */
   setVirtualKey(code: string, down: boolean) {
@@ -623,10 +672,14 @@ export class Game {
     if (canControl) {
       // NOTE: track-space +x points to SCREEN-LEFT (screen-right = forward x up = -x).
       // All physics below is derived in track-space, so map the keys once, here.
-      if (this.key('KeyA', 'ArrowLeft')) steer += 1;   // A = screen left
-      if (this.key('KeyD', 'ArrowRight')) steer -= 1;  // D = screen right
-      pedal = this.key('KeyW', 'ArrowUp') && p.grounded;
+      if (this.steerAxis !== null) {
+        steer = -this.steerAxis;                       // screen -> track space
+      } else {
+        if (this.key('KeyA', 'ArrowLeft')) steer += 1;   // A = screen left
+        if (this.key('KeyD', 'ArrowRight')) steer -= 1;  // D = screen right
+      }
       brake = this.key('KeyS', 'ArrowDown') && p.grounded;
+      pedal = (this.key('KeyW', 'ArrowUp') || (this.autoPedal && !brake)) && p.grounded;
       tuck = this.key('ShiftLeft', 'ShiftRight') && !brake;
     }
     // boost (ground / just-left-the-lip only)
@@ -1977,6 +2030,12 @@ export class Game {
 
   private recordGhost(dt: number) {
     const p = this.player;
+    // frames[0] must be the state at t=0, or playback (which indexes from 0)
+    // reads every sample one tick early and the ghost runs constantly fast
+    if (this.ghostSamples.length === 0) {
+      this.ghostSamples.push({ s: p.s, x: p.x, y: p.y, lean: p.lean });
+      return;
+    }
     this.ghostAccum += dt;
     if (this.ghostAccum < GHOST_DT) return;
     this.ghostAccum -= GHOST_DT;

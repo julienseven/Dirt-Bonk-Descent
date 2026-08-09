@@ -215,20 +215,25 @@ export default function Hud({ game }: { game: Game }) {
       <div ref={flash} className="absolute inset-0 opacity-0 mix-blend-screen" style={{ transition: 'opacity .12s' }} />
       <div ref={lines} className="speedlines absolute inset-0 opacity-0" />
 
-      {/* top-left: place + time */}
-      <div className="absolute left-5 top-4 flex items-end gap-4">
+      {/* top-left: place + clock. "vs your best" readouts stack under the
+          clock they refer to, rather than sprawling across the top edge. */}
+      <div className="absolute left-5 top-4 flex items-start gap-3">
         <div className="hud-panel px-4 py-2">
           <div className="hud-label">POS</div>
           <div ref={placeNum} className="hud-big text-[46px] leading-[0.86] text-white">1st</div>
         </div>
-        <div className="hud-panel px-4 py-2">
-          <div className="hud-label">TIME</div>
-          <div ref={timeTxt} className="hud-mono text-[26px] leading-none text-[#7ef7ff]">0:00.00</div>
+        <div>
+          <div className="hud-panel px-4 py-2">
+            <div className="hud-label">TIME</div>
+            <div ref={timeTxt} className="hud-mono text-[26px] leading-none text-[#7ef7ff]">0:00.00</div>
+          </div>
+          <div className="mt-[6px] ml-1 flex items-baseline gap-3">
+            <div ref={splitTxt} className="hud-big text-[21px] leading-none opacity-0"
+              style={{ transition: 'opacity .2s' }} />
+            <div ref={ghostTxt} className="hud-big text-[15px] leading-none text-[#7ef7ff] opacity-0"
+              style={{ transition: 'opacity .25s', textShadow: '0 2px 0 #000' }} />
+          </div>
         </div>
-        <div ref={splitTxt} className="hud-big pb-1 text-[26px] leading-none opacity-0"
-          style={{ transition: 'opacity .2s' }} />
-        <div ref={ghostTxt} className="hud-big pb-1 text-[17px] leading-none text-[#7ef7ff] opacity-0"
-          style={{ transition: 'opacity .25s', textShadow: '0 2px 0 #000' }} />
       </div>
 
       {/* top-right: score + combo */}
