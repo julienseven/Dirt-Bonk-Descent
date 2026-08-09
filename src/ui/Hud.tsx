@@ -4,6 +4,16 @@ import { formatTime } from '../game/core';
 
 const PLACE = ['', '1st', '2nd', '3rd', '4th', '5th', '6th'];
 
+/** plain-language explanation shown while you're on the floor */
+const CRASH_WHY: Record<string, string> = {
+  BAD_LANDING: 'LAND ON A DOWNSLOPE, NOT FLAT',
+  HIGH_SPEED: 'TOO MUCH SPEED INTO THAT',
+  FAILED_TRICK: 'RELEASE THE TRICK KEY TO LEVEL OUT',
+  OFF_TRACK: 'STAY ON THE MOUNTAIN',
+  OBSTACLE: 'STEER AROUND THE SOLID STUFF',
+  ATTACKED: 'THEY GOT YOU — GET THEM BACK',
+};
+
 /** colour per bonk type, matching the resolver's palette */
 const BONK_TINT: Record<string, string> = {
   'SIDE BONK': '#ffd400', 'FRONT BONK': '#ff9500', 'REAR BONK': '#7ef7ff',
@@ -64,6 +74,7 @@ export default function Hud({ game }: { game: Game }) {
   const splitTxt = useRef<HTMLDivElement>(null);
   const ghostTxt = useRef<HTMLDivElement>(null);
   const stretchBar = useRef<HTMLDivElement>(null);
+  const crashWhy = useRef<HTMLDivElement>(null);
   const recWrap = useRef<HTMLDivElement>(null);
   const recBar = useRef<HTMLDivElement>(null);
   const recKey = useRef<HTMLDivElement>(null);
@@ -269,9 +280,14 @@ export default function Hud({ game }: { game: Game }) {
         stretchBar.current.style.background = h.photoFinish ? '#ff2e88' : '#ffd400';
       }
 
-      // crash recovery: mash prompt
+      // crash recovery: mash prompt + why you're down
       const crashing = h.crashed > 0;
       if (recWrap.current) recWrap.current.style.opacity = crashing ? '1' : '0';
+      if (crashWhy.current) {
+        crashWhy.current.style.opacity = crashing && h.crashCause ? '1' : '0';
+        const txt = CRASH_WHY[h.crashCause] ?? '';
+        if (crashWhy.current.textContent !== txt) crashWhy.current.textContent = txt;
+      }
       if (recBar.current) recBar.current.style.width = `${h.recover * 100}%`;
       if (recKey.current) {
         const k = 1 + h.recoverPulse * 0.3;
@@ -462,6 +478,10 @@ export default function Hud({ game }: { game: Game }) {
       {/* final stretch marker on the descent bar */}
       <div ref={stretchBar} className="hud-descent absolute right-6 top-1/2 h-[46vh] w-[10px] -translate-y-1/2 opacity-0"
         style={{ transition: 'opacity .3s', clipPath: 'inset(90% 0 0 0)', borderRadius: 9999 }} />
+
+      {/* why you're on the floor */}
+      <div ref={crashWhy} className="hud-label absolute left-1/2 top-[50%] -translate-x-1/2 whitespace-nowrap !text-[11px] !tracking-[.22em] text-[#ffd400] opacity-0"
+        style={{ transition: 'opacity .2s', textShadow: '0 2px 4px #000' }} />
 
       {/* crash recovery prompt */}
       <div ref={recWrap} className="absolute left-1/2 top-[58%] w-[300px] -translate-x-1/2 text-center opacity-0"

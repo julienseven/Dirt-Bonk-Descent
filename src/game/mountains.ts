@@ -27,13 +27,16 @@ export interface MountainDef {
   /** rough m/s the model predicts, used for the estimate label */
   estSpeed: number;
   tint: string;
+  /** hand-built section list rather than the procedural default */
+  authored?: boolean;
 }
 
 export const MOUNTAINS: MountainDef[] = [
   {
-    id: 'shalebeck', name: 'SHALEBECK RUN', sub: 'THE PROVING HILL',
-    blurb: 'Wide, fast and forgiving. Where everyone learns to let go of the brakes.',
-    seed: 20260114, length: 4600, rating: 2, reqLevel: 0, estSpeed: 30, tint: '#2fe6c8',
+    id: 'shaleback', name: 'SHALEBACK RUN', sub: 'TEN SECTIONS, ONE BREATH',
+    blurb: 'The showpiece. Ten hand-built sections: the drop, the pines, the bridge, the big one, the canyon.',
+    seed: 20260114, length: 4600, rating: 3, reqLevel: 0, estSpeed: 30, tint: '#ffd400',
+    authored: true,
   },
   {
     id: 'cinder', name: 'CINDER CHUTE', sub: 'SHORT & VICIOUS',
@@ -59,6 +62,8 @@ export const MOUNTAINS: MountainDef[] = [
 
 export const getMountain = (id: string) =>
   MOUNTAINS.find(m => m.id === id) ?? MOUNTAINS[0];
+
+export const DEFAULT_MOUNTAIN = 'shaleback';
 
 /** Predicted race time in seconds, for the select screen. */
 export const estimateTime = (m: MountainDef) => (m.length - 20) / m.estSpeed;

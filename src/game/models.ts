@@ -479,6 +479,94 @@ export function postGeo(): THREE.BufferGeometry {
   g.translate(0, 0.67, 0);
   return g;
 }
+/** Three-rail timber fence section, ~2.9m long. */
+export function fenceGeo(): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = [];
+  for (let i = 0; i < 2; i++) {
+    const p = new THREE.BoxGeometry(0.13, 1.15, 0.13);
+    p.translate(i * 2.6 - 1.3, 0.58, 0);
+    parts.push(p);
+  }
+  for (let r = 0; r < 3; r++) {
+    const rail = new THREE.BoxGeometry(2.75, 0.16, 0.07);
+    rail.translate(0, 0.35 + r * 0.34, 0);
+    parts.push(rail);
+  }
+  return mergeGeos(parts);
+}
+
+/** Course sign on a post. */
+export function signGeo(): THREE.BufferGeometry {
+  const post = new THREE.BoxGeometry(0.1, 1.5, 0.1);
+  post.translate(0, 0.75, 0);
+  const board = new THREE.BoxGeometry(1.25, 0.72, 0.07);
+  board.translate(0, 1.68, 0);
+  return mergeGeos([post, board]);
+}
+
+/** Plastic road barrier with feet. */
+export function barrierGeo(): THREE.BufferGeometry {
+  const body = new THREE.BoxGeometry(2.2, 0.82, 0.32);
+  body.translate(0, 0.5, 0);
+  const footL = new THREE.BoxGeometry(0.3, 0.16, 0.78);
+  footL.translate(-0.85, 0.08, 0);
+  const footR = footL.clone(); footR.translate(1.7, 0, 0);
+  return mergeGeos([body, footL, footR]);
+}
+
+/** Wooden kicker ramp you can ride up. */
+export function rampGeo(): THREE.BufferGeometry {
+  const g = new THREE.BufferGeometry();
+  const W = 2.2, L = 4.4, H = 1.15;
+  // wedge: flat at the back, rising to a lip at the front (+Z)
+  const v = new Float32Array([
+    -W, 0, -L / 2, W, 0, -L / 2, W, H, L / 2, -W, H, L / 2,   // deck
+    -W, 0, -L / 2, -W, H, L / 2, -W, 0, L / 2,                // left side
+    W, 0, -L / 2, W, 0, L / 2, W, H, L / 2,                   // right side
+    -W, 0, L / 2, W, H, L / 2, W, 0, L / 2,                   // front face
+    -W, 0, L / 2, -W, H, L / 2, W, H, L / 2,
+  ]);
+  g.setAttribute('position', new THREE.BufferAttribute(v, 3));
+  g.setIndex([0, 1, 2, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+  g.computeVertexNormals();
+  return g;
+}
+
+/** Low snow drift mound. */
+export function driftGeo(): THREE.BufferGeometry {
+  const g = new THREE.SphereGeometry(1, 12, 6, 0, Math.PI * 2, 0, Math.PI / 2);
+  g.scale(2.6, 0.5, 1.7);
+  return g;
+}
+
+/** Merge a set of geometries that share no attributes beyond position/normal. */
+function mergeGeos(list: THREE.BufferGeometry[]): THREE.BufferGeometry {
+  let vCount = 0, iCount = 0;
+  for (const g of list) {
+    vCount += g.attributes.position.count;
+    iCount += g.index ? g.index.count : 0;
+  }
+  const pos = new Float32Array(vCount * 3);
+  const nor = new Float32Array(vCount * 3);
+  const idx: number[] = [];
+  let vo = 0;
+  for (const g of list) {
+    const p = g.attributes.position.array as ArrayLike<number>;
+    const n = g.attributes.normal.array as ArrayLike<number>;
+    pos.set(p as never, vo * 3);
+    nor.set(n as never, vo * 3);
+    const gi = g.index!.array as ArrayLike<number>;
+    for (let i = 0; i < gi.length; i++) idx.push(gi[i] + vo);
+    vo += g.attributes.position.count;
+    g.dispose();
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  out.setIndex(idx);
+  return out;
+}
+
 export function flagGeo(): THREE.BufferGeometry {
   const g = new THREE.PlaneGeometry(0.9, 0.6, 4, 1);
   g.translate(0.45, 0, 0);

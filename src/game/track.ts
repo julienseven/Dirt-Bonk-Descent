@@ -9,7 +9,9 @@ import {
 import {
   pineFoliageGeo, pineTrunkGeo, broadleafGeo, rockGeo, bushGeo,
   spectatorParts, SPECTATOR_COLORS, baleGeo, coneGeo, logGeo, barrelGeo, postGeo,
+  fenceGeo, signGeo, barrierGeo, rampGeo, driftGeo,
 } from './models';
+import { PROPS, THEME_PROPS, type PropKind } from './env';
 
 export const TRACK_LENGTH = 4600;
 const STEP = 3;
@@ -32,6 +34,21 @@ export interface Zone {
   fog: number;
   features: string[];
   props: string[];
+  // ---- authored overrides (used by hand-built mountains) ----
+  /** ground falls away past the tape: -1 left, 1 right, 0 both */
+  dropSide?: -1 | 0 | 1;
+  /** how hard it falls (metres per metre, roughly) */
+  dropDepth?: number;
+  /** no boundary tape at all (bridges, cliff edges) */
+  noTape?: boolean;
+  /** timber guard rails instead of tape */
+  rails?: boolean;
+  /** force a shortcut to spawn inside this section */
+  secret?: boolean;
+  /** curvature multiplier for this stretch */
+  twist?: number;
+  /** rivals bunch up here — combat arena */
+  combat?: boolean;
 }
 
 export const ZONES: Zone[] = [
@@ -55,9 +72,13 @@ interface Feature {
 
 export interface Obstacle {
   s: number; x: number; r: number;
-  type: 'bale' | 'cone' | 'barrel' | 'log' | 'rock' | 'puddle';
+  type: PropKind;
   mass: number;
   hit: number;              // 0 = intact
+  /** destroyed props are hidden rather than animated */
+  gone?: boolean;
+  /** boulders roll: live lateral drift down the hill */
+  roll?: number;
   vx: number; vy: number; vs: number; spin: number;
   ox: number; oy: number; os: number; rot: number;
   idx: number;
@@ -140,10 +161,22 @@ export class Track {
   private specWindow = { a: 0, b: 0 };
   rng = new RNG(20260114);
 
-  constructor(seed = 20260114, length = TRACK_LENGTH) {
+  /** section list for THIS mountain (authored or the generic default) */
+  zones: Zone[] = ZONES;
+  /** guaranteed set-pieces, as fractions of length */
+  private scripted: { kind: string; at: number; len: number; h: number; depth: number }[] = [];
+
+  constructor(
+    seed = 20260114,
+    length = TRACK_LENGTH,
+    zones?: Zone[],
+    scripted?: { kind: string; at: number; len: number; h: number; depth: number }[],
+  ) {
     this.rng = new RNG(seed);
     this.length = length;
     this.count = Math.floor(length / STEP) + 2;
+    if (zones && zones.length) this.zones = zones;
+    if (scripted) this.scripted = scripted;
     this.buildNodes();
     this.buildFeatures();
     this.buildShortcuts();
@@ -170,7 +203,7 @@ export class Track {
       const s = i * STEP;
       const t = s / this.length;
       const zi = this.zoneIndexAt(t);
-      const Z = ZONES[zi];
+      const Z = this.zones[zi];
       this.zoneIdx[i] = zi;
 
       // --- curvature: layered sweepers + tighter corners, calmed at the start
@@ -178,9 +211,10 @@ export class Track {
       let c = 0.0062 * fbm1(s * 0.00155 + 11.3, 2)
         + 0.0055 * fbm1(s * 0.0049 + 71.9, 2)
         + 0.0030 * fbm1(s * 0.0125 + 5.5, 1);
-      // tighten inside the twisty zones
-      if (zi === 1 || zi === 4 || zi === 6) c *= 1.35;
-      if (zi === 0 || zi === 7) c *= 0.5;
+      // authored sections state their own twist; generic ones use defaults
+      if (Z.twist !== undefined) c *= Z.twist;
+      else if (zi === 1 || zi === 4 || zi === 6) c *= 1.35;
+      else if (zi === 0 || zi === 7) c *= 0.5;
       c *= warm;
       this.curv[i] = c;
 
@@ -232,10 +266,11 @@ export class Track {
   }
 
   zoneIndexAt(t: number): number {
-    for (let i = 0; i < ZONES.length; i++) if (t >= ZONES[i].t0 && t < ZONES[i].t1) return i;
-    return ZONES.length - 1;
+    const Z = this.zones;
+    for (let i = 0; i < Z.length; i++) if (t >= Z[i].t0 && t < Z[i].t1) return i;
+    return Z.length - 1;
   }
-  zoneAt(s: number): Zone { return ZONES[this.zoneIndexAt(s / this.length)]; }
+  zoneAt(s: number): Zone { return this.zones[this.zoneIndexAt(s / this.length)]; }
 
   private addFeature(f: Feature) {
     this.features.push(f);
@@ -251,6 +286,8 @@ export class Track {
     let s = 90;
     while (s < this.length - 140) {
       const Z = this.zoneAt(s);
+      // a bridge deck is flat by definition — no procedural terrain on it
+      if (Z.rails) { s += 20; continue; }
       const hw = this.halfWidth(s);
       const kind = rng.pick(Z.features);
       let advance = rng.range(48, 96);
@@ -308,9 +345,19 @@ export class Track {
     }
     // signature features: guaranteed showpieces
     const L = this.length;
-    this.addFeature({ kind: 'table', s0: L * 0.245, len: 54, h: 4.1, depth: 0, x0: -999, x1: 999, n: 0 });
-    this.addFeature({ kind: 'gap', s0: L * 0.665, len: 72, h: 4.6, depth: 6.0, x0: -999, x1: 999, n: 0 });
-    this.addFeature({ kind: 'kicker', s0: L * 0.935, len: 18, h: 3.4, depth: 0, x0: -999, x1: 999, n: 0 });
+    if (this.scripted.length) {
+      // authored mountain: place exactly what the designer asked for
+      for (const sp of this.scripted) {
+        this.addFeature({
+          kind: sp.kind, s0: sp.at * L, len: sp.len, h: sp.h, depth: sp.depth,
+          x0: -999, x1: 999, n: sp.kind === 'whoops' ? 6 : 0,
+        });
+      }
+    } else {
+      this.addFeature({ kind: 'table', s0: L * 0.245, len: 54, h: 4.1, depth: 0, x0: -999, x1: 999, n: 0 });
+      this.addFeature({ kind: 'gap', s0: L * 0.665, len: 72, h: 4.6, depth: 6.0, x0: -999, x1: 999, n: 0 });
+      this.addFeature({ kind: 'kicker', s0: L * 0.935, len: 18, h: 3.4, depth: 0, x0: -999, x1: 999, n: 0 });
+    }
 
     for (let g = 320; g < L - 200; g += 520) this.gantries.push({ s: g });
   }
@@ -327,7 +374,27 @@ export class Track {
       'DEAD DROP', 'MINERS TRACK', 'THE SHAVE',
     ];
     let n = 0;
+
+    // ---- authored SECRET SEND: a guaranteed, generous hidden line
+    for (const Z of this.zones) {
+      if (!Z.secret) continue;
+      const s0 = Z.t0 * this.length + 40;
+      const span = (Z.t1 - Z.t0) * this.length * 0.55;
+      const avg = this.curvatureAt(s0 + span * 0.5);
+      this.shortcuts.push({
+        s0, s1: s0 + span,
+        side: avg > 0 ? -1 : 1,
+        width: 9,
+        saving: 46,          // by far the biggest on the mountain
+        name: 'SECRET SEND',
+      });
+      n++;
+    }
+
     for (let s = 260; s < this.length - 360; s += 40) {
+      // never cut a shortcut across a bridge or a cliff edge
+      const Zs = this.zoneAt(s);
+      if (Zs.rails || Zs.dropDepth || Zs.secret) { s += 60; continue; }
       // sustained curvature over the candidate span?
       const span = rng.range(90, 150);
       let sum = 0, samples = 0;
@@ -478,7 +545,7 @@ export class Track {
     if (bl) for (let i = 0; i < bl.length; i++) h += this.featureHeight(bl[i], s, x);
 
     const zi = this.zoneIdx[clamp(Math.round(s / STEP), 0, this.count - 1)];
-    const Z = ZONES[zi];
+    const Z = this.zones[zi];
     const hw = this.halfWidth(s);
     const ax = Math.abs(x);
 
@@ -493,6 +560,14 @@ export class Track {
     // off-track hillside: steep at the verge, easing out to rolling terrain
     if (ax > hw) {
       const t = ax - hw;
+      // ---- authored drop-offs (bridge decks, cliff edges)
+      if (Z.dropDepth) {
+        const thisSide = x < 0 ? -1 : 1;
+        if (Z.dropSide === 0 || Z.dropSide === thisSide) {
+          // falls away hard and keeps going: leaving the deck is fatal
+          return h - Z.dropDepth * (t * 2.2 + t * t * 0.55);
+        }
+      }
       const slope = x < 0 ? this.slopeLAt(s) : this.slopeRAt(s);
       let side = slope * 18 * Math.log(1 + t / 18);
       let bump = fbm2(s * 0.05, x * 0.05, 3) * Math.min(4.0, t * 0.42);
@@ -578,20 +653,39 @@ export class Track {
     while (s < this.length - 90) {
       const Z = this.zoneAt(s);
       const hw = this.halfWidth(s);
-      const type = rng.pick(Z.props) as Obstacle['type'];
+      // mix the section's own prop list with the surface theme's, so every
+      // stretch gets fences, signs, water and rockfall appropriate to it
+      const themed = THEME_PROPS[Z.surface] ?? [];
+      const pool: PropKind[] = rng.chance(0.45) && themed.length
+        ? themed
+        : (Z.props as PropKind[]);
+      const type = rng.pick(pool);
       // avoid landing zones of big features
       let blocked = false;
       const bl = this.buckets[Math.floor(s / this.bucketSize)];
       if (bl) for (const f of bl) if (f.kind === 'gap' || f.kind === 'table' || f.kind === 'double') blocked = true;
+      // never put props on a bridge deck
+      if (Z.rails) blocked = true;
       if (!blocked) {
-        const cluster = type === 'cone' ? rng.int(2, 5) : type === 'bale' ? rng.int(1, 3) : 1;
+        const def = PROPS[type];
+        // fences run in lines along the verge; everything else clusters
+        const cluster = type === 'fence' ? rng.int(3, 6)
+          : type === 'cone' ? rng.int(2, 5)
+          : type === 'bale' ? rng.int(1, 3) : 1;
+        // some props belong at the edges, not on the racing line
+        const edgeBias = type === 'fence' || type === 'sign' || type === 'barrier';
+        const side = rng.sign();
         for (let k = 0; k < cluster; k++) {
-          const x = rng.range(-hw * 0.85, hw * 0.85);
-          const r = type === 'log' ? 2.2 : type === 'rock' ? rng.range(0.7, 1.3) : type === 'barrel' ? 0.55 : type === 'bale' ? 0.85 : 0.36;
-          const mass = type === 'rock' ? 999 : type === 'log' ? 999 : type === 'barrel' ? 1.6 : type === 'bale' ? 2.4 : 0.5;
+          const x = edgeBias
+            ? side * rng.range(hw * 0.62, hw * 0.94)
+            : rng.range(-hw * 0.85, hw * 0.85);
+          const r = type === 'rock' ? rng.range(0.7, 1.3) : def.radius;
           this.obstacles.push({
-            s: s + k * rng.range(2.5, 6), x, r, type, mass, hit: 0,
-            vx: 0, vy: 0, vs: 0, spin: 0, ox: 0, oy: 0, os: 0, rot: rng.range(0, TAU), idx: 0,
+            s: s + k * (type === 'fence' ? 2.9 : rng.range(2.5, 6)),
+            x, r, type, mass: def.mass, hit: 0,
+            vx: 0, vy: 0, vs: 0, spin: 0, ox: 0, oy: 0, os: 0,
+            rot: type === 'fence' || type === 'sign' ? 0 : rng.range(0, TAU),
+            idx: 0,
           });
         }
       }
@@ -612,6 +706,8 @@ export class Track {
       const rows = density > 1.6 ? 3 : density > 0.8 ? 2 : 1;
       for (let side = -1; side <= 1; side += 2) {
         if (density < 0.7 && rng.chance(0.45)) continue;
+        // nobody stands on thin air beside a bridge or over a cliff edge
+        if (Z.dropDepth !== undefined && (Z.dropSide === 0 || Z.dropSide === side)) continue;
         for (let r = 0; r < rows; r++) {
           if (rng.chance(0.22)) continue;
           this.spectators.push({
@@ -651,6 +747,7 @@ export class Track {
     this.buildPropMeshes();
     this.buildSpectatorMeshes();
     this.buildZoneSetPieces();
+    this.buildBridges();
     this.buildShortcutSigns();
     this.buildStartFinish();
     return this.group;
@@ -693,7 +790,7 @@ export class Track {
         const s = i * STEP;
         const hw = this.hw[i];
         const cols = this.colOffsets(hw);
-        const Z = ZONES[this.zoneIdx[i]];
+        const Z = this.zones[this.zoneIdx[i]];
         cDirt.setHex(Z.dirt); cVerge.setHex(Z.verge); cFar.setHex(Z.far);
         for (let cIdx = 0; cIdx < colsN; cIdx++) {
           const x = cols[cIdx];
@@ -753,8 +850,11 @@ export class Track {
         const x = side * (hw + 1.05);
         const base = this.heightAt(s, x);
         const sag = Math.sin(s * 0.35) * 0.05;
-        // collapse the ribbon to nothing across a shortcut mouth
-        const open = this.tapeGapAt(s, side);
+        // collapse the ribbon across shortcut mouths, bridges and cliff edges
+        const Zt = this.zoneAt(s);
+        const cliffSide = Zt.dropDepth !== undefined
+          && (Zt.dropSide === 0 || Zt.dropSide === side);
+        const open = this.tapeGapAt(s, side) || !!Zt.noTape || cliffSide;
         const loH = base + 0.62 + sag;
         const hiH = open ? loH : base + 1.02 + sag;
         const lo = this.worldPos(s, x, loH, new THREE.Vector3());
@@ -785,6 +885,9 @@ export class Track {
     for (let s = 0; s < this.length && n < postCount; s += 7) {
       for (let side = -1; side <= 1; side += 2) {
         if (this.tapeGapAt(s, side)) continue;
+        const Zp = this.zoneAt(s);
+        if (Zp.noTape) continue;
+        if (Zp.dropDepth !== undefined && (Zp.dropSide === 0 || Zp.dropSide === side)) continue;
         const hw = this.halfWidth(s);
         const x = side * (hw + 1.05);
         const p = this.worldPos(s, x, this.heightAt(s, x), new THREE.Vector3());
@@ -935,6 +1038,14 @@ export class Track {
       log: { geo: logGeo(), color: 0x6b4a2c },
       rock: { geo: rockGeo(31), color: 0x7d766c },
       puddle: { geo: new THREE.CircleGeometry(1.4, 12).rotateX(-Math.PI / 2), color: 0x30404a },
+      // --- environmental additions
+      fence: { geo: fenceGeo(), color: 0xc4a878 },
+      sign: { geo: signGeo(), color: 0xe8e2d0 },
+      barrier: { geo: barrierGeo(), color: 0xff8a1f },
+      ramp: { geo: rampGeo(), color: 0x8a6237 },
+      boulder: { geo: rockGeo(77), color: 0x6e675d },
+      water: { geo: new THREE.CircleGeometry(3.2, 18).rotateX(-Math.PI / 2), color: 0x3d6e82 },
+      drift: { geo: driftGeo(), color: 0xeaf2f8 },
     };
     const counts: Record<string, number> = {};
     this.obstacles.forEach(o => { counts[o.type] = (counts[o.type] || 0) + 1; });
@@ -960,14 +1071,23 @@ export class Track {
       if (o.s < sMin || o.s > sMax) continue;
       const mesh = this.propMeshes[o.type];
       if (!mesh) continue;
+      // shattered props are gone: collapse them to nothing
+      if (o.gone) {
+        m4.makeScale(0, 0, 0);
+        mesh.setMatrixAt(o.idx, m4);
+        continue;
+      }
       const s = o.s + o.os, x = o.x + o.ox;
       const h = this.heightAt(s, x) + o.oy;
       this.worldPos(s, x, h, p);
       this.frameAt(s, fwd, right, up);
       q.setFromUnitVectors(_yAxis, up);
-      q.multiply(_qb.setFromAxisAngle(_yAxis, o.rot));
+      // fences, signs and barriers align across the track, not randomly
+      const aligned = o.type === 'fence' || o.type === 'sign'
+        || o.type === 'barrier' || o.type === 'ramp';
+      q.multiply(_qb.setFromAxisAngle(_yAxis, aligned ? Math.PI / 2 : o.rot));
       if (o.hit > 0) q.multiply(_qb.setFromAxisAngle(_tumbleAxis, o.hit * o.spin));
-      const sz = o.type === 'rock' ? o.r : 1;
+      const sz = o.type === 'rock' || o.type === 'boulder' ? o.r : 1;
       sc.set(sz, sz, sz);
       m4.compose(p, q, sc);
       mesh.setMatrixAt(o.idx, m4);
@@ -1138,11 +1258,24 @@ export class Track {
     };
     void up; void fwd; void right;
 
-    for (let zi = 0; zi < ZONES.length; zi++) {
-      const Z = ZONES[zi];
+    for (let zi = 0; zi < this.zones.length; zi++) {
+      const Z = this.zones[zi];
       const s0 = Z.t0 * this.length, s1 = Z.t1 * this.length;
 
-      switch (Z.name) {
+      // Set-piece scenery is keyed by theme, so authored sections ("02 PINE
+      // PANIC") reuse the same builders as the generic ones ("PINE PLUNGE").
+      const n = Z.name.toUpperCase();
+      const theme =
+        /PINE/.test(n) ? 'PINE PLUNGE' :
+        /ROCK|CLIFF|CANYON/.test(n) ? 'CANYON CUT' :
+        /BONKYARD|SCRAP/.test(n) ? 'THE BONKYARD' :
+        /MUD/.test(n) ? 'MUDPIT MIRE' :
+        /HAY|FARM/.test(n) ? 'HAYSTACK HOLLOW' :
+        /BIG AIR|KICKER/.test(n) ? 'KICKER RIDGE' :
+        /FINAL|FINISH/.test(n) ? 'FINISH FURY' :
+        /DROP|START/.test(n) ? 'START GATE' : '';
+
+      switch (theme) {
         case 'PINE PLUNGE': {
           // fallen giants arching over the trail
           for (let s = s0 + 40; s < s1; s += rng.range(95, 150)) {
@@ -1205,6 +1338,9 @@ export class Track {
             const hw = this.halfWidth(s);
             for (let side = -1; side <= 1; side += 2) {
               if (rng.chance(0.25)) continue;
+              // don't stack rock over a drop-away edge
+              if (Z.dropDepth !== undefined
+                && (Z.dropSide === 0 || Z.dropSide === side)) continue;
               const hgt = rng.range(9, 26);
               const pillar = new THREE.Mesh(rockPool[rng.int(0, 3)], stone);
               pillar.scale.set(rng.range(3, 6), hgt, rng.range(3, 6));
@@ -1300,6 +1436,80 @@ export class Track {
           put(tower, s0 + 42, this.halfWidth(s0 + 42) + 6.5);
           break;
         }
+      }
+    }
+    this.group.add(grp);
+  }
+
+  /**
+   * Timber bridge decks: rails you can see from a distance, plus trestles
+   * falling away underneath so the drop reads as real height rather than
+   * a texture change.
+   */
+  private buildBridges() {
+    const wood = new THREE.MeshLambertMaterial({ color: 0x6b4a2c });
+    const dark = new THREE.MeshLambertMaterial({ color: 0x453020 });
+    const grp = new THREE.Group();
+    for (const Z of this.zones) {
+      if (!Z.rails) continue;
+      const s0 = Z.t0 * this.length, s1 = Z.t1 * this.length;
+
+      for (let s = s0; s < s1; s += 2.6) {
+        const hw = this.halfWidth(s);
+        const h = this.heightAt(s, 0);
+        this.frameAt(s, _fwd2, _right2, _up2);
+        for (let side = -1; side <= 1; side += 2) {
+          const x = side * (hw + 0.35);
+          this.worldPos(s, x, h, _p);
+          // rail post
+          const post = new THREE.Mesh(new THREE.BoxGeometry(0.14, 1.05, 0.14), wood);
+          post.position.copy(_p).addScaledVector(_up2, 0.5);
+          post.quaternion.setFromUnitVectors(_yAxis, _up2);
+          grp.add(post);
+        }
+        // deck plank detail
+        const plank = new THREE.Mesh(new THREE.BoxGeometry(hw * 2 + 0.7, 0.14, 0.5), dark);
+        this.worldPos(s, 0, h - 0.09, _p);
+        plank.position.copy(_p);
+        plank.quaternion.setFromRotationMatrix(
+          new THREE.Matrix4().makeBasis(_right2, _up2, _fwd2));
+        grp.add(plank);
+      }
+
+      // continuous top rail
+      for (let side = -1; side <= 1; side += 2) {
+        for (let s = s0; s < s1; s += 6) {
+          const hw = this.halfWidth(s);
+          const h = this.heightAt(s, 0);
+          this.frameAt(s, _fwd2, _right2, _up2);
+          this.worldPos(s, side * (hw + 0.35), h + 0.95, _p);
+          const rail = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.12, 6.2), wood);
+          rail.position.copy(_p);
+          rail.quaternion.setFromRotationMatrix(
+            new THREE.Matrix4().makeBasis(_right2, _up2, _fwd2));
+          grp.add(rail);
+        }
+      }
+
+      // trestle legs dropping into the gorge
+      for (let s = s0 + 6; s < s1; s += 14) {
+        const hw = this.halfWidth(s);
+        const h = this.heightAt(s, 0);
+        this.frameAt(s, _fwd2, _right2, _up2);
+        for (let side = -1; side <= 1; side += 2) {
+          this.worldPos(s, side * hw * 0.8, h - 5, _p);
+          const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.22, 11, 5), dark);
+          leg.position.copy(_p);
+          leg.quaternion.setFromUnitVectors(_yAxis, _up2);
+          leg.rotateZ(side * 0.13);
+          grp.add(leg);
+        }
+        const cross = new THREE.Mesh(new THREE.BoxGeometry(hw * 1.7, 0.16, 0.16), dark);
+        this.worldPos(s, 0, h - 3.2, _p);
+        cross.position.copy(_p);
+        cross.quaternion.setFromRotationMatrix(
+          new THREE.Matrix4().makeBasis(_right2, _up2, _fwd2));
+        grp.add(cross);
       }
     }
     this.group.add(grp);

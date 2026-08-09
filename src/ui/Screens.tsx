@@ -4,7 +4,6 @@ import { audio } from '../game/audio';
 import {
   DIFFICULTIES, formatDelta, type Difficulty, type RecordResult, type SaveData,
 } from '../game/save';
-import { ZONES } from '../game/track';
 import { getMountain, levelFromXp } from '../game/mountains';
 
 const PLACE = ['', '1st', '2nd', '3rd', '4th', '5th', '6th'];
@@ -319,7 +318,7 @@ export function Results({
               <>
                 <div className="hud-label mb-2">ZONE SPLITS</div>
                 <div className="mb-3 max-h-[132px] overflow-y-auto pr-1">
-                  {ZONES.map((z, i) => {
+                  {game.track.zones.map((z, i) => {
                     const t = d.splits[i];
                     // 0 / null / undefined all mean "no split recorded"
                     if (i === 0 || !t) return null;

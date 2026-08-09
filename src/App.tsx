@@ -60,7 +60,7 @@ function GameApp() {
       g.showGhost = s.showGhost;
       g.reducedMotion = s.reducedMotion;
       g.applyLoadout(s.loadout);
-      if (s.mountain !== 'shalebeck') g.loadMountain(s.mountain);
+      if (s.mountain !== 'shaleback') g.loadMountain(s.mountain);
       audio.setMusicEnabled(s.music);
       audio.setSfxEnabled(s.sfx);
       g.start();

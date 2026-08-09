@@ -118,7 +118,7 @@ const DEFAULTS: SaveData = {
   coins: 0,
   loadout: DEFAULT_LOADOUT,
   xp: 0,
-  mountain: 'shalebeck',
+  mountain: 'shaleback',
   mountainBest: {},
 };
 
@@ -136,7 +136,8 @@ export function loadSave(): SaveData {
       ghost: p.ghost ?? {},
       coins: p.coins ?? 0,
       xp: p.xp ?? 0,
-      mountain: p.mountain ?? 'shalebeck',
+      // old saves referenced the pre-authored id
+      mountain: (p.mountain === 'shalebeck' ? 'shaleback' : p.mountain) ?? 'shaleback',
       mountainBest: p.mountainBest ?? {},
       // merge so loadouts saved before a field existed still load
       loadout: {

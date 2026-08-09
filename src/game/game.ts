@@ -18,6 +18,15 @@ import {
   type Perf, type Loadout, computePerf, getBike, loadoutColors,
 } from './garage';
 import { getMountain } from './mountains';
+import { SHALEBACK_SECTIONS, SHALEBACK_SETPIECES } from './shaleback';
+import {
+  PROPS, PROP_SCORE, PROP_BOOST, PROP_CALL, patchSurface,
+  type PropDef, type PropKind,
+} from './env';
+import {
+  CrashCause, CRASH_PROFILES, startRagdoll, stepRagdoll, crashCall,
+  type Ragdoll,
+} from './crash';
 import {
   BonkType, resolveBonk, bonkFlavour, canBeBonked, riderMass,
   type BonkBody, type BonkResult,
@@ -127,6 +136,7 @@ export interface HudState {
   pumpArmed: number;   // 0..1 stored pump energy
   lastBonk: string;    // headline type of the most recent bonk
   lastBonkT: number;   // display timer
+  crashCause: string;  // why the player is currently on the floor
   transitions: { from: string; to: string; t: number }[];
   splitDelta: number;    // seconds vs personal best at last zone
   splitShow: number;     // display timer
@@ -175,6 +185,7 @@ interface Racer {
   log: TransitionLog;
   crashMax: number;    // full duration of the current tumble
   recover: number;     // 0..1 mash progress toward getting up early
+  ragdoll: Ragdoll | null;
   crankAngle: number;  // drivetrain phase (freewheels when not pedalling)
   pedalling: number;   // 0..1 smoothed, drives the leg cycle vs attack stance
   // --- two-wheel contact
@@ -362,7 +373,7 @@ export class Game {
       introT: 0, introLine: '', introSub: '', introFade: 0,
       reactWindow: 0, holeshot: false,
       state: 'GROUNDED', stateLabel: 'ROLLING', stateT: 0, transitions: [],
-      pumpArmed: 0, lastBonk: '', lastBonkT: 0,
+      pumpArmed: 0, lastBonk: '', lastBonkT: 0, crashCause: '',
       splitDelta: 0, splitShow: 0, splitHasPb: false,
       ghostActive: false, ghostGap: 0, reducedMotion: false,
       trickText: '', trickHold: 0, finishData: null,
@@ -439,8 +450,8 @@ export class Game {
     this.ridge = this.buildRidges();
     this.scene.add(this.ridge);
 
-    // track
-    this.track = new Track(20260114);
+    // track — the default mountain is the authored vertical slice
+    this.track = new Track(20260114, 4600, SHALEBACK_SECTIONS, SHALEBACK_SETPIECES);
     this.scene.add(this.track.build());
 
     // particles
@@ -509,7 +520,7 @@ export class Game {
       crankAngle: 0, pedalling: 0, headYaw: 0, weight: 0,
       chassisPitch: 0, pitchV: 0, contactF: true, contactR: true,
       pump: 0, pumpArmed: 0,
-      mass: 86, swingT: 99, bonkCooldownPair: 0,
+      mass: 86, swingT: 99, bonkCooldownPair: 0, ragdoll: null,
       // the player rides "neutral"; rivals get personality below
       stCadence: 1, stLean: 1, stWeight: 0, stHead: 1, stTwitch: 1,
       place: i + 1, finished: false, finishTime: 0,
@@ -564,6 +575,9 @@ export class Game {
       r.v = 0; r.vx = 0; r.vy = 0; r.grounded = true; r.airTime = 0;
       r.lean = 0; r.leanV = 0; r.yaw = 0; r.crash = 0; r.stun = 0;
       r.grace = 0; r.lastObs = -1; r.obsCd = 0; r.recover = 0; r.crashMax = 1;
+      r.ragdoll = null;
+      r.rig.bike.position.set(0, 0, 0);
+      r.rig.bike.rotation.set(0, 0, 0);
       r.state = BikeState.GROUNDED; r.prevState = BikeState.GROUNDED;
       r.stateT = 0; r.landTimer = 0; r.log.clear();
       r.chassisPitch = 0; r.pitchV = 0; r.contactF = true; r.contactR = true;
@@ -572,7 +586,10 @@ export class Game {
       r.finished = false; r.finishTime = 0; r.place = i + 1;
       r.aiOffset = this.rng.range(-0.3, 0.3);
     });
-    this.track.obstacles.forEach(o => { o.hit = 0; o.ox = o.oy = o.os = 0; o.vx = o.vy = o.vs = 0; });
+    this.track.obstacles.forEach(o => {
+      o.hit = 0; o.ox = o.oy = o.os = 0; o.vx = o.vy = o.vs = 0;
+      o.gone = false; o.roll = undefined;
+    });
     this.track.resetSpectators();
     this.track.refreshProps();
     this.raceTime = 0; this.boost = 0; this.style = 0; this.combo = 0; this.comboTime = 0;
@@ -592,7 +609,7 @@ export class Game {
     // then slips past `!== undefined` guards and yields garbage deltas
     this.shortcutsHit = 0;
     this.scActive = null;
-    this.splits = new Array(ZONES.length).fill(0);
+    this.splits = new Array(this.track.zones.length).fill(0);
     this.ghostSamples = [];
     this.ghostAccum = 0;
     this.hud.ghostGap = 0;
@@ -934,6 +951,7 @@ export class Game {
       this.scanHazards();
       this.updateDraft(dt);
     }
+    if (live) this.updateRockfall(dt);
     this.updateProps(dt);
 
     // ---- combo decay
@@ -1035,16 +1053,34 @@ export class Game {
       } else {
         r.crash -= dt;
       }
-      r.v = damp(r.v, 1.5, 2.4, dt);
+      // ---- RAGDOLL: cause-specific tumble
+      const rd = r.ragdoll;
+      const prof = rd ? CRASH_PROFILES[rd.cause] : null;
+      // sliding friction — a yard sale keeps going, a dead stop doesn't
+      const slideK = prof ? lerp(3.4, 0.7, clamp01(prof.slide / 2.6)) : 2.4;
+      r.v = damp(r.v, prof && prof.slide > 1.5 ? 4 : 1.2, slideK, dt);
       r.crashSpin += dt * 9;
       r.s += r.v * dt;
       r.vx = damp(r.vx, 0, 3, dt);
       r.x += r.vx * dt;
       const gh = trk.heightAt(r.s, r.x);
       r.vy -= GRAV * dt; r.y += r.vy * dt;
-      if (r.y < gh) { r.y = gh; r.vy = Math.abs(r.vy) * 0.25; }
+      if (r.y < gh) {
+        r.y = gh;
+        // bounce, losing energy each time — riders skip before they settle
+        const b = rd && rd.bounces < 2 ? 0.42 : 0.15;
+        r.vy = Math.abs(r.vy) * b;
+        if (rd && Math.abs(r.vy) > 2 && Math.abs(r.s - this.player.s) < 90) {
+          this.spawnLandingBurst(r, 0.4);
+          if (r.isPlayer) audio.land(0.5);
+        }
+      }
+      if (rd) stepRagdoll(rd, dt, r.y, gh);
       if (r.crash <= 0) {
+        // ---- REMOUNT
         r.crash = 0; r.crashSpin = 0; r.stun = 0.5;
+        r.ragdoll = null;
+        r.chassisPitch = 0; r.pitchV = 0;
         r.grace = 1.4;              // don't get re-hit while remounting
         r.x = clamp(r.x, -hw * 0.8, hw * 0.8);
         r.y = trk.heightAt(r.s, r.x);
@@ -1055,6 +1091,8 @@ export class Game {
         r.v = Math.max(r.v, 9 + r.recover * 9);
         if (r.isPlayer) {
           this.hud.crashed = 0;
+          this.hud.crashCause = '';
+          audio.hop();
           if (r.recover > 0.55) {
             this.popup('QUICK RECOVERY!', 'sub', null, '#7ef7c8');
             this.boost = Math.min(100, this.boost + 12);
@@ -1195,7 +1233,17 @@ export class Game {
     r.chassisPitch += r.pitchV * dt;
     r.chassisPitch = clamp(r.chassisPitch, -0.55, 0.55);
 
-    // ---- track bounds
+    // ---- track bounds. Falling off the mountain is its own crash: a long
+    // quiet drop, then a respawn. Triggered early on authored drop-offs so
+    // you don't tumble silently into the void for two seconds.
+    const zoneNow = trk.zoneAt(r.s);
+    const voidDrop = zoneNow.dropDepth !== undefined
+      && Math.abs(r.x) > hw + 3.5
+      && (zoneNow.dropSide === 0 || zoneNow.dropSide === Math.sign(r.x));
+    if (voidDrop && r.crash <= 0) {
+      if (r.isPlayer) this.crashPlayer(CrashCause.OFF_TRACK, Math.sign(r.x) || 1);
+      else this.crashRacer(r, CrashCause.OFF_TRACK, Math.sign(r.x) || 1);
+    }
     if (Math.abs(r.x) > hw + 20 || r.y < trk.heightAt(r.s, clamp(r.x, -hw, hw)) - 26) {
       this.respawn(r);
     }
@@ -1357,14 +1405,15 @@ export class Game {
       const tol = lerp(1.32, 0.88, clamp01((air - 0.35) / 1.4)) + this.perf.landTol;
       const misaligned = spinErr > tol || flipErr > tol;
       if (air > 0.45 && misaligned) {
-        this.crashPlayer(flipErr > tol ? 'CASED IT' : 'SIDEWAYS LANDING');
+        // still rotating when the wheels arrived
+        this.crashPlayer(CrashCause.FAILED_TRICK, Math.sign(this.airSpin) || 1);
         crashed = true;
       } else if (impact > 30 && landQual < 0.18) {
-        this.crashPlayer('FLAT LANDING');
+        this.crashPlayer(r.v > 30 ? CrashCause.HIGH_SPEED : CrashCause.BAD_LANDING);
         crashed = true;
       } else if (r.chassisPitch > 0.34 && impact > 17) {
         // came down on the front wheel with the nose buried
-        this.crashPlayer('OVER THE BARS');
+        this.crashPlayer(CrashCause.OBSTACLE);
         crashed = true;
       } else if (misaligned) {
         // survived it, but it was ugly — scrub speed and wobble
@@ -1409,31 +1458,44 @@ export class Game {
     void surf;
   }
 
-  private crashPlayer(reason: string) {
+  /**
+   * IMPACT. Kicks off a cause-specific ragdoll so the crash reads as an
+   * explanation of what went wrong, not a generic tumble.
+   */
+  private crashPlayer(cause: CrashCause, dir = 1) {
     const p = this.player;
     if (p.crash > 0) return;
-    p.crash = 1.55;
-    p.crashMax = 1.55;
+    const P = CRASH_PROFILES[cause];
+    p.crash = P.duration;
+    p.crashMax = P.duration;
     p.recover = 0;
-    p.v *= 0.22;
-    p.vy = 5.5;
     p.crashSpin = 0;
+    p.ragdoll = startRagdoll(cause, dir);
+    // off-track keeps its momentum (you're falling, not stopping)
+    p.v *= cause === CrashCause.OFF_TRACK ? 0.72 : 0.22;
+    p.vy = P.pop;
+
     audio.crash();
     audio.duck(0.8, 1.1);
-    this.shakeAdd(1.3);
-    this.hitStop = 0.09;
+    this.shakeAdd(P.shake);
+    this.hitStop = P.hitStop;
+    if (P.slowmo > 0) this.slowmo = Math.max(this.slowmo, P.slowmo);
     this.breakCombo();
-    this.popup(reason, 'bad', null, '#ff4d4d');
-    this.spawnCrashDebris(p);
+    this.popup(crashCall(cause, Math.random()), 'bad', null, P.colour);
+    this.spawnCrashDebris(p, P.debris);
     this.hud.hitFlash = 1;
+    this.hud.crashCause = cause;
   }
 
-  private crashRacer(r: Racer) {
+  private crashRacer(r: Racer, cause = CrashCause.ATTACKED, dir = 1) {
     if (r.crash > 0) return;
-    r.crash = 1.7;
+    const P = CRASH_PROFILES[cause];
+    r.crash = P.duration * 1.1;
+    r.crashMax = r.crash;
+    r.ragdoll = startRagdoll(cause, dir);
     r.v *= 0.25;
-    r.vy = 5;
-    this.spawnCrashDebris(r);
+    r.vy = P.pop * 0.8;
+    if (Math.abs(r.s - this.player.s) < 120) this.spawnCrashDebris(r, P.debris * 0.6);
   }
 
   // -------------------------------------------------------------------------
@@ -1456,9 +1518,22 @@ export class Game {
     for (let i = trk.firstObstacleAfter(r.s + 2); i < obs.length; i++) {
       const o = obs[i];
       if (o.s - r.s > 34) break;
-      if (o.hit > 0) continue;
+      if (o.hit > 0 || o.gone) continue;
+      // water, snow and ramps aren't things to steer around
+      const rx = PROPS[o.type].reaction;
+      if (rx === 'surface' || rx === 'launch') continue;
       if (Math.abs(o.x - targetX) < o.r + 1.4) targetX += (targetX > o.x ? 1 : -1) * (o.r + 2.2);
     }
+    // ---- combat sections: rivals stop racing the clock and come for you
+    const zoneHere = trk.zoneAt(r.s);
+    if (zoneHere.combat) {
+      const dp = this.player.s - r.s;
+      if (Math.abs(dp) < 26) {
+        // converge on the player's line rather than the racing line
+        targetX = lerp(targetX, this.player.x, 0.55 * r.aggression);
+      }
+    }
+
     targetX = clamp(targetX, -hw * 0.86, hw * 0.86);
     const steer = clamp((targetX - r.x) * 0.42 - r.vx * 0.18, -1, 1);
 
@@ -1496,7 +1571,9 @@ export class Game {
         if (Math.abs(other.y - r.y) > 2.4) continue;
         // more likely to swing at someone who's beating them
         const spite = other.s > r.s ? 1.5 : 0.7;
-        if (Math.random() < r.aggression * spite * dt * 2.4) {
+        // combat sections crank everyone up
+        const arena = this.track.zoneAt(r.s).combat ? 2.3 : 1;
+        if (Math.random() < r.aggression * spite * arena * dt * 2.4) {
           r.bonkCd = 1.6;
           r.bonkSwing = 1;
           r.bonkDir = Math.sign(dx) || 1;
@@ -1631,7 +1708,8 @@ export class Game {
     const crashed = Math.random() < res.crashChance;
     if (crashed) this.crashRacer(b);
     if (res.type === BonkType.DOUBLE && Math.random() < res.crashChance * 0.6) {
-      if (a.isPlayer) this.crashPlayer('DOUBLE BONK'); else this.crashRacer(a);
+      if (a.isPlayer) this.crashPlayer(CrashCause.ATTACKED, -Math.sign(res.knockX) || 1);
+      else this.crashRacer(a, CrashCause.ATTACKED, -Math.sign(res.knockX) || 1);
     }
 
     // ---- presentation
@@ -1773,10 +1851,12 @@ export class Game {
     const list = trk.obstacles;
     for (let i = trk.firstObstacleAfter(r.s - 2.0); i < list.length; i++) {
       const o = list[i];
-      const ds = o.s - r.s;
+      // a rolling boulder's real position includes its drift
+      const ds = (o.s + (o.roll !== undefined ? o.os : 0)) - r.s;
       if (ds > 2.4) break;
-      if (o.hit > 0) continue;
-      const dx = o.x - r.x;
+      if (o.gone) continue;
+      if (o.hit > 0 && o.roll === undefined) continue;
+      const dx = (o.x + (o.roll !== undefined ? o.ox : 0)) - r.x;
       const reach = o.r + 0.7;
       if (Math.abs(dx) > reach) continue;
       const oh = trk.heightAt(o.s, o.x);
@@ -1794,6 +1874,59 @@ export class Game {
       r.lastObs = o.idx;
       r.obsCd = 0.45;
 
+      const def = PROPS[o.type];
+
+      // ---- surface patches: water, puddles, snow. No collision, but they
+      // change grip and throw spray, so riding through one is felt.
+      if (def.reaction === 'surface') {
+        if (r.isPlayer) this.splash(r, o.type);
+        continue;
+      }
+
+      // ---- wooden ramps: ride up, get launched
+      if (def.reaction === 'launch') {
+        if (r.grounded && r.v > 6) {
+          r.vy = Math.max(r.vy, (def.launch ?? 9) * clamp01(r.v / 26) + 3);
+          r.grounded = false;
+          if (r.isPlayer) {
+            audio.hop();
+            this.style = Math.min(1, this.style + 0.2);
+            this.popup('RAMP!', 'sub', null, '#ffd400');
+          }
+        }
+        continue;
+      }
+
+      // ---- breakables: fences, signs, barriers
+      if (def.reaction === 'shatter' || def.reaction === 'topple') {
+        const fast = r.v > (def.breakSpeed ?? 6);
+        if (fast) {
+          o.gone = def.reaction === 'shatter';
+          o.hit = 1;
+          this.knockProp(o, -dir * (4 + r.v * 0.3), 5 + r.v * 0.14, r.v * 0.4);
+          r.v -= def.mass * 1.1;
+          r.v = Math.max(0, r.v);
+          const oh2 = trk.heightAt(o.s, o.x);
+          const wp = trk.worldPos(o.s, o.x, oh2 + def.height * 0.5, _v1).clone();
+          this.shatter(wp, def, dir);
+          if (r.isPlayer) {
+            audio.bonk(0.55, clamp(dir * 0.4, -1, 1));
+            this.shakeAdd(0.26);
+            this.addCombo();
+            const pts = (PROP_SCORE[o.type] ?? 100) * this.comboMult();
+            this.addScore(pts);
+            this.boost = Math.min(100, this.boost + (PROP_BOOST[o.type] ?? 5));
+            this.popupAt(wp, `${PROP_CALL[o.type] ?? 'SMASH'}  +${Math.round(pts)}`,
+              '#ffd400', 22);
+          }
+        } else {
+          // too slow to break it: it just stops you
+          r.v *= 0.6; r.vx += dir * 3;
+          if (r.isPlayer) { audio.scrape(0.7); this.shakeAdd(0.2); }
+        }
+        continue;
+      }
+
       if (o.mass > 100) {
         // ---- solid: rock / log -------------------------------------------
         // Only a square, fast hit ends the run. Clipping the shoulder of a
@@ -1802,7 +1935,8 @@ export class Game {
         if (r.isPlayer) {
           if (r.grace > 0) continue;
           if (severity > 0.42) {
-            this.crashPlayer(o.type === 'log' ? 'LOG SLAM' : 'ROCK SLAM');
+            this.crashPlayer(
+              r.v > 26 ? CrashCause.HIGH_SPEED : CrashCause.OBSTACLE, dir);
           } else {
             // glancing blow — deflect, scrub speed, keep racing
             const bite = 0.30 + severity * 0.55;
@@ -1846,10 +1980,124 @@ export class Game {
     }
   }
 
+  /** Burst a breakable into its constituent debris. */
+  private shatter(world: THREE.Vector3, def: PropDef, dir: number) {
+    const c1 = _c1.setHex(def.colour);
+    const c2 = _c2.setHex(def.colour2 ?? def.colour);
+    for (let i = 0; i < def.shards; i++) {
+      const a = this.rng.range(0, TAU);
+      const sp = this.rng.range(3, 11);
+      this.dirtPool.spawn({
+        pos: world.clone().add(new THREE.Vector3(
+          this.rng.range(-0.6, 0.6), this.rng.range(0, 0.9), this.rng.range(-0.6, 0.6))),
+        vel: new THREE.Vector3(
+          Math.cos(a) * sp + dir * 6, this.rng.range(3, 9), Math.sin(a) * sp),
+        life: this.rng.range(0.7, 1.6),
+        size: this.rng.range(0.18, 0.42), endSize: this.rng.range(0.10, 0.22),
+        color: (this.rng.chance(0.5) ? c1 : c2).clone(),
+        alpha: 1, gravity: 26, drag: 0.55, spin: this.rng.range(-14, 14),
+        bounce: 0.32,
+      });
+    }
+    // dust puff at the break point
+    for (let i = 0; i < 6; i++) {
+      this.smokePool.spawn({
+        pos: world.clone(),
+        vel: new THREE.Vector3(this.rng.range(-3, 3) + dir * 2,
+          this.rng.range(0.5, 3), this.rng.range(-3, 3)),
+        life: this.rng.range(0.4, 0.9), size: 0.6, endSize: 2.8,
+        color: c1.clone().lerp(_c2.setRGB(1, 1, 1), 0.5),
+        alpha: 0.45, gravity: -1, drag: 2.2,
+      });
+    }
+    audio.bonk(0.5, clamp(dir * 0.3, -1, 1));
+  }
+
+  /** Spray thrown up by riding through water, a puddle or a snow drift. */
+  private splash(r: Racer, kind: PropKind) {
+    if (r.v < 4) return;
+    const info = patchSurface(kind);
+    if (!info) return;
+    const trk = this.track;
+    // slow and destabilise while in it
+    r.v -= info.drag * 0.55 * this.lastDt * 6;
+    r.vx *= 1 - (1 - info.grip) * 0.4 * this.lastDt * 6;
+
+    const snow = info.spray === 'snow';
+    const rate = clamp01(r.v / 26) * (snow ? 42 : 60);
+    if (Math.random() > this.lastDt * rate) return;
+    trk.frameAt(r.s, _f1, _f2, _f3);
+    const base = trk.worldPos(r.s - 0.3, r.x, r.y + 0.1, _v1);
+    for (let i = 0; i < (snow ? 2 : 3); i++) {
+      this.smokePool.spawn({
+        pos: base.clone().addScaledVector(_f2, this.rng.range(-0.7, 0.7)),
+        vel: _f2.clone().multiplyScalar(this.rng.range(-5, 5))
+          .addScaledVector(_f3, this.rng.range(2.5, 7))
+          .addScaledVector(_f1, -r.v * 0.12),
+        life: this.rng.range(0.4, 0.95),
+        size: this.rng.range(0.3, 0.7), endSize: this.rng.range(1.4, 3.0),
+        color: snow ? _c1.setRGB(0.95, 0.98, 1) : _c1.setRGB(0.72, 0.86, 0.95),
+        alpha: snow ? 0.75 : 0.6, gravity: snow ? 2 : 9, drag: 1.6,
+      });
+    }
+    if (Math.random() < this.lastDt * 5) {
+      audio.scrape(snow ? 0.3 : 0.55);
+    }
+  }
+
   private knockProp(o: Obstacle, vx: number, vy: number, vs: number) {
     o.hit = 1;
     o.vx = vx; o.vy = vy; o.vs = vs;
     o.spin = (Math.random() * 2 - 1) * 9;
+  }
+
+  /**
+   * Rockfall. Boulders sit dormant above the track and release when you get
+   * close, rolling across your line. They telegraph with dust and a rumble
+   * so it reads as a hazard to dodge rather than an ambush.
+   */
+  private updateRockfall(dt: number) {
+    const p = this.player;
+    const trk = this.track;
+    const list = trk.obstacles;
+    for (let i = trk.firstObstacleAfter(p.s - 20); i < list.length; i++) {
+      const o = list[i];
+      if (o.s > p.s + 150) break;
+      if (o.type !== 'boulder' || o.gone) continue;
+
+      // arm it when the player is closing
+      if (o.roll === undefined) {
+        const ds = o.s - p.s;
+        if (ds > 26 && ds < 90 && Math.random() < dt * 0.9) {
+          o.roll = Math.sign(o.x) === 0 ? 1 : -Math.sign(o.x);
+          if (Math.abs(p.s - o.s) < 120) {
+            audio.hitTaken(0.35);
+            const wp = trk.worldPos(o.s, o.x, trk.heightAt(o.s, o.x) + 2, _v1).clone();
+            this.popupAt(wp, 'ROCKFALL!', '#ff6a00', 22);
+          }
+        }
+        continue;
+      }
+
+      // rolling: cross the track, gathering speed downhill
+      o.ox += o.roll * 7.5 * dt;
+      o.os += 5.5 * dt;
+      o.rot += 4.5 * dt;
+      const hw = trk.halfWidth(o.s + o.os);
+      if (Math.abs(o.x + o.ox) > hw + 8) { o.gone = true; continue; }
+
+      // dust trail
+      if (Math.random() < dt * 26) {
+        const wp = trk.worldPos(o.s + o.os, o.x + o.ox,
+          trk.heightAt(o.s + o.os, o.x + o.ox) + 0.4, _v1);
+        this.smokePool.spawn({
+          pos: wp.clone(),
+          vel: new THREE.Vector3(this.rng.range(-2, 2), this.rng.range(0.5, 2.5), this.rng.range(-2, 2)),
+          life: this.rng.range(0.6, 1.3), size: 0.8, endSize: 3.4,
+          color: _c1.setRGB(0.62, 0.56, 0.48), alpha: 0.5, gravity: -1, drag: 1.5,
+        });
+      }
+    }
   }
 
   private updateProps(dt: number) {
@@ -1859,6 +2107,7 @@ export class Game {
     for (let i = this.track.firstObstacleAfter(p.s - 340); i < list.length; i++) {
       const o = list[i];
       if (o.s > p.s + 340) break;
+      if (o.type === 'boulder' && o.roll !== undefined) { dirty = true; continue; }
       if (o.hit <= 0) continue;
       o.hit += dt;
       o.vy -= 26 * dt;
@@ -1883,9 +2132,10 @@ export class Game {
     const list = trk.obstacles;
     for (let i = trk.firstObstacleAfter(p.s + 1); i < list.length; i++) {
       const o = list[i];
-      const ds = o.s - p.s;
+      const ds = (o.s + (o.roll !== undefined ? o.os : 0)) - p.s;
       if (ds > reactDist) break;
-      if (o.hit > 0 || o.mass < 100) continue;
+      if (o.gone || o.mass < 100) continue;
+      if (o.hit > 0 && o.roll === undefined) continue;
       const tHit = ds / Math.max(6, p.v);
       const futureX = p.x + p.vx * tHit;
       const dx = o.x - futureX;
@@ -2182,10 +2432,39 @@ export class Game {
 
     // crash tumble
     if (r.crash > 0) {
-      rig.flip.rotation.x = r.crashSpin * 1.3;
-      rig.spin.rotation.y = r.crashSpin * 0.55;
-      rig.lean.rotation.z = Math.sin(r.crashSpin) * 0.95;
-      rig.body.rotation.x = 0;
+      const rd = r.ragdoll;
+      if (rd) {
+        // each axis is driven independently, so the cause is legible from
+        // the silhouette: pitch = over the bars, roll = bonked sideways
+        rig.flip.rotation.x = rd.pitch;
+        rig.spin.rotation.y = rd.yaw;
+        rig.lean.rotation.z = rd.roll;
+        rig.body.rotation.x = 0;
+        // limbs flail, damping out as the rider comes to rest
+        const flail = (1 - clamp01(rd.t / rd.duration)) * 1.5;
+        const w = this.time * 17;
+        rig.armL.rotation.z = Math.sin(w) * flail;
+        rig.armR.rotation.z = Math.sin(w + 2.1) * -flail;
+        rig.armL.rotation.x = Math.cos(w * 0.8) * flail * 0.7;
+        rig.armR.rotation.x = Math.cos(w * 0.8 + 1.4) * flail * 0.7;
+        rig.legL.rotation.x = Math.sin(w * 0.7 + 1) * flail * 0.9;
+        rig.legR.rotation.x = Math.sin(w * 0.7 + 3) * flail * 0.9;
+        rig.head.rotation.x = Math.sin(w * 0.6) * flail * 0.5;
+        // the bike leaves without you
+        if (rd.bike.active) {
+          rig.bike.position.set(rd.bike.ox, rd.bike.oy, rd.bike.os);
+          rig.bike.rotation.set(rd.bike.spin, rd.bike.spin * 0.6, rd.bike.spin * 0.9);
+        }
+      } else {
+        rig.flip.rotation.x = r.crashSpin * 1.3;
+        rig.spin.rotation.y = r.crashSpin * 0.55;
+        rig.lean.rotation.z = Math.sin(r.crashSpin) * 0.95;
+        rig.body.rotation.x = 0;
+      }
+    } else if (rig.bike.position.lengthSq() > 0.0001) {
+      // remounted: bring the bike back under the rider
+      rig.bike.position.set(0, 0, 0);
+      rig.bike.rotation.set(0, 0, 0);
     }
 
     // steering + wheels
@@ -2441,11 +2720,11 @@ export class Game {
     }
   }
 
-  private spawnCrashDebris(r: Racer) {
+  private spawnCrashDebris(r: Racer, count = 34) {
     const trk = this.track;
     const base = trk.worldPos(r.s, r.x, r.y + 0.5, _v1);
     const zone = trk.zoneAt(r.s);
-    for (let i = 0; i < 34; i++) {
+    for (let i = 0; i < count; i++) {
       const a = this.rng.range(0, TAU);
       this.dirtPool.spawn({
         pos: base.clone(),
@@ -2473,7 +2752,9 @@ export class Game {
       else mat?.dispose();
     });
 
-    this.track = new Track(m.seed, m.length);
+    this.track = m.authored
+      ? new Track(m.seed, m.length, SHALEBACK_SECTIONS, SHALEBACK_SETPIECES)
+      : new Track(m.seed, m.length);
     this.scene.add(this.track.build());
     this.lastZone = -1;
     this.menuTime = 0;
@@ -2734,8 +3015,12 @@ export class Game {
     const gh = trk.heightAt(p.s, p.x);
     const aboveGround = clamp(p.y - gh, 0, 22);
 
-    const back = 7.6 + speed01 * 3.6 + air * 2.6 + (this.boosting ? -0.8 : 0);
-    const height = 2.75 + speed01 * 0.5 + air * 1.5 + aboveGround * 0.55;
+    // a crash is worth watching: pull back and up so the tumble is in frame
+    const crashK = p.crash > 0 ? clamp01(p.crash / Math.max(0.4, p.crashMax)) : 0;
+    const back = 7.6 + speed01 * 3.6 + air * 2.6 + (this.boosting ? -0.8 : 0)
+      + crashK * 3.4;
+    const height = 2.75 + speed01 * 0.5 + air * 1.5 + aboveGround * 0.55
+      + crashK * 2.2;
     const camS = p.s - back;
     const camX = p.x * 0.62;
     const camH = trk.heightAt(camS, camX) + height;
