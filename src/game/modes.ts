@@ -124,13 +124,14 @@ export const TIME_ATTACK: ModeRules = {
   sub: 'BEAT THE CLOCK',
   blurb: 'Solo run against a target time. Style points buy you seconds.',
   colour: '#7ef7ff',
-  available: false,
-  reqLevel: 3,
+  available: true,
+  reqLevel: 0,
   elimination: false,
   elimInterval: 0,
   // target is the model's estimate, tightened by difficulty
   timeLimit: (d, est) => est * (d === 'chill' ? 1.18 : d === 'pro' ? 1.06 : 0.97),
   hazardScale: 0.85,
+  /** ghosts of rivals stay for drama; they never swing */
   aggressionScale: 0,
   trickScale: 1.4,
   winBy: 'time',

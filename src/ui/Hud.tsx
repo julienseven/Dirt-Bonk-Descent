@@ -78,6 +78,9 @@ export default function Hud({ game }: { game: Game }) {
   const recWrap = useRef<HTMLDivElement>(null);
   const recBar = useRef<HTMLDivElement>(null);
   const recKey = useRef<HTMLDivElement>(null);
+  const promptTxt = useRef<HTMLDivElement>(null);
+  const modeObj = useRef<HTMLDivElement>(null);
+  const modeDet = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let raf = 0;
@@ -232,6 +235,20 @@ export default function Hud({ game }: { game: Game }) {
       if (offTxt.current) offTxt.current.style.opacity = h.offTrack && h.phase === 'race' ? '1' : '0';
       if (draftTxt.current) draftTxt.current.style.opacity = h.drafting ? '1' : '0';
 
+      // contextual control prompt — race only, hidden while crashed
+      if (promptTxt.current) {
+        const showPrompt = h.phase === 'race' && h.crashed <= 0;
+        promptTxt.current.style.opacity = showPrompt ? '1' : '0';
+        if (showPrompt) {
+          let line: string;
+          if (h.airTime > 0.18) line = 'Q/E SPIN · J/K FLIP · 1-5 STYLE · SPACE SUPERMAN';
+          else if (h.boosting) line = 'BOOSTING · HOLD SPACE';
+          else if (h.boost > 25) line = 'SPACE BOOST · Q/E BONK · J HOP · SHIFT TUCK';
+          else line = 'W PEDAL · A/D STEER · Q/E BONK · J HOP';
+          if (promptTxt.current.textContent !== line) promptTxt.current.textContent = line;
+        }
+      }
+
       // state machine debug readout
       if (dbgWrap.current) {
         const on = game.debugStates;
@@ -244,8 +261,12 @@ export default function Hud({ game }: { game: Game }) {
           if (dbgT.current) {
             dbgT.current.textContent =
               `${h.stateLabel}  ${h.stateT.toFixed(2)}s\n`
-              + `${h.fps.toFixed(0)} fps · tier ${h.perfTier} · ${h.particles}p\n`
-              + `${h.draws} draws · ${(h.tris / 1000).toFixed(0)}k tris`;
+              + `${h.debugVel.toFixed(1)} m/s · air ${h.debugAir.toFixed(2)}s\n`
+              + `boost ${h.boost.toFixed(0)} · ${h.debugCp}\n`
+              + `${h.fps.toFixed(0)} fps · t${h.perfTier} · ${h.particles}p\n`
+              + `${h.draws} draws · ${(h.tris / 1000).toFixed(0)}k tris`
+              + (h.debugInv ? '\nINVINCIBLE' : '')
+              + '\nF1/F2 CP · F3 boost · F4 speed\nF5 inv · F6 slo · F7 restart';
             dbgT.current.style.color = h.fps < 50 ? '#ff6a6a'
               : h.fps < 58 ? '#ffd400' : 'rgba(255,255,255,.55)';
           }
@@ -302,6 +323,20 @@ export default function Hud({ game }: { game: Game }) {
         const k = 1 + h.recoverPulse * 0.3;
         recKey.current.style.transform = `scale(${k.toFixed(3)})`;
         recKey.current.style.background = h.recoverPulse > 0.4 ? '#7ef7c8' : '#ffffff';
+      }
+
+      // mode objective (time attack clock, etc.)
+      if (modeObj.current) {
+        const show = !!h.modeObjective && h.phase === 'race';
+        modeObj.current.style.opacity = show ? '1' : '0';
+        if (show && modeObj.current.textContent !== h.modeObjective) {
+          modeObj.current.textContent = h.modeObjective;
+        }
+        modeObj.current.style.color = h.modeUrgent ? '#ff2e88' : '#7ef7ff';
+      }
+      if (modeDet.current) {
+        modeDet.current.style.opacity = h.modeDetail && h.phase === 'race' ? '1' : '0';
+        if (modeDet.current.textContent !== h.modeDetail) modeDet.current.textContent = h.modeDetail;
       }
 
       // hazard telegraph: pulses harder the later you leave it
@@ -483,6 +518,18 @@ export default function Hud({ game }: { game: Game }) {
       {/* off track */}
       <div ref={offTxt} className="hud-big absolute left-1/2 top-[74%] -translate-x-1/2 text-[24px] text-[#ff6a00] opacity-0 transition-opacity"
         style={{ textShadow: '0 3px 0 #000' }}>OFF COURSE!</div>
+
+      {/* mode objective (time attack, etc.) */}
+      <div className="pointer-events-none absolute left-1/2 top-[10%] -translate-x-1/2 text-center">
+        <div ref={modeObj} className="hud-big text-[34px] leading-none text-[#7ef7ff] opacity-0 transition-opacity"
+          style={{ textShadow: '0 4px 0 #000, 0 0 22px #7ef7ff66' }} />
+        <div ref={modeDet} className="hud-label mt-1 !text-[10px] text-white/70 opacity-0 transition-opacity" />
+      </div>
+
+      {/* contextual control prompt */}
+      <div ref={promptTxt}
+        className="hud-label pointer-events-none absolute bottom-6 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-black/55 px-4 py-[5px] !text-[11px] !tracking-[.18em] text-white opacity-0 uppercase"
+        style={{ transition: 'opacity .15s', textShadow: '0 1px 0 #000, 0 0 6px #000, 0 2px 4px #000' }} />
 
       {/* final stretch marker on the descent bar */}
       <div ref={stretchBar} className="hud-descent absolute right-6 top-1/2 h-[46vh] w-[10px] -translate-y-1/2 opacity-0"

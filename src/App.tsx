@@ -10,7 +10,7 @@ import {
   xpBreakdown, xpTotal, cashEarned, completedChallenges,
   type XpLine, type RunSummary,
 } from './game/progression';
-import { getMode } from './game/modes';
+import { getMode, type ModeId } from './game/modes';
 import MountainSelect from './ui/MountainSelect';
 import { levelFromXp } from './game/mountains';
 import { audio } from './game/audio';
@@ -45,6 +45,7 @@ function GameApp() {
   const [xpGain, setXpGain] = useState(0);
   const [xpLines, setXpLines] = useState<XpLine[]>([]);
   const [levelUp, setLevelUp] = useState(false);
+  const [mode, setMode] = useState<ModeId>('descent');
   const touch = useRef(isTouch());
   const saveRef = useRef(save);
   saveRef.current = save;
@@ -182,15 +183,21 @@ function GameApp() {
     setPicker(false);
   }, [game, patch]);
 
+  const chooseMode = useCallback((id: ModeId) => {
+    setMode(id);
+    game?.setMode(id);
+  }, [game]);
+
   const startRace = useCallback(() => {
     if (!game) return;
     setLastResult(null);
     setPayout(0);
     setXpGain(0);
     setLevelUp(false);
+    game.setMode(mode);
     game.pbSplits = saveRef.current.best[saveRef.current.difficulty]?.splits ?? [];
     game.startRace();
-  }, [game]);
+  }, [game, mode]);
 
   /** Re-run without replaying the cold open. */
   const rerun = useCallback(() => {
@@ -257,6 +264,8 @@ function GameApp() {
           onGarage={() => setGarage(true)}
           onMountains={() => setPicker(true)}
           onDifficulty={chooseDifficulty}
+          mode={mode}
+          onMode={chooseMode}
           onToggleMusic={v => { patch({ music: v }); audio.setMusicEnabled(v); }}
           onToggleSfx={v => { patch({ sfx: v }); audio.setSfxEnabled(v); }}
           onToggleMotion={v => { patch({ reducedMotion: v }); game.reducedMotion = v; }}

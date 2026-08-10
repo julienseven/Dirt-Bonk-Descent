@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DIRT BONK DESCENT — Render Progress</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #12161f;
+    --line: #243041;
+    --gold: #ffd400;
+    --mint: #2fe6c8;
+    --hot: #ff3b30;
+    --text: #e8eef6;
+    --dim: #8a97a8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: Inter, system-ui, sans-serif; overflow: hidden; }
+  #wrap { display: grid; grid-template-columns: 1fr 340px; height: 100%; }
+  #view { position: relative; background: #0a1018; }
+  canvas { display: block; width: 100% !important; height: 100% !important; }
+  #hud {
+    position: absolute; left: 16px; top: 16px; right: 16px;
+    display: flex; justify-content: space-between; gap: 12px; pointer-events: none;
+  }
+  #brand { font: 900 18px/1 Impact, "Arial Black", system-ui, sans-serif; letter-spacing: 0.04em; }
+  #brand span { color: var(--gold); }
+  #stageLabel {
+    font: 800 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--mint); background: #0008; padding: 8px 10px; border: 1px solid #2fe6c844; border-radius: 6px;
+  }
+  #side {
+    border-left: 1px solid var(--line); background: linear-gradient(180deg, #10141c, #0b0e14);
+    padding: 16px; overflow: auto;
+  }
+  h1 { font: 900 15px/1.1 Impact, system-ui, sans-serif; letter-spacing: 0.06em; color: var(--gold); margin-bottom: 4px; }
+  .sub { color: var(--dim); font-size: 11px; margin-bottom: 14px; }
+  .meter { height: 8px; background: #1a2230; border-radius: 99px; overflow: hidden; margin: 8px 0 16px; border: 1px solid var(--line); }
+  .meter > i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--hot), var(--gold), var(--mint)); transition: width 0.5s ease; }
+  .pct { font: 800 28px/1 Impact, system-ui, sans-serif; color: var(--text); }
+  .pct small { font-size: 12px; color: var(--dim); margin-left: 6px; }
+  .list { display: flex; flex-direction: column; gap: 8px; }
+  .item {
+    display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; align-items: start;
+    padding: 8px 9px; border: 1px solid var(--line); border-radius: 8px; background: #0e131b;
+    font-size: 12px;
+  }
+  .item.done { border-color: #2fe6c855; background: #0d1a18; }
+  .item.wip { border-color: #ffd40066; background: #1a160c; animation: pulse 1.4s ease infinite; }
+  .item.todo { opacity: 0.72; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 3px; background: #445; }
+  .item.done .dot { background: var(--mint); box-shadow: 0 0 8px #2fe6c8aa; }
+  .item.wip .dot { background: var(--gold); box-shadow: 0 0 8px #ffd400aa; }
+  .item .title { font-weight: 700; }
+  .item .note { color: var(--dim); font-size: 11px; margin-top: 2px; }
+  .item .tag { font: 700 10px/1 ui-monospace, monospace; color: var(--dim); text-transform: uppercase; }
+  .item.done .tag { color: var(--mint); }
+  .item.wip .tag { color: var(--gold); }
+  #log {
+    margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line);
+    font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim);
+    max-height: 28vh; overflow: auto;
+  }
+  #log b { color: var(--text); }
+  .links { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .links a {
+    color: #0b0d12; background: var(--gold); text-decoration: none; font: 800 11px/1 system-ui, sans-serif;
+    padding: 8px 10px; border-radius: 6px; letter-spacing: 0.04em;
+  }
+  .links a.alt { background: transparent; color: var(--mint); border: 1px solid #2fe6c866; }
+  @keyframes pulse { 0%,100% { filter: brightness(1); } 50% { filter: brightness(1.18); } }
+  @media (max-width: 900px) {
+    #wrap { grid-template-columns: 1fr; grid-template-rows: 58vh 1fr; }
+    #side { border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="view">
+    <div id="hud">
+      <div id="brand">DIRT <span>BONK</span> DESCENT</div>
+      <div id="stageLabel">BOOTING RENDER LAB…</div>
+    </div>
+  </div>
+  <aside id="side">
+    <h1>RENDER SPRINT</h1>
+    <div class="sub">Live visual identity lab · polls every 2s · Three.js showcase</div>
+    <div class="pct" id="pct">0%<small>complete</small></div>
+    <div class="meter"><i id="bar"></i></div>
+    <div class="list" id="list"></div>
+    <div class="links">
+      <a href="/">OPEN GAME</a>
+      <a class="alt" href="/progress.html">REFRESH</a>
+    </div>
+    <div id="log"></div>
+  </aside>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.185.1/build/three.module.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ---------------------------------------------------------------------------
+// Status model (overwritten by progress-status.json when available)
+// ---------------------------------------------------------------------------
+const FALLBACK = {
+  updated: new Date().toISOString(),
+  stage: 0,
+  stageName: 'Scaffold',
+  percent: 8,
+  log: ['Progress page online', 'Waiting for render pass…'],
+  items: [
+    { id: 'pipeline', title: 'Rendering pipeline baseline', note: 'Cineon / golden hour / fog / LOD', status: 'done' },
+    { id: 'materials', title: 'Rider + bike materials', note: 'Roughness maps + progressive dirt', status: 'done' },
+    { id: 'progress', title: 'Live progress page', note: 'This Three.js lab', status: 'wip' },
+    { id: 'wind', title: 'Vegetation wind', note: 'Speed-driven canopy / grass sway', status: 'todo' },
+    { id: 'water', title: 'Water + foam polish', note: 'Rivers, puddles, edge foam', status: 'todo' },
+    { id: 'worldmat', title: 'World material grit', note: 'Rock / wood / ground maps', status: 'todo' },
+    { id: 'outline', title: 'Rider readability shells', note: 'Silhouette outline for high speed', status: 'todo' },
+    { id: 'bonkfx', title: 'BONK impact language', note: 'Ring flash + dirt burst punch', status: 'todo' },
+    { id: 'speed', title: 'Speed FOV / streaks', note: 'Wind motes + nonlinear FOV', status: 'done' },
+    { id: 'ragdoll', title: 'Crash limb silhouettes', note: 'Cause-specific ragdoll poses', status: 'done' },
+    { id: 'atmosphere', title: 'Mountain atmosphere', note: 'Ridge haze + forest legibility', status: 'done' },
+    { id: 'perfect', title: 'Utterly perfect loop', note: 'Build / polish / re-check', status: 'todo' },
+  ],
+};
+
+let status = structuredClone(FALLBACK);
+
+// ---------------------------------------------------------------------------
+// Three.js showcase — evolves with stage percent
+// ---------------------------------------------------------------------------
+const view = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.CineonToneMapping;
+renderer.toneMappingExposure = 1.24;
+view.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0xbcd4e6, 0.012);
+scene.background = new THREE.Color(0x6a8fb0);
+
+const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 200);
+const clock = new THREE.Clock();
+
+// lights — match game golden hour
+const sun = new THREE.DirectionalLight(0xffd9a0, 2.6);
+sun.position.set(-4, 3.2, 2);
+scene.add(sun);
+scene.add(new THREE.HemisphereLight(0xa8ccff, 0x8a6438, 1.15));
+const rim = new THREE.DirectionalLight(0x9ec4ff, 0.85);
+rim.position.set(2, 1.5, -3);
+scene.add(rim);
+const fill = new THREE.DirectionalLight(0xfff0dc, 0.42);
+fill.position.set(-0.5, 2, 4);
+scene.add(fill);
+const bounce = new THREE.DirectionalLight(0xffb878, 0.4);
+bounce.position.set(0.2, -2, 0.1);
+scene.add(bounce);
+
+// ground trail
+const ground = new THREE.Mesh(
+  new THREE.CircleGeometry(18, 48),
+  new THREE.MeshStandardMaterial({ color: 0x8a6a45, roughness: 0.95, metalness: 0 }),
+);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = 0;
+scene.add(ground);
+const trail = new THREE.Mesh(
+  new THREE.PlaneGeometry(3.2, 22),
+  new THREE.MeshStandardMaterial({ color: 0x6d5236, roughness: 0.96, metalness: 0 }),
+);
+trail.rotation.x = -Math.PI / 2;
+trail.position.set(0, 0.02, 0);
+scene.add(trail);
+
+// distant ridges (simple)
+function makeRidge(z, h, color, y) {
+  const g = new THREE.Mesh(
+    new THREE.ConeGeometry(14, h, 7),
+    new THREE.MeshBasicMaterial({ color, fog: true }),
+  );
+  g.position.set(0, y, z);
+  g.rotation.y = 0.4;
+  scene.add(g);
+  return g;
+}
+makeRidge(-28, 16, 0x4a5a6e, 4);
+makeRidge(-36, 22, 0x6a7d92, 5);
+makeRidge(-44, 28, 0x8ea4b8, 6);
+
+// trees
+const trees = new THREE.Group();
+scene.add(trees);
+const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3422, roughness: 0.92 });
+const leafMat = new THREE.MeshStandardMaterial({ color: 0x2f5a28, roughness: 0.97 });
+const treeMeshes = [];
+for (let i = 0; i < 28; i++) {
+  const g = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.18, 1.4, 5), trunkMat);
+  trunk.position.y = 0.7;
+  const top = new THREE.Mesh(new THREE.ConeGeometry(0.85, 2.2, 6), leafMat.clone());
+  top.position.y = 2.2;
+  g.add(trunk, top);
+  const a = (i / 28) * Math.PI * 2;
+  const r = 5.5 + (i % 5) * 1.1;
+  g.position.set(Math.cos(a) * r, 0, Math.sin(a) * r * 0.7 - 2);
+  g.scale.setScalar(0.7 + (i % 4) * 0.18);
+  trees.add(g);
+  treeMeshes.push({ g, top, phase: i * 0.7 });
+}
+
+// water puddle
+const puddle = new THREE.Mesh(
+  new THREE.CircleGeometry(1.1, 24),
+  new THREE.MeshStandardMaterial({
+    color: 0x6fa3b8, roughness: 0.22, metalness: 0.15,
+    transparent: true, opacity: 0.85,
+  }),
+);
+puddle.rotation.x = -Math.PI / 2;
+puddle.position.set(2.2, 0.04, 1.4);
+scene.add(puddle);
+const foam = new THREE.Mesh(
+  new THREE.RingGeometry(1.05, 1.25, 28),
+  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, side: THREE.DoubleSide }),
+);
+foam.rotation.x = -Math.PI / 2;
+foam.position.set(2.2, 0.05, 1.4);
+scene.add(foam);
+
+// rider + bike proxy (capsule stylized)
+const rider = new THREE.Group();
+scene.add(rider);
+const mats = {
+  jersey: new THREE.MeshStandardMaterial({ color: 0xff3b30, roughness: 0.92 }),
+  pants: new THREE.MeshStandardMaterial({ color: 0x18181b, roughness: 0.86 }),
+  helmet: new THREE.MeshStandardMaterial({ color: 0xfff0d0, roughness: 0.35, metalness: 0.12 }),
+  frame: new THREE.MeshStandardMaterial({ color: 0x2fe6c8, roughness: 0.45, metalness: 0.78 }),
+  tyre: new THREE.MeshStandardMaterial({ color: 0x16161a, roughness: 0.96 }),
+  skin: new THREE.MeshStandardMaterial({ color: 0xd8a172, roughness: 0.74 }),
+};
+function bone(r, len, m) {
+  const mesh = new THREE.Mesh(new THREE.CapsuleGeometry(r, Math.max(0.01, len - 2 * r * 0.85), 3, 6), m);
+  mesh.position.y = len * 0.5;
+  return mesh;
+}
+const bike = new THREE.Group();
+rider.add(bike);
+// frame tubes-ish
+const dt = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.9, 6), mats.frame);
+dt.rotation.z = 1.1; dt.position.set(0, 0.45, 0.05); bike.add(dt);
+const tt = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.7, 6), mats.frame);
+tt.rotation.z = -0.35; tt.position.set(0, 0.72, -0.05); bike.add(tt);
+const wF = new THREE.Mesh(new THREE.TorusGeometry(0.32, 0.055, 8, 16), mats.tyre);
+wF.rotation.y = Math.PI / 2; wF.position.set(0, 0.32, 0.55); bike.add(wF);
+const wR = wF.clone(); wR.position.z = -0.55; bike.add(wR);
+// body
+const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.16, 0.28, 4, 8), mats.jersey);
+torso.position.set(0, 1.05, -0.05); torso.rotation.x = -0.55; torso.scale.set(1.4, 1, 1);
+rider.add(torso);
+const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.18, 12, 10), mats.helmet);
+helmet.position.set(0, 1.42, 0.12); helmet.scale.set(1.05, 0.95, 1.15);
+rider.add(helmet);
+const visor = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.08, 0.06), new THREE.MeshStandardMaterial({ color: 0x111114, roughness: 0.2, metalness: 0.4 }));
+visor.position.set(0, 1.4, 0.26); rider.add(visor);
+// limbs
+const armL = bone(0.05, 0.32, mats.jersey); armL.position.set(-0.22, 1.15, 0.05); armL.rotation.z = 0.9; armL.rotation.x = -0.8; rider.add(armL);
+const armR = bone(0.05, 0.32, mats.jersey); armR.position.set(0.22, 1.15, 0.05); armR.rotation.z = -0.9; armR.rotation.x = -0.8; rider.add(armR);
+const legL = bone(0.065, 0.42, mats.pants); legL.position.set(-0.1, 0.55, -0.12); legL.rotation.x = 0.35; rider.add(legL);
+const legR = bone(0.065, 0.42, mats.pants); legR.position.set(0.1, 0.55, -0.12); legR.rotation.x = -0.15; rider.add(legR);
+
+// dirt tint state
+let dirtAmt = 0;
+const dirtColor = new THREE.Color(0x6b5942);
+const cleanColors = {
+  jersey: new THREE.Color(0xff3b30),
+  pants: new THREE.Color(0x18181b),
+  frame: new THREE.Color(0x2fe6c8),
+  helmet: new THREE.Color(0xfff0d0),
+};
+
+// bonk ring
+const bonkRing = new THREE.Mesh(
+  new THREE.RingGeometry(0.2, 0.45, 32),
+  new THREE.MeshBasicMaterial({ color: 0xffd400, transparent: true, opacity: 0, side: THREE.DoubleSide }),
+);
+bonkRing.rotation.x = -Math.PI / 2;
+bonkRing.position.y = 0.9;
+rider.add(bonkRing);
+let bonkT = 0;
+
+// particles
+const N = 180;
+const pPos = new Float32Array(N * 3);
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+const pMat = new THREE.PointsMaterial({ color: 0xc4a882, size: 0.08, transparent: true, opacity: 0.7, depthWrite: false });
+const dust = new THREE.Points(pGeo, pMat);
+scene.add(dust);
+for (let i = 0; i < N; i++) {
+  pPos[i * 3] = (Math.random() - 0.5) * 8;
+  pPos[i * 3 + 1] = Math.random() * 2;
+  pPos[i * 3 + 2] = (Math.random() - 0.5) * 8;
+}
+
+// outline shell (activated later)
+let outline = null;
+function ensureOutline(on) {
+  if (on && !outline) {
+    outline = new THREE.Group();
+    rider.traverse(o => {
+      if (!(o).isMesh || o === bonkRing) return;
+      const m = o.clone();
+      m.material = new THREE.MeshBasicMaterial({ color: 0x0a0a0c, side: THREE.BackSide });
+      m.scale.multiplyScalar(1.08);
+      outline.add(m);
+    });
+    // simpler: one scaled body outline
+    const shell = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.55, 0.9, 4, 8),
+      new THREE.MeshBasicMaterial({ color: 0x0a0a0c, side: THREE.BackSide }),
+    );
+    shell.position.set(0, 0.95, 0);
+    shell.scale.set(1.15, 1.1, 1.2);
+    outline.clear();
+    outline.add(shell);
+    rider.add(outline);
+  }
+  if (outline) outline.visible = on;
+}
+
+function resize() {
+  const w = view.clientWidth, h = view.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / Math.max(1, h);
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+function setDirt(amount) {
+  dirtAmt = amount;
+  const mix = (c0, m) => m.color.copy(c0).lerp(dirtColor, amount * 0.75);
+  mix(cleanColors.jersey, mats.jersey);
+  mix(cleanColors.pants, mats.pants);
+  mix(cleanColors.frame, mats.frame);
+  mix(cleanColors.helmet, mats.helmet);
+  mats.jersey.roughness = 0.92 + amount * 0.05;
+  mats.frame.roughness = 0.45 + amount * 0.4;
+  mats.frame.metalness = 0.78 * (1 - amount * 0.5);
+}
+
+function applyStageVisuals(s) {
+  const p = s.percent / 100;
+  const has = (id) => s.items.find(i => i.id === id)?.status === 'done'
+    || s.items.find(i => i.id === id)?.status === 'wip';
+
+  // wind strength
+  window.__wind = has('wind') || p > 0.35 ? 1 : 0.15;
+  // dirt progressive
+  setDirt(has('materials') || has('worldmat') ? 0.15 + Math.sin(performance.now() * 0.0004) * 0.08 + p * 0.35 : 0.05);
+  // foam
+  foam.visible = has('water') || has('progress');
+  foam.material.opacity = has('water') ? 0.45 : 0.2;
+  // outline
+  ensureOutline(has('outline'));
+  // exposure / fog evolve
+  renderer.toneMappingExposure = 1.1 + p * 0.2;
+  scene.fog.density = 0.018 - p * 0.008;
+  // dust
+  pMat.opacity = 0.35 + p * 0.4;
+}
+
+function tick() {
+  const t = clock.getElapsedTime();
+  const dt = clock.getDelta();
+  const p = status.percent / 100;
+  const wind = window.__wind ?? 0.2;
+
+  // camera orbit
+  const r = 5.2 - p * 0.6;
+  const elev = 1.6 + Math.sin(t * 0.25) * 0.2;
+  camera.position.set(Math.sin(t * 0.22) * r, elev + 1.1, Math.cos(t * 0.22) * r + 0.5);
+  camera.lookAt(0, 0.9, 0);
+  camera.fov = 54 + p * 10 + Math.sin(t * 2) * 0.5;
+  camera.updateProjectionMatrix();
+
+  // vegetation sway
+  for (const tr of treeMeshes) {
+    tr.top.rotation.z = Math.sin(t * 1.8 + tr.phase) * 0.08 * wind;
+    tr.top.rotation.x = Math.cos(t * 1.3 + tr.phase) * 0.04 * wind;
+  }
+
+  // rider lean / attack
+  rider.rotation.z = Math.sin(t * 1.4) * 0.12;
+  rider.position.y = Math.abs(Math.sin(t * 6)) * 0.02;
+  wF.rotation.x = t * 8;
+  wR.rotation.x = t * 8;
+
+  // water shimmer
+  puddle.material.opacity = 0.75 + Math.sin(t * 2.2) * 0.08;
+  foam.scale.setScalar(1 + Math.sin(t * 3) * 0.03);
+
+  // dirt pulse when materials done
+  if (status.items.find(i => i.id === 'materials')?.status === 'done') {
+    setDirt(0.2 + (0.5 + 0.5 * Math.sin(t * 0.35)) * 0.55 * Math.max(0.2, p));
+  }
+
+  // bonk ring when bonkfx wip/done
+  const bf = status.items.find(i => i.id === 'bonkfx');
+  if (bf && bf.status !== 'todo') {
+    bonkT += dt;
+    if (bonkT > 2.4) bonkT = 0;
+    const k = bonkT / 0.55;
+    if (k < 1) {
+      bonkRing.scale.setScalar(0.4 + k * 3.5);
+      bonkRing.material.opacity = (1 - k) * 0.85;
+      bonkRing.material.color.set(k < 0.2 ? 0xffffff : 0xffd400);
+    } else {
+      bonkRing.material.opacity = 0;
+    }
+  }
+
+  // dust drift
+  for (let i = 0; i < N; i++) {
+    pPos[i * 3 + 2] += dt * (1.5 + p * 4);
+    pPos[i * 3 + 1] += Math.sin(t + i) * dt * 0.2;
+    if (pPos[i * 3 + 2] > 6) {
+      pPos[i * 3 + 2] = -6;
+      pPos[i * 3] = (Math.random() - 0.5) * 8;
+      pPos[i * 3 + 1] = Math.random() * 2.5;
+    }
+  }
+  pGeo.attributes.position.needsUpdate = true;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+// ---------------------------------------------------------------------------
+// UI + polling
+// ---------------------------------------------------------------------------
+const listEl = document.getElementById('list');
+const pctEl = document.getElementById('pct');
+const barEl = document.getElementById('bar');
+const logEl = document.getElementById('log');
+const stageEl = document.getElementById('stageLabel');
+
+function renderUI(s) {
+  pctEl.innerHTML = `${Math.round(s.percent)}%<small>complete</small>`;
+  barEl.style.width = `${s.percent}%`;
+  stageEl.textContent = `STAGE ${s.stage} · ${s.stageName.toUpperCase()}`;
+  listEl.innerHTML = s.items.map(it => `
+    <div class="item ${it.status}">
+      <div class="dot"></div>
+      <div>
+        <div class="title">${it.title}</div>
+        <div class="note">${it.note || ''}</div>
+      </div>
+      <div class="tag">${it.status}</div>
+    </div>
+  `).join('');
+  logEl.innerHTML = (s.log || []).slice(-12).map(l => `› <b>${l}</b>`).join('<br/>')
+    + `<br/><span style="opacity:.5">updated ${s.updated || ''}</span>`;
+  applyStageVisuals(s);
+}
+
+async function poll() {
+  try {
+    const res = await fetch('/progress-status.json?t=' + Date.now(), { cache: 'no-store' });
+    if (res.ok) {
+      status = await res.json();
+      renderUI(status);
+      return;
+    }
+  } catch (_) { /* keep fallback */ }
+  renderUI(status);
+}
+
+renderUI(status);
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>

@@ -35,8 +35,8 @@ export class BoostSystem {
 
   /** drain per second while boosting, before efficiency */
   static readonly DRAIN = 34;
-  /** minimum charge required to trigger */
-  static readonly MIN_TRIGGER = 2;
+  /** minimum charge required to trigger (matches HUD "SPACE!" threshold) */
+  static readonly MIN_TRIGGER = 12;
 
   reset() {
     this.charge = 0;

@@ -121,37 +121,87 @@ export function makeTapeTexture(colA = '#ffd400', colB = '#161616'): THREE.Textu
   return t;
 }
 
-/** Seamless ripple bands for flowing water. Scrolled via texture offset. */
+/**
+ * Seamless ripple bands for flowing water. Scrolled via texture offset.
+ * Stylized (not photoreal): clear bright crests over a cool teal base so
+ * puddles, rivers and falls read as liquid at a glance.
+ *
+ * Cached: all water surfaces share one canvas texture. Callers that need
+ * different tiling should clone() the texture (so offsets/repeat don't fight).
+ */
+let _rippleTex: THREE.Texture | null = null;
 export function makeRippleTexture(): THREE.Texture {
+  if (_rippleTex) {
+    // clone so independent offset/repeat (rivers vs puddles vs falls)
+    const c = _rippleTex.clone();
+    c.needsUpdate = true;
+    return c;
+  }
   const S = 128;
   const c = document.createElement('canvas'); c.width = c.height = S;
   const g = c.getContext('2d')!;
-  g.fillStyle = '#9fc8d8';
+  // cool mid-teal base — multiplies cleanly with water material colours
+  g.fillStyle = '#7eb6c9';
   g.fillRect(0, 0, S, S);
-  // horizontal crests, wrapped so the tile is seamless vertically
-  for (let i = 0; i < 26; i++) {
-    const y = (i / 26) * S;
-    const a = 0.10 + Math.abs(Math.sin(i * 1.7)) * 0.22;
-    g.strokeStyle = `rgba(255,255,255,${a})`;
-    g.lineWidth = 1 + Math.abs(Math.sin(i * 2.3)) * 2.5;
+  // soft depth blotches so the sheet isn't a flat wash
+  for (let i = 0; i < 10; i++) {
+    const x = (i * 37 + 19) % S, y = (i * 53 + 11) % S;
+    const r = 18 + (i % 4) * 8;
+    const grd = g.createRadialGradient(x, y, 0, x, y, r);
+    grd.addColorStop(0, 'rgba(40,90,110,0.18)');
+    grd.addColorStop(1, 'rgba(40,90,110,0)');
+    g.fillStyle = grd;
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  }
+  // primary crests — brighter so they hold up under scene fog and dirt tint
+  for (let i = 0; i < 28; i++) {
+    const y = (i / 28) * S;
+    const a = 0.16 + Math.abs(Math.sin(i * 1.7)) * 0.32;
+    g.strokeStyle = `rgba(245,252,255,${a})`;
+    g.lineWidth = 1.2 + Math.abs(Math.sin(i * 2.3)) * 2.8;
     g.beginPath();
     for (let x = 0; x <= S; x += 4) {
-      const yy = y + Math.sin((x / S) * Math.PI * 4 + i) * 2.5;
+      const yy = y + Math.sin((x / S) * Math.PI * 4 + i) * 2.8;
       x === 0 ? g.moveTo(x, yy) : g.lineTo(x, yy);
     }
     g.stroke();
   }
-  // darker troughs for depth
+  // secondary finer ripples, slight phase offset
+  for (let i = 0; i < 18; i++) {
+    const y = (i / 18) * S + 2.5;
+    g.strokeStyle = `rgba(200,235,245,${0.08 + Math.abs(Math.sin(i * 2.1)) * 0.14})`;
+    g.lineWidth = 0.8;
+    g.beginPath();
+    for (let x = 0; x <= S; x += 3) {
+      const yy = y + Math.sin((x / S) * Math.PI * 6 + i * 0.7) * 1.6;
+      x === 0 ? g.moveTo(x, yy) : g.lineTo(x, yy);
+    }
+    g.stroke();
+  }
+  // darker troughs for depth contrast
   for (let i = 0; i < 14; i++) {
     const y = (i / 14) * S + 3;
-    g.strokeStyle = 'rgba(30,70,90,0.16)';
-    g.lineWidth = 2;
+    g.strokeStyle = 'rgba(20,55,75,0.20)';
+    g.lineWidth = 2.2;
     g.beginPath(); g.moveTo(0, y); g.lineTo(S, y); g.stroke();
+  }
+  // soft foam flecks along a few bands
+  for (let i = 0; i < 40; i++) {
+    const x = (i * 29 + 7) % S;
+    const y = ((i * 17 + 3) % 28) / 28 * S;
+    g.fillStyle = `rgba(255,255,255,${0.10 + (i % 5) * 0.04})`;
+    g.beginPath();
+    g.ellipse(x, y, 2 + (i % 3), 1.1, 0, 0, Math.PI * 2);
+    g.fill();
   }
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  return t;
+  _rippleTex = t;
+  // first caller also gets a clone so dispose() on waterMaps never kills the cache
+  const out = t.clone();
+  out.needsUpdate = true;
+  return out;
 }
 
 /** Grass tuft alpha: a few tapered blades on a transparent field. */
@@ -213,6 +263,54 @@ export function makeBannerTexture(text: string, bg: string, fg: string): THREE.T
   g.fillText(text, 0, 0);
   g.restore();
   g.strokeStyle = 'rgba(0,0,0,0.35)'; g.lineWidth = 8; g.strokeRect(0, 0, W, H);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+/**
+ * Section landmark board: big name + small subtitle. Each track stretch
+ * gets one so the player can read the mountain by landmarks at speed.
+ */
+export function makeSectionBannerTexture(
+  name: string, sub: string, bg: string, fg: string, accent: string,
+): THREE.Texture {
+  const W = 768, H = 192;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d')!;
+  // solid field
+  g.fillStyle = bg; g.fillRect(0, 0, W, H);
+  // diagonal stripe panel (arcade sports poster)
+  g.fillStyle = 'rgba(255,255,255,0.06)';
+  for (let i = -2; i < 18; i++) {
+    g.save();
+    g.translate(i * 52, 0);
+    g.transform(1, 0, -0.35, 1, 0, 0);
+    g.fillRect(0, 0, 22, H);
+    g.restore();
+  }
+  // accent bar top + bottom
+  g.fillStyle = accent;
+  g.fillRect(0, 0, W, 10);
+  g.fillRect(0, H - 10, W, 10);
+  // name
+  g.fillStyle = fg;
+  g.font = 'bold 78px Impact, "Arial Black", sans-serif';
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.save();
+  g.translate(W / 2, H * 0.42);
+  g.transform(1, 0, -0.12, 1, 0, 0);
+  // black outline for speed readability
+  g.lineWidth = 10; g.strokeStyle = 'rgba(0,0,0,0.75)';
+  g.strokeText(name, 0, 0);
+  g.fillText(name, 0, 0);
+  g.restore();
+  // subtitle
+  g.fillStyle = accent;
+  g.font = 'bold 32px Impact, "Arial Black", sans-serif';
+  g.fillText(sub.toUpperCase(), W / 2, H * 0.78);
+  // frame
+  g.strokeStyle = 'rgba(0,0,0,0.45)'; g.lineWidth = 10; g.strokeRect(0, 0, W, H);
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   return t;

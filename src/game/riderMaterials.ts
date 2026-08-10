@@ -336,10 +336,20 @@ interface DirtUniforms {
 export function makeDirty(
   m: THREE.Material, shared: DirtUniforms, exposure = 1,
 ) {
-  m.onBeforeCompile = (shader) => {
+  if ((m as any).userData?.dirtAttached) return;
+  (m as any).userData = { ...(m as any).userData, dirtAttached: true };
+
+  // Chain so wind (or any prior injection) is not clobbered if both attach.
+  const prevCompile = m.onBeforeCompile;
+  const prevKey = m.customProgramCacheKey.bind(m);
+
+  m.onBeforeCompile = (shader, renderer) => {
+    prevCompile.call(m, shader, renderer);
     shader.uniforms.uDirt = shared.uDirt;
     shader.uniforms.uDirtColor = shared.uDirtColor;
     shader.uniforms.uDirtExposure = { value: exposure };
+    // Guard against double-injection if three recompiles the same material.
+    if (shader.vertexShader.includes('vDirtNormal')) return;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         varying vec3 vDirtNormal;`)
@@ -362,14 +372,12 @@ export function makeDirty(
         roughnessFactor = mix(roughnessFactor, 0.95,
           clamp(uDirt * uDirtExposure * 0.8, 0.0, 0.85));`);
   };
-  // Cache key must be UNIQUE per material, not a constant. Three appends
-  // this to the program key, so returning the same string everywhere lets
-  // materials that should compile separately collide onto one program.
-  const id = `dirt${++dirtSeq}`;
-  m.customProgramCacheKey = () => id;
+  // Same GLSL injection for every dirty material → shared program key.
+  // Per-material uniforms (exposure) live on materialProperties.uniforms, not
+  // the program cache. Three already keys on maps/defines separately.
+  m.customProgramCacheKey = () => `${prevKey()}|dirt`;
   m.needsUpdate = true;
 }
-let dirtSeq = 0;
 
 /** Create a dirt controller and wire every material under `root` to it. */
 export function attachDirt(root: THREE.Object3D): DirtHandle {
@@ -401,6 +409,65 @@ export function attachDirt(root: THREE.Object3D): DirtHandle {
 }
 
 // ---------------------------------------------------------------------------
+// FOLIAGE WIND
+//
+// Cheap vertex sway for instanced canopies / grass. Shared uTime + uWind are
+// written once per frame from Track.animateWind — no per-instance matrix
+// updates. Displacement is stronger at the top of the mesh (local Y) so
+// trunks and roots stay planted.
+// ---------------------------------------------------------------------------
+
+export interface WindUniforms {
+  uTime: { value: number };
+  uWind: { value: number };
+}
+
+/** Inject procedural wind into a material. Idempotent for the same mat. */
+export function attachWind(m: THREE.Material, shared: WindUniforms) {
+  if ((m as any).userData?.windAttached) return;
+  (m as any).userData = { ...(m as any).userData, windAttached: true };
+
+  // Chain so dirt (or any prior injection) is not clobbered if both attach.
+  const prevCompile = m.onBeforeCompile;
+  const prevKey = m.customProgramCacheKey.bind(m);
+
+  m.onBeforeCompile = (shader, renderer) => {
+    prevCompile.call(m, shader, renderer);
+    shader.uniforms.uTime = shared.uTime;
+    shader.uniforms.uWind = shared.uWind;
+    if (shader.vertexShader.includes('uniform float uWind')) return;
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        uniform float uTime;
+        uniform float uWind;`,
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        {
+          // world-ish position for phase variety across the forest
+          #ifdef USE_INSTANCING
+            vec3 wPos = (instanceMatrix * vec4(transformed, 1.0)).xyz;
+          #else
+            vec3 wPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+          #endif
+          // height falloff: base stays put, crown / tips lean
+          float h = max(transformed.y, 0.0);
+          float amp = uWind * h * 0.055;
+          float ph = uTime * 1.35 + wPos.x * 0.18 + wPos.z * 0.14;
+          transformed.x += sin(ph) * amp;
+          transformed.z += cos(ph * 0.81 + 1.7) * amp * 0.65;
+        }`,
+      );
+  };
+  // same injection → same program key; three still keys on maps/defines
+  m.customProgramCacheKey = () => `${prevKey()}|wind`;
+  m.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------------------
 // WORLD MATERIALS
 //
 // ART CONSISTENCY: the rider and bike use MeshStandardMaterial, which has a
@@ -413,16 +480,140 @@ export function attachDirt(root: THREE.Object3D): DirtHandle {
 // as RIDER_MAT so everything belongs to one lighting model. Roughness values
 // are deliberately HIGH — the world should be matte so the rider and bike
 // remain the most visually active things on screen.
+//
+// rock / wood / ground carry procedural roughness maps (same approach as
+// RIDER_MAT) so they aren't flat plastic-adjacent slabs. Variation stays
+// subtle and overall roughness stays high.
 // ---------------------------------------------------------------------------
+
+/**
+ * WOOD. Long grain with slightly smoother sap lines and a few knots —
+ * enough to read as timber without competing with the rider's specular.
+ */
+export const woodRough = () => build('wood', 128, (g, S) => {
+  const rng = new RNG(5510);
+  g.fillStyle = '#c6c6c6';
+  g.fillRect(0, 0, S, S);
+  // vertical grain streaks
+  for (let i = 0; i < 52; i++) {
+    const x = rng.range(0, S);
+    const light = rng.chance(0.55);
+    g.strokeStyle = light
+      ? `rgba(230,230,230,${rng.range(0.10, 0.28)})`
+      : `rgba(80,80,80,${rng.range(0.12, 0.32)})`;
+    g.lineWidth = rng.range(0.7, 2.8);
+    g.beginPath();
+    g.moveTo(x, 0);
+    for (let y = 0; y <= S; y += 6) {
+      g.lineTo(x + Math.sin(y * 0.08 + i * 1.3) * rng.range(1.2, 3.2), y);
+    }
+    g.stroke();
+  }
+  // knots: smoother dark cores with a rough halo
+  for (let i = 0; i < 7; i++) {
+    const x = rng.range(8, S - 8), y = rng.range(8, S - 8);
+    const r = rng.range(5, 14);
+    const grd = g.createRadialGradient(x, y, 0, x, y, r);
+    grd.addColorStop(0, 'rgba(70,70,70,0.55)');
+    grd.addColorStop(0.55, 'rgba(150,150,150,0.25)');
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grd;
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  }
+  // fine pore noise
+  for (let i = 0; i < 280; i++) {
+    g.fillStyle = `rgba(255,255,255,${rng.range(0.04, 0.12)})`;
+    g.fillRect(rng.range(0, S), rng.range(0, S), 1, 1);
+  }
+});
+
+/**
+ * ROCK. Craggy mottling, fracture lines, and pitting — matte stone with
+ * just enough micro-variation that boulders don't read as painted foam.
+ */
+export const rockRough = () => build('rock', 128, (g, S) => {
+  const rng = new RNG(7744);
+  g.fillStyle = '#b8b8b8';
+  g.fillRect(0, 0, S, S);
+  // broad mineral patches
+  for (let i = 0; i < 36; i++) {
+    const x = rng.range(0, S), y = rng.range(0, S), r = rng.range(10, 38);
+    const v = rng.chance(0.5) ? 210 : 95;
+    const grd = g.createRadialGradient(x, y, 0, x, y, r);
+    grd.addColorStop(0, `rgba(${v},${v},${v},${rng.range(0.12, 0.30)})`);
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grd;
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  }
+  // fracture lines (slightly smoother seams)
+  g.lineCap = 'round';
+  for (let i = 0; i < 22; i++) {
+    const x = rng.range(0, S), y = rng.range(0, S);
+    const a = rng.range(0, Math.PI * 2);
+    const len = rng.range(12, 48);
+    g.strokeStyle = `rgba(70,70,70,${rng.range(0.18, 0.40)})`;
+    g.lineWidth = rng.range(0.8, 2.2);
+    g.beginPath();
+    g.moveTo(x, y);
+    g.lineTo(x + Math.cos(a) * len, y + Math.sin(a) * len);
+    g.stroke();
+  }
+  // pitting
+  for (let i = 0; i < 90; i++) {
+    const x = rng.range(0, S), y = rng.range(0, S);
+    g.fillStyle = `rgba(50,50,50,${rng.range(0.15, 0.4)})`;
+    g.beginPath();
+    g.ellipse(x, y, rng.range(1, 3.5), rng.range(1, 2.5), rng.range(0, 3), 0, Math.PI * 2);
+    g.fill();
+  }
+});
+
+/**
+ * GROUND. Dirt grit and soft mud patches — high-roughness trail surface
+ * with granular flecks so mud and gravel don't look like rubber.
+ */
+export const groundRough = () => build('ground', 128, (g, S) => {
+  const rng = new RNG(3399);
+  g.fillStyle = '#d4d4d4';
+  g.fillRect(0, 0, S, S);
+  // soft mud / packed-dirt patches (a touch smoother)
+  for (let i = 0; i < 18; i++) {
+    const x = rng.range(0, S), y = rng.range(0, S), r = rng.range(12, 40);
+    const grd = g.createRadialGradient(x, y, 0, x, y, r);
+    grd.addColorStop(0, `rgba(100,100,100,${rng.range(0.10, 0.22)})`);
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grd;
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  }
+  // gravel flecks
+  for (let i = 0; i < 700; i++) {
+    const v = rng.chance(0.55) ? 245 : 90;
+    g.fillStyle = `rgba(${v},${v},${v},${rng.range(0.06, 0.18)})`;
+    g.fillRect(rng.range(0, S), rng.range(0, S), rng.range(1, 2.5), rng.range(1, 2.5));
+  }
+  // coarser clumps
+  for (let i = 0; i < 40; i++) {
+    g.fillStyle = `rgba(200,200,200,${rng.range(0.08, 0.2)})`;
+    g.beginPath();
+    g.ellipse(
+      rng.range(0, S), rng.range(0, S),
+      rng.range(2, 6), rng.range(1.5, 4),
+      rng.range(0, 3), 0, Math.PI * 2,
+    );
+    g.fill();
+  }
+});
 
 export const WORLD_MAT = {
   /** bark, planks, bridge timber */
   wood: (color: number) => new THREE.MeshStandardMaterial({
     color, roughness: 0.92, metalness: 0.0,
+    roughnessMap: woodRough(),
   }),
   /** stone, cliffs, boulders */
   rock: (color: number) => new THREE.MeshStandardMaterial({
     color, roughness: 0.88, metalness: 0.02,
+    roughnessMap: rockRough(),
   }),
   /** foliage: fully matte so canopies read as mass, not surface */
   leaf: (color: number) => new THREE.MeshStandardMaterial({
@@ -439,6 +630,7 @@ export const WORLD_MAT = {
   /** dirt, mud, gravel — the trail surface itself */
   ground: (color: number) => new THREE.MeshStandardMaterial({
     color, roughness: 0.95, metalness: 0.0,
+    roughnessMap: groundRough(),
   }),
   /** cloth: spectator clothing, banners */
   fabric: (color: number) => new THREE.MeshStandardMaterial({

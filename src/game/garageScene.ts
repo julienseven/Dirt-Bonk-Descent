@@ -4,12 +4,15 @@
 // like a product shot, with scrubbable animation previews.
 // ---------------------------------------------------------------------------
 import * as THREE from 'three';
-import { createRider, getBuild, type RiderRig } from './models';
+import {
+  createRider, getBuild, solveRiderIK, applyRiderStance, type RiderRig,
+  CHEST_ATTACK, BB_POS, SHOCK_UPPER, SHOCK_LOWER, SHOCK_BASE_LEN, FORK_AXIS,
+} from './models';
 import { type Loadout, getBike, loadoutColors, RIDER_BUILD_OF } from './garage';
 import { clamp, clamp01, damp, TAU } from './core';
-import {
-  BB_POS, SHOCK_UPPER, SHOCK_LOWER, SHOCK_BASE_LEN, FORK_AXIS,
-} from './models';
+
+/** Chest pitch on top of pelvis/spine attack lean (models.ts). */
+const ATTACK_PITCH = CHEST_ATTACK;
 
 export type PreviewAnim =
   | 'idle' | 'pedal' | 'attack' | 'bonk' | 'whip' | 'flip' | 'superbonk' | 'land';
@@ -33,20 +36,22 @@ export class GarageScene {
   private rig: RiderRig | null = null;
   private raf = 0;
   private t = 0;
-  private spin = 0;
-  private spinVel = 0.35;
+  /** Start in 3/4 view so fork, bars, and rear triangle all read on open. */
+  private spin = 0.72;
+  private spinVel = 0.28;
   private dragging = false;
   private lastX = 0;
   private lastMoveT = 0;
   private host: HTMLElement;
   private anim: PreviewAnim = 'idle';
   private animT = 0;
-  private crank = 0;
+  private crank = Math.PI * 0.5; // level pedals at rest
   private susp = 0;
   private suspV = 0;
-  private camDist = 4.3;
-  private camHeight = 1.55;
-  private targetDist = 4.3;
+  // Framed on full bike + rider silhouette (wheels on plinth → helmet).
+  private camDist = 4.6;
+  private camHeight = 1.35;
+  private targetDist = 4.6;
   private ro: ResizeObserver | null = null;
   reducedMotion = false;
 
@@ -58,8 +63,10 @@ export class GarageScene {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(w, h);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.15;
+    // Match race scene: Cineon holds arcade colour; ACES desaturates toward
+    // photoreal product shots and made the garage feel like a different game.
+    this.renderer.toneMapping = THREE.CineonToneMapping;
+    this.renderer.toneMappingExposure = 1.24;
     this.renderer.domElement.style.cssText = 'display:block;width:100%;height:100%;touch-action:none;cursor:grab';
     host.appendChild(this.renderer.domElement);
 
@@ -81,20 +88,25 @@ export class GarageScene {
 
   // -- studio -------------------------------------------------------------
   private buildStudio() {
-    // soft key + rim lights, no shadows: clean product-shot look
-    this.scene.add(new THREE.HemisphereLight(0xbfd8ff, 0x241c14, 1.0));
-    const key = new THREE.DirectionalLight(0xfff2d8, 2.1);
-    key.position.set(3.2, 5.0, 3.4);
+    // Golden-hour key + cool sky hemi — same temperature as the race
+    // Cineon setup so garage and track share one material response.
+    this.scene.add(new THREE.HemisphereLight(0xa8ccff, 0x8a6438, 1.05));
+    const key = new THREE.DirectionalLight(0xffd9a0, 2.4);
+    key.position.set(2.8, 4.2, 3.0); // low warm raking, ~golden hour
     this.scene.add(key);
-    const rimA = new THREE.DirectionalLight(0x2fe6c8, 1.5);
+    const rimA = new THREE.DirectionalLight(0x9ec4ff, 1.15);
     rimA.position.set(-4.5, 1.6, -2.4);
     this.scene.add(rimA);
-    const rimB = new THREE.DirectionalLight(0xff2e88, 1.25);
+    const rimB = new THREE.DirectionalLight(0xff2e88, 0.95);
     rimB.position.set(3.6, 0.9, -3.8);
     this.scene.add(rimB);
-    const fill = new THREE.DirectionalLight(0x9fd0ff, 0.5);
+    const fill = new THREE.DirectionalLight(0xfff0dc, 0.55);
     fill.position.set(-1.5, 2.2, 4.2);
     this.scene.add(fill);
+    // warm dirt bounce so undersides match race lighting
+    const bounce = new THREE.DirectionalLight(0xffb878, 0.38);
+    bounce.position.set(0.2, -1, 0.1);
+    this.scene.add(bounce);
 
     // plinth
     const plinth = new THREE.Mesh(
@@ -165,27 +177,30 @@ export class GarageScene {
   setLoadout(l: Loadout) {
     if (this.rig) {
       this.turntable.remove(this.rig.root);
+      // Geometry only — RIDER_MAT materials share cached maps; disposing them
+      // would untexture every subsequent preview (same rule as race applyLoadout).
       this.rig.root.traverse(o => {
         const m = o as THREE.Mesh;
         if (m.geometry) m.geometry.dispose();
-        const mat = m.material as THREE.Material | THREE.Material[] | undefined;
-        if (Array.isArray(mat)) mat.forEach(x => x.dispose());
-        else mat?.dispose();
       });
       this.rig = null;
     }
     const rig = createRider(loadoutColors(l), getBuild(RIDER_BUILD_OF[l.rider] ?? 'allround'));
     const bike = getBike(l.bike);
-    // Wheels only. Scaling rig.bike would move the cranks and bars away
-    // from the rider's feet and hands — the preview must match the race.
-    rig.frontWheel.scale.setScalar(bike.wheelScale);
-    rig.rearWheel.scale.setScalar(bike.wheelScale);
+    // Match race: clamp wheel scale so tyres stay planted on the plinth and
+    // inside the fork. Scaling rig.bike would desync grips/pedals from the rider.
+    const ws = clamp(bike.wheelScale, 0.96, 1.06);
+    rig.frontWheel.scale.setScalar(ws);
+    rig.rearWheel.scale.setScalar(ws);
     rig.shadow.visible = false;
     rig.contactF.visible = false;
     rig.contactR.visible = false;
-    rig.root.position.y = 0.02;
+    // Plant contact at y=0: root sits so both tyres kiss the plinth.
+    rig.root.position.y = 0;
     this.turntable.add(rig.root);
     this.rig = rig;
+    // Level pedals immediately for this preview
+    this.crank = Math.PI * 0.5;
   }
 
   setAnim(a: PreviewAnim) {
@@ -249,9 +264,6 @@ export class GarageScene {
     rig.spin.rotation.set(0, 0, 0);
     rig.flip.rotation.set(0, 0, 0);
     rig.fork.rotation.y = 0;
-    rig.torso.rotation.set(0, 0, 0);
-    rig.armL.rotation.set(0, 0, 0);
-    rig.armR.rotation.set(0, 0, 0);
     rig.rider.position.set(0, 0, 0);
     rig.head.rotation.set(0, 0, 0);
 
@@ -267,15 +279,8 @@ export class GarageScene {
     // --- drivetrain
     const pedalling = A === 'pedal' ? 1 : 0;
     if (pedalling) this.crank += 7.2 * dt;
-    else this.crank = damp(this.crank, Math.round(this.crank / Math.PI) * Math.PI, 7, dt);
+    else this.crank = damp(this.crank, Math.round((this.crank - Math.PI * 0.5) / Math.PI) * Math.PI + Math.PI * 0.5, 7, dt);
     rig.cranks.rotation.x = this.crank;
-
-    const phL = this.crank + Math.PI, phR = this.crank;
-    const absorb = -this.susp * 0.55;
-    rig.legL.rotation.x = Math.cos(phL) * 0.30 * pedalling + absorb;
-    rig.legR.rotation.x = Math.cos(phR) * 0.30 * pedalling + absorb;
-    rig.shinL.rotation.x = -(Math.cos(phL - 1.2) * 0.5 + 0.5) * 0.55 * pedalling - absorb * 0.8;
-    rig.shinR.rotation.x = -(Math.cos(phR - 1.2) * 0.5 + 0.5) * 0.55 * pedalling - absorb * 0.8;
 
     // --- suspension visuals
     const comp = -this.susp;
@@ -292,13 +297,20 @@ export class GarageScene {
 
     rig.body.position.y = this.susp * 0.35;
 
-    // --- per-preview posing
+    // --- per-preview posing via skeletal stance + anchored IK
     const breathe = Math.sin(this.t * 1.7) * 0.02;
+    let bonkArm = 0;
+    let superM = 0;
+    let absorb = clamp(-this.susp * 1.4, 0, 0.65);
+    let weight = 0;
+    let chestPitch = ATTACK_PITCH;
+    let chestYaw = 0;
+    let leanAmt = 0;
     switch (A) {
       case 'idle': {
         rig.body.rotation.x = breathe;
         rig.head.rotation.y = Math.sin(this.t * 0.55) * 0.34;
-        rig.torso.rotation.y = Math.sin(this.t * 0.5) * 0.06;
+        chestYaw = Math.sin(this.t * 0.5) * 0.06;
         const roll = this.t * 0.9;
         rig.frontWheel.rotation.x = roll;
         rig.rearWheel.rotation.x = roll;
@@ -308,30 +320,33 @@ export class GarageScene {
         const roll = this.t * 7;
         rig.frontWheel.rotation.x = roll;
         rig.rearWheel.rotation.x = roll;
-        rig.lean.rotation.z = Math.sin(this.crank) * 0.07;
-        rig.torso.rotation.x = 0.10;
+        leanAmt = Math.sin(this.crank) * 0.07;
+        rig.lean.rotation.z = leanAmt;
+        chestPitch = ATTACK_PITCH + 0.05;
+        weight = 0.45;
         rig.head.rotation.x = -0.08;
         break;
       }
       case 'attack': {
-        // weight back, elbows out, eyes up — the downhill stance
-        rig.rider.position.z = -0.18;
-        rig.rider.position.y = -0.05;
-        rig.torso.rotation.x = 0.26;
-        rig.armL.rotation.z = 0.20;
-        rig.armR.rotation.z = -0.20;
-        rig.head.rotation.x = -0.20;
+        // tuck deeper over the bars
+        chestPitch = ATTACK_PITCH + 0.10;
+        weight = 0.55;
+        absorb = Math.max(absorb, 0.25);
+        rig.head.rotation.x = -0.12;
         rig.head.rotation.y = Math.sin(this.t * 0.8) * 0.18;
         const roll = this.t * 11;
         rig.frontWheel.rotation.x = roll;
         rig.rearWheel.rotation.x = roll;
-        rig.lean.rotation.z = Math.sin(this.t * 1.4) * 0.10;
+        leanAmt = Math.sin(this.t * 1.4) * 0.10;
+        rig.lean.rotation.z = leanAmt;
         break;
       }
       case 'land': {
         const k = clamp01(T / 1.6);
-        rig.torso.rotation.x = 0.30 * (1 - k);
-        rig.rider.position.y = this.susp * 0.3;
+        // compress: more fold on impact, recover to attack
+        chestPitch = ATTACK_PITCH + 0.12 * (1 - k);
+        weight = -0.35 * (1 - k);
+        absorb = Math.max(absorb, 0.45 * (1 - k));
         rig.head.rotation.x = -0.12;
         const roll = this.t * 9;
         rig.frontWheel.rotation.x = roll;
@@ -342,10 +357,10 @@ export class GarageScene {
         const cyc = T % 1.5;
         const k = clamp01(cyc / 0.42);
         const swingAmt = Math.sin(k * Math.PI) * 1.55;
-        rig.armR.rotation.z = -swingAmt;
-        rig.armR.rotation.y = swingAmt * 0.6;
-        rig.torso.rotation.y = swingAmt * 0.32;
-        rig.lean.rotation.z = -swingAmt * 0.16;
+        bonkArm = 1;
+        chestYaw = swingAmt * 0.32;
+        leanAmt = -swingAmt * 0.16;
+        rig.lean.rotation.z = leanAmt;
         rig.head.rotation.y = -swingAmt * 0.4;
         const roll = this.t * 8;
         rig.frontWheel.rotation.x = roll;
@@ -356,7 +371,8 @@ export class GarageScene {
         const cyc = (T % 2.4) / 2.4;
         const e = Math.sin(cyc * Math.PI);
         rig.spin.rotation.y = e * TAU;
-        rig.lean.rotation.z = -e * 0.55;
+        leanAmt = -e * 0.55;
+        rig.lean.rotation.z = leanAmt;
         rig.body.rotation.x = -0.12 - e * 0.1;
         rig.body.position.y += 0.35 * Math.sin(cyc * Math.PI);
         rig.head.rotation.y = e * 0.6;
@@ -366,24 +382,50 @@ export class GarageScene {
         const cyc = (T % 2.6) / 2.6;
         rig.flip.rotation.x = -cyc * TAU;
         rig.body.position.y += 0.55 * Math.sin(cyc * Math.PI);
-        rig.torso.rotation.x = 0.2;
+        chestPitch = ATTACK_PITCH + 0.12;
+        absorb = Math.max(absorb, 0.2);
         break;
       }
       case 'superbonk': {
         const cyc = (T % 2.8) / 2.8;
         const ext = Math.sin(clamp01((cyc - 0.12) / 0.5) * Math.PI);
+        superM = ext;
         rig.body.position.y += 0.5 * Math.sin(cyc * Math.PI);
-        rig.rider.position.z = -ext * 0.62;
-        rig.rider.position.y = ext * 0.26;
-        rig.legL.rotation.x = ext * 1.35;
-        rig.legR.rotation.x = ext * 1.35;
-        rig.shinL.rotation.x = -ext * 0.2;
-        rig.shinR.rotation.x = -ext * 0.2;
-        rig.torso.rotation.x = ext * 0.5;
+        // flatten out of attack as the body extends behind the bike
+        chestPitch = ATTACK_PITCH - ext * 0.22;
         rig.head.rotation.x = -ext * 0.3;
         rig.body.rotation.x = -0.16;
         break;
       }
+    }
+
+    applyRiderStance(rig, {
+      chestPitch,
+      chestYaw,
+      weight,
+      absorb,
+      superman: superM,
+      lean: leanAmt,
+    });
+    solveRiderIK(rig, {
+      bonkArm: bonkArm || undefined,
+      superman: superM,
+      lockLegs: superM > 0.85,
+      absorb,
+      lean: leanAmt,
+    });
+    if (bonkArm !== 0) {
+      const cyc = T % 1.5;
+      const k = clamp01(cyc / 0.42);
+      const swingAmt = Math.sin(k * Math.PI) * 1.55;
+      rig.armR.rotation.set(-0.2, swingAmt * 0.6, -swingAmt);
+      rig.foreR.rotation.set(0, 0, 0);
+    }
+    if (superM > 0.85) {
+      rig.legL.rotation.set(superM * 1.2, 0, 0);
+      rig.legR.rotation.set(superM * 1.2, 0, 0);
+      rig.shinL.rotation.set(-superM * 0.15, 0, 0);
+      rig.shinR.rotation.set(-superM * 0.15, 0, 0);
     }
   }
 
@@ -404,8 +446,9 @@ export class GarageScene {
 
     this.camDist = damp(this.camDist, this.targetDist, 6, dt);
     const bob = this.reducedMotion ? 0 : Math.sin(this.t * 0.4) * 0.06;
+    // Aim mid-rider (hips/chest) so helmet, bars, and both wheels stay in frame.
     this.camera.position.set(0, this.camHeight + bob, this.camDist);
-    this.camera.lookAt(0, 0.78, 0);
+    this.camera.lookAt(0, 0.72, 0.05);
 
     this.renderer.render(this.scene, this.camera);
   };

@@ -4,8 +4,8 @@
 import * as THREE from 'three';
 import { RNG, clamp, clamp01, fbm1, fbm2, lerp, smoothstep, TAU } from './core';
 import {
-  makeDirtTexture, makeTapeTexture, makeBannerTexture, makeCheckerTexture,
-  makeTuftTexture, makeRippleTexture,
+  makeDirtTexture, makeTapeTexture, makeBannerTexture, makeSectionBannerTexture,
+  makeCheckerTexture, makeTuftTexture, makeRippleTexture,
 } from './fx';
 import {
   pineFoliageGeo, pineTrunkGeo, pineTrunkVariant, broadleafGeo, rockGeo, bushGeo,
@@ -14,7 +14,7 @@ import {
   fenceGeo, signGeo, barrierGeo, rampGeo, driftGeo, tuftGeo,
 } from './models';
 import { PROPS, THEME_PROPS, type PropKind } from './env';
-import { WORLD_MAT } from './riderMaterials';
+import { WORLD_MAT, attachWind, groundRough, type WindUniforms } from './riderMaterials';
 
 export const TRACK_LENGTH = 4600;
 const STEP = 3;
@@ -84,7 +84,10 @@ export interface Obstacle {
   roll?: number;
   vx: number; vy: number; vs: number; spin: number;
   ox: number; oy: number; os: number; rot: number;
+  /** stable unique id (collision debounce, diagnostics) */
   idx: number;
+  /** instance slot within this type's InstancedMesh (and matching foam mesh) */
+  meshIdx: number;
 }
 
 export interface Spectator {
@@ -164,6 +167,11 @@ export class Track {
   shortcuts: Shortcut[] = [];
   /** scrolling water textures, advanced by animateWater() */
   waterMaps: THREE.Texture[] = [];
+  /** shared wind uniforms for foliage materials (shader injection) */
+  private windU: WindUniforms = {
+    uTime: { value: 0 },
+    uWind: { value: 0.4 },
+  };
 
   group = new THREE.Group();
   private specMeshes: THREE.InstancedMesh[] = [];
@@ -708,14 +716,16 @@ export class Track {
             x, r, type, mass: def.mass, hit: 0,
             vx: 0, vy: 0, vs: 0, spin: 0, ox: 0, oy: 0, os: 0,
             rot: type === 'fence' || type === 'sign' ? 0 : rng.range(0, TAU),
-            idx: 0,
+            idx: 0, meshIdx: 0,
           });
         }
       }
       s += rng.range(26, 62);
     }
     this.obstacles.sort((a, b) => a.s - b.s);
-    this.obstacles.forEach((o, i) => (o.idx = i));
+    // idx stays unique across the whole course (collision debounce uses it).
+    // meshIdx is assigned later per type when the instanced meshes are built.
+    this.obstacles.forEach((o, i) => { o.idx = i; o.meshIdx = 0; });
   }
 
   private placeSpectators() {
@@ -817,6 +827,15 @@ export class Track {
     }
   }
 
+  /**
+   * Drive foliage wind uniforms. `windStrength` ~0.3 ambient, ~1.5–2 at
+   * full speed/boost. One write for every canopy / grass material.
+   */
+  animateWind(t: number, windStrength: number) {
+    this.windU.uTime.value = t;
+    this.windU.uWind.value = windStrength;
+  }
+
   /** Index of the first obstacle at or beyond `s` (list is sorted by s). */
   firstObstacleAfter(s: number): number {
     const list = this.obstacles;
@@ -831,6 +850,7 @@ export class Track {
     this.buildSurface();
     this.buildTape();
     this.buildGantries();
+    this.buildSectionMarkers();
     this.buildScenery();
     this.buildPropMeshes();
     this.buildSpectatorMeshes();
@@ -859,9 +879,11 @@ export class Track {
     const tex = makeDirtTexture();
     tex.repeat.set(1, 1);
     // ground shares the rider's lighting model; very high roughness keeps
-    // the trail matte so the bike stays the most active surface on screen
+    // the trail matte so the bike stays the most active surface on screen.
+    // groundRough adds grit variation without fighting vertex-colour tints.
     const material = new THREE.MeshStandardMaterial({
       map: tex, vertexColors: true, roughness: 0.95, metalness: 0.0,
+      roughnessMap: groundRough(),
     });
     const CHUNK = 96;
     const rngc = new RNG(999);
@@ -924,10 +946,10 @@ export class Track {
           // A properly worn racing line: darker, polished, and clearly
           // narrower than the trail. This is the single most important
           // readability cue on the mountain, so it is unmissable.
-          const line = Math.exp(-Math.pow(ax / (hw * 0.42), 2)) * (1 - edge);
-          const lineShade = 1 - line * 0.34;
+          const line = Math.exp(-Math.pow(ax / (hw * 0.40), 2)) * (1 - edge);
+          const lineShade = 1 - line * 0.42;
           // pale scuffed shoulders either side of the line
-          const scuff = Math.exp(-Math.pow((ax - hw * 0.60) / (hw * 0.20), 2)) * 0.16;
+          const scuff = Math.exp(-Math.pow((ax - hw * 0.58) / (hw * 0.18), 2)) * 0.20;
 
           // ---- WHERE TO TURN -----------------------------------------
           // Berms get a bright worn arc on the outside of the corner where
@@ -1086,6 +1108,95 @@ export class Track {
     });
   }
 
+  /**
+   * Section landmark boards at each zone entry. THE DROP / PINE PANIC /
+   * BONK BRIDGE etc. — each stretch gets a readable identity so the player
+   * can navigate by landmarks, not just by HUD text.
+   */
+  private buildSectionMarkers() {
+    // Palette cycles: dark board + gold name + mint accent reads at speed
+    // against both forest and open rock.
+    const palettes: [string, string, string][] = [
+      ['#101014', '#ffd400', '#2fe6c8'],
+      ['#1a0e14', '#ff2e88', '#ffd400'],
+      ['#0e1a14', '#c0f000', '#ffffff'],
+      ['#141018', '#9fd0ff', '#ff6a00'],
+      ['#1a1208', '#ffb020', '#fff3c4'],
+    ];
+    const postMat = WORLD_MAT.metal(0x2a2a32);
+    const up = new THREE.Vector3(), fwd = new THREE.Vector3(), right = new THREE.Vector3();
+    // skip the absolute start (START arch already owns that moment)
+    for (let zi = 0; zi < this.zones.length; zi++) {
+      const Z = this.zones[zi];
+      const s = Math.max(28, Z.t0 * this.length + 6);
+      // don't double-up with finish arch
+      if (s > this.length - 80) continue;
+      const hw = this.halfWidth(s);
+      const pal = palettes[zi % palettes.length];
+      // strip leading "01 " numbers for a cleaner board, keep the name punch
+      const cleanName = Z.name.replace(/^\d+\s+/, '');
+      const tex = makeSectionBannerTexture(cleanName, Z.sub, pal[0], pal[1], pal[2]);
+      const bannerMat = new THREE.MeshStandardMaterial({
+        map: tex, side: THREE.DoubleSide, roughness: 0.82, metalness: 0.04,
+      });
+      const grp = new THREE.Group();
+      this.frameAt(s, fwd, right, up);
+
+      // dual posts, slightly inset so they frame the racing line
+      for (let side = -1; side <= 1; side += 2) {
+        const x = side * (hw + 1.35);
+        const p = this.worldPos(s, x, this.heightAt(s, x), new THREE.Vector3());
+        const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.18, 5.6, 6), postMat);
+        pole.position.copy(p).addScaledVector(up, 2.8);
+        pole.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), up);
+        grp.add(pole);
+        // small flag pennant for silhouette at distance
+        const flag = new THREE.Mesh(
+          new THREE.PlaneGeometry(0.9, 0.55),
+          new THREE.MeshBasicMaterial({ color: new THREE.Color(pal[1]), side: THREE.DoubleSide }),
+        );
+        flag.position.copy(p).addScaledVector(up, 5.5).addScaledVector(right, side * 0.15);
+        const fm = new THREE.Matrix4().makeBasis(
+          right.clone().multiplyScalar(side), up, fwd.clone().negate());
+        flag.quaternion.setFromRotationMatrix(fm);
+        grp.add(flag);
+      }
+
+      const cx = this.worldPos(s, 0, this.heightAt(s, 0), new THREE.Vector3());
+      const basis = new THREE.Matrix4().makeBasis(
+        right.clone().negate(), up, fwd.clone().negate());
+      const bannerW = Math.min((hw + 1.35) * 2, 22);
+      const banner = new THREE.Mesh(new THREE.PlaneGeometry(bannerW, 2.35), bannerMat);
+      banner.position.copy(cx).addScaledVector(up, 4.85);
+      banner.quaternion.setFromRotationMatrix(basis);
+      grp.add(banner);
+
+      // top crossbar
+      const beam = new THREE.Mesh(
+        new THREE.BoxGeometry(bannerW + 0.4, 0.18, 0.18), postMat);
+      beam.position.copy(cx).addScaledVector(up, 5.95);
+      beam.quaternion.setFromRotationMatrix(basis);
+      grp.add(beam);
+
+      // ground stripe — pale dashed "you are entering" paint on the line
+      const stripe = new THREE.Mesh(
+        new THREE.PlaneGeometry(Math.min(hw * 1.6, 14), 1.1),
+        new THREE.MeshBasicMaterial({
+          color: new THREE.Color(pal[1]), transparent: true, opacity: 0.35, depthWrite: false,
+        }),
+      );
+      const sp = this.worldPos(s, 0, this.heightAt(s, 0) + 0.06, new THREE.Vector3());
+      stripe.position.copy(sp);
+      stripe.quaternion.setFromRotationMatrix(
+        new THREE.Matrix4().makeBasis(right, up, fwd));
+      stripe.rotateX(-Math.PI / 2);
+      stripe.renderOrder = 1;
+      grp.add(stripe);
+
+      this.group.add(grp);
+    }
+  }
+
   private buildScenery() {
     const rng = new RNG(5150);
     const up = new THREE.Vector3(), fwd = new THREE.Vector3(), right = new THREE.Vector3();
@@ -1095,6 +1206,12 @@ export class Track {
 
     // ---- VEGETATION VARIANTS. Four canopy shapes, each its own instanced
     // mesh, so the treeline never repeats a silhouette in a visible run.
+    // Leaf mats get cheap vertex wind; trunks stay rigid (wood mat).
+    const leafMat = () => {
+      const m = WORLD_MAT.leaf(0xffffff);
+      attachWind(m, this.windU);
+      return m;
+    };
     const PINE_VARIANTS = 4;
     const PER_VARIANT = Math.ceil(MAX / PINE_VARIANTS);
     const pineTops: THREE.InstancedMesh[] = [];
@@ -1103,7 +1220,7 @@ export class Track {
     const sPineV: Float32Array[] = [];
     for (let v = 0; v < PINE_VARIANTS; v++) {
       const top = new THREE.InstancedMesh(
-        pineFoliageGeo(v), WORLD_MAT.leaf(0xffffff), PER_VARIANT);
+        pineFoliageGeo(v), leafMat(), PER_VARIANT);
       top.instanceColor = new THREE.InstancedBufferAttribute(
         new Float32Array(PER_VARIANT * 3), 3);
       pineTops.push(top);
@@ -1114,7 +1231,7 @@ export class Track {
     const pineTrunk = pineTrunks[0];
     const pineTop = pineTops[0];
     void pineTrunkGeo;
-    const broad = new THREE.InstancedMesh(broadleafGeo(), WORLD_MAT.leaf(0xffffff), 1400);
+    const broad = new THREE.InstancedMesh(broadleafGeo(), leafMat(), 1400);
     broad.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(1400 * 3), 3);
     const broadTrunk = new THREE.InstancedMesh(pineTrunkGeo(), WORLD_MAT.wood(0x6b4a2c), 1400);
     // ---- ROCK FAMILIES. Small trailside stones, mid boulders and tall
@@ -1141,7 +1258,7 @@ export class Track {
     }
     const rocks = new THREE.InstancedMesh(rockGeo(11), WORLD_MAT.rock(0xffffff), 1);
     rocks.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(3), 3);
-    const bushes = new THREE.InstancedMesh(bushGeo(), WORLD_MAT.leaf(0xffffff), 2200);
+    const bushes = new THREE.InstancedMesh(bushGeo(), leafMat(), 2200);
     bushes.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(2200 * 3), 3);
 
     let nPine = 0, nBroad = 0, nRock = 0, nBush = 0;
@@ -1282,14 +1399,12 @@ export class Track {
     // near-band texture, and pushing it further buys nothing but instances.
     const GMAX = 3000;
     const grassTex = makeTuftTexture();
-    const grass = new THREE.InstancedMesh(
-      tuftGeo(),
-      new THREE.MeshStandardMaterial({
-        map: grassTex, transparent: true, alphaTest: 0.35,
-        side: THREE.DoubleSide, roughness: 0.97, metalness: 0.0,
-      }),
-      GMAX,
-    );
+    const grassMat = new THREE.MeshStandardMaterial({
+      map: grassTex, transparent: true, alphaTest: 0.35,
+      side: THREE.DoubleSide, roughness: 0.97, metalness: 0.0,
+    });
+    attachWind(grassMat, this.windU);
+    const grass = new THREE.InstancedMesh(tuftGeo(), grassMat, GMAX);
     grass.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(GMAX * 3), 3);
     const sGrass = new Float32Array(GMAX);
     let nGrass = 0;
@@ -1324,8 +1439,7 @@ export class Track {
     const detailSets: { mesh: THREE.InstancedMesh; s: Float32Array; n: number }[] = [];
     for (let v = 0; v < 3; v++) {
       const cap = 500;
-      const plant = new THREE.InstancedMesh(
-        plantGeo(v), WORLD_MAT.leaf(0xffffff), cap);
+      const plant = new THREE.InstancedMesh(plantGeo(v), leafMat(), cap);
       plant.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
       const branch = new THREE.InstancedMesh(
         branchGeo(v), WORLD_MAT.wood(0x6a5238), cap);
@@ -1396,9 +1510,16 @@ export class Track {
         const rt = makeRippleTexture();
         rt.repeat.set(2, 2);
         this.waterMaps.push(rt);
+        // wetter, slightly glossier than the old flat discs; puddles sit a
+        // touch darker so shallow water still reads against trail dirt
         pm = new THREE.MeshStandardMaterial({
-          color: defs[k].color, map: rt, transparent: true, opacity: 0.85,
-          depthWrite: false, roughness: 0.22, metalness: 0.1,
+          color: k === 'puddle' ? 0x3d6270 : 0x5eb4c8,
+          map: rt,
+          transparent: true,
+          opacity: k === 'puddle' ? 0.78 : 0.84,
+          depthWrite: false,
+          roughness: 0.16,
+          metalness: 0.12,
         });
       } else {
         // rocks and logs are natural; everything else is course furniture
@@ -1415,10 +1536,33 @@ export class Track {
       mesh.count = c;
       this.propMeshes[k] = mesh;
       this.group.add(mesh);
+
+      // static edge foam rings — cheap readability for wet props without
+      // per-frame geometry. Matrices track the water instances in refreshProps.
+      if (wet) {
+        const r = k === 'puddle' ? 1.4 : 3.2;
+        const foamGeo = new THREE.RingGeometry(r * 0.72, r * 1.08, k === 'puddle' ? 14 : 20);
+        foamGeo.rotateX(-Math.PI / 2);
+        foamGeo.translate(0, 0.05, 0);
+        const foamMat = new THREE.MeshStandardMaterial({
+          color: 0xe4f2f8,
+          transparent: true,
+          opacity: 0.52,
+          depthWrite: false,
+          roughness: 0.92,
+          metalness: 0.0,
+        });
+        const foam = new THREE.InstancedMesh(foamGeo, foamMat, c);
+        foam.frustumCulled = true;
+        foam.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        foam.count = c;
+        this.propMeshes[`${k}_foam`] = foam;
+        this.group.add(foam);
+      }
     }
-    // assign per-type index
+    // assign per-type instance slots (idx remains the global unique id)
     const seen: Record<string, number> = {};
-    this.obstacles.forEach(o => { o.idx = seen[o.type] = (seen[o.type] ?? -1) + 1; });
+    this.obstacles.forEach(o => { o.meshIdx = seen[o.type] = (seen[o.type] ?? -1) + 1; });
     this.refreshProps();
   }
 
@@ -1429,10 +1573,13 @@ export class Track {
       if (o.s < sMin || o.s > sMax) continue;
       const mesh = this.propMeshes[o.type];
       if (!mesh) continue;
+      const foam = this.propMeshes[`${o.type}_foam`];
+      const mi = o.meshIdx;
       // shattered props are gone: collapse them to nothing
       if (o.gone) {
         m4.makeScale(0, 0, 0);
-        mesh.setMatrixAt(o.idx, m4);
+        mesh.setMatrixAt(mi, m4);
+        if (foam) foam.setMatrixAt(mi, m4);
         continue;
       }
       const s = o.s + o.os, x = o.x + o.ox;
@@ -1448,7 +1595,9 @@ export class Track {
       const sz = o.type === 'rock' || o.type === 'boulder' ? o.r : 1;
       sc.set(sz, sz, sz);
       m4.compose(p, q, sc);
-      mesh.setMatrixAt(o.idx, m4);
+      mesh.setMatrixAt(mi, m4);
+      // foam rings share the wet prop transform (geometry is pre-sized)
+      if (foam) foam.setMatrixAt(mi, m4);
     }
     // Props are scattered along the whole course, so their true bound is
     // effectively the whole mountain. Computing it per frame walks every
@@ -1973,19 +2122,24 @@ export class Track {
     fallTex.repeat.set(1, 6);
     this.waterMaps.push(fallTex);
     const mFall = new THREE.MeshBasicMaterial({
-      color: 0xd8ecf6, map: fallTex, transparent: true, opacity: 0.66,
+      color: 0xd0eaf6, map: fallTex, transparent: true, opacity: 0.72,
       side: THREE.DoubleSide, depthWrite: false, fog: true,
     });
     const mFoam = new THREE.MeshBasicMaterial({
-      color: 0xffffff, transparent: true, opacity: 0.5,
+      color: 0xffffff, transparent: true, opacity: 0.55,
       depthWrite: false, fog: true,
+    });
+    // denser base foam so the plunge pool reads against rock/dirt
+    const mFoamPool = new THREE.MeshBasicMaterial({
+      color: 0xeef8fc, transparent: true, opacity: 0.62,
+      depthWrite: false, fog: true, side: THREE.DoubleSide,
     });
     // Rivers get a scrolling ripple texture rather than a flat colour, so
     // the surface reads as moving water without any per-frame geometry work.
     const rippleTex = makeRippleTexture();
     rippleTex.repeat.set(3, 26);
     const mRiver = new THREE.MeshBasicMaterial({
-      color: 0x6fa3b8, map: rippleTex, transparent: true, opacity: 0.88,
+      color: 0x5eb0c4, map: rippleTex, transparent: true, opacity: 0.90,
       depthWrite: false, fog: true,
     });
     this.waterMaps.push(rippleTex);
@@ -2023,6 +2177,26 @@ export class Track {
           mist.position.copy(_p).addScaledVector(_up2, -1.5);
           mist.quaternion.setFromRotationMatrix(basis);
           grp.add(mist);
+          // foam ring + soft pool at the plunge — static, no per-frame work
+          const basePos = _p.clone().addScaledVector(_up2, -h + 0.4)
+            .addScaledVector(_fwd2, rng.range(0.5, 2.0));
+          const baseQ = new THREE.Quaternion().setFromUnitVectors(
+            new THREE.Vector3(0, 1, 0), _up2,
+          );
+          const pool = new THREE.Mesh(
+            new THREE.CircleGeometry(w * 1.5, 14).rotateX(-Math.PI / 2),
+            mFoamPool,
+          );
+          pool.position.copy(basePos);
+          pool.quaternion.copy(baseQ);
+          grp.add(pool);
+          const foamRing = new THREE.Mesh(
+            new THREE.RingGeometry(w * 0.85, w * 2.1, 18).rotateX(-Math.PI / 2),
+            mFoam,
+          );
+          foamRing.position.copy(basePos).addScaledVector(_up2, 0.06);
+          foamRing.quaternion.copy(baseQ);
+          grp.add(foamRing);
         }
       }
 

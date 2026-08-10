@@ -98,6 +98,24 @@ export const CRASH_PROFILES: Record<CrashCause, CrashProfile> = {
   },
 };
 
+/** Per-limb secondary motion for a cause-readable silhouette. */
+export interface RagdollLimbs {
+  /** upper-arm euler (x/y/z) */
+  armL: [number, number, number];
+  armR: [number, number, number];
+  foreL: number; // elbow fold (local X)
+  foreR: number;
+  legL: [number, number, number];
+  legR: [number, number, number];
+  shinL: number;
+  shinR: number;
+  headX: number;
+  headY: number;
+  /** flail rates (rad/s) for secondary sine */
+  flailRate: number;
+  flailAmp: number;
+}
+
 /** Live ragdoll state for one crashed rider. */
 export interface Ragdoll {
   cause: CrashCause;
@@ -117,6 +135,7 @@ export interface Ragdoll {
   bounces: number;
   /** direction of the hit, for asymmetric profiles */
   dir: number;
+  limbs: RagdollLimbs;
   /** ejected bike, animated separately */
   bike: {
     active: boolean;
@@ -124,6 +143,74 @@ export interface Ragdoll {
     vx: number; vy: number; vs: number;
     spin: number; tumble: number;
   };
+}
+
+/** Cause-specific limb pose so the silhouette explains the crash. */
+function limbsForCause(cause: CrashCause, dir: number): RagdollLimbs {
+  const d = Math.sign(dir) || 1;
+  switch (cause) {
+    case CrashCause.OBSTACLE:
+    case CrashCause.BAD_LANDING:
+      // over the bars: arms reach forward, legs trail
+      return {
+        armL: [-1.4, 0.2 * d, 0.9], armR: [-1.4, -0.2 * d, -0.9],
+        foreL: -0.9, foreR: -0.9,
+        legL: [0.6, 0.15 * d, 0.25], legR: [0.55, -0.15 * d, -0.25],
+        shinL: -0.5, shinR: -0.45,
+        headX: 0.35, headY: 0,
+        flailRate: 16, flailAmp: 1.1,
+      };
+    case CrashCause.ATTACKED:
+      // barrel-roll: impact-side arm out, opposite tucks
+      return {
+        armL: d < 0 ? [-0.4, 0.8, 1.6] : [-0.6, 0.3, 0.5],
+        armR: d > 0 ? [-0.4, -0.8, -1.6] : [-0.6, -0.3, -0.5],
+        foreL: -0.5, foreR: -0.5,
+        legL: [0.3, 0.4 * d, 0.5 * d], legR: [0.3, -0.4 * d, -0.5 * d],
+        shinL: -0.35, shinR: -0.35,
+        headX: 0.1, headY: -0.5 * d,
+        flailRate: 18, flailAmp: 1.35,
+      };
+    case CrashCause.HIGH_SPEED:
+      // yard sale: limbs splay wide
+      return {
+        armL: [-0.3, 0.5, 1.8], armR: [-0.3, -0.5, -1.8],
+        foreL: -0.3, foreR: -0.3,
+        legL: [0.8, 0.5, 0.7], legR: [0.8, -0.5, -0.7],
+        shinL: -0.2, shinR: -0.2,
+        headX: 0.2, headY: 0,
+        flailRate: 20, flailAmp: 1.5,
+      };
+    case CrashCause.FAILED_TRICK:
+      // mid-rotation: tucked then opens
+      return {
+        armL: [-0.9, 0.4, 0.7], armR: [-0.9, -0.4, -0.7],
+        foreL: -1.2, foreR: -1.2,
+        legL: [1.1, 0.2, 0.3], legR: [1.1, -0.2, -0.3],
+        shinL: -1.0, shinR: -1.0,
+        headX: 0.4, headY: 0.3 * d,
+        flailRate: 14, flailAmp: 1.0,
+      };
+    case CrashCause.OFF_TRACK:
+      // long fall: arms out for balance, legs hang
+      return {
+        armL: [-0.2, 0.3, 1.3], armR: [-0.2, -0.3, -1.3],
+        foreL: -0.2, foreR: -0.2,
+        legL: [0.15, 0.1, 0.15], legR: [0.15, -0.1, -0.15],
+        shinL: -0.15, shinR: -0.15,
+        headX: -0.15, headY: 0,
+        flailRate: 8, flailAmp: 0.55,
+      };
+    default:
+      return {
+        armL: [-0.5, 0.2, 0.8], armR: [-0.5, -0.2, -0.8],
+        foreL: -0.6, foreR: -0.6,
+        legL: [0.4, 0.15, 0.2], legR: [0.4, -0.15, -0.2],
+        shinL: -0.4, shinR: -0.4,
+        headX: 0.15, headY: 0,
+        flailRate: 15, flailAmp: 1.0,
+      };
+  }
 }
 
 export function startRagdoll(cause: CrashCause, dir: number): Ragdoll {
@@ -140,6 +227,7 @@ export function startRagdoll(cause: CrashCause, dir: number): Ragdoll {
     grounded: false,
     bounces: 0,
     dir,
+    limbs: limbsForCause(cause, dir),
     bike: {
       active: P.bikeEject,
       ox: 0, oy: 0, os: 0,
@@ -167,10 +255,25 @@ export function stepRagdoll(rd: Ragdoll, dt: number, bodyY: number, groundY: num
   rd.roll += rd.rollV * dt;
   rd.yaw += rd.yawV * dt;
 
+  // limb energy bleeds off on ground contact (arms stop windmilling)
+  if (rd.grounded) {
+    rd.limbs.flailAmp *= Math.exp(-2.8 * dt);
+    // elbows/knees settle into a crumpled rest
+    const settle = 1 - Math.exp(-3.2 * dt);
+    rd.limbs.foreL += (-1.1 - rd.limbs.foreL) * settle;
+    rd.limbs.foreR += (-1.1 - rd.limbs.foreR) * settle;
+    rd.limbs.shinL += (-0.9 - rd.limbs.shinL) * settle;
+    rd.limbs.shinR += (-0.9 - rd.limbs.shinR) * settle;
+  } else {
+    rd.limbs.flailAmp *= Math.exp(-0.15 * dt);
+  }
+
   if (bodyY <= groundY + 0.05) {
     if (!rd.grounded) {
       rd.grounded = true;
       rd.bounces++;
+      // impact jolt on first touchdown
+      rd.limbs.flailAmp = Math.min(1.6, rd.limbs.flailAmp + 0.45);
     }
   } else {
     rd.grounded = false;
@@ -194,6 +297,46 @@ export function stepRagdoll(rd: Ragdoll, dt: number, bodyY: number, groundY: num
       if (Math.abs(b.vy) < 1.2) { b.vy = 0; b.tumble *= 0.2; }
     }
   }
+}
+
+/**
+ * Sample limb pose for a frame. `time` is global clock for secondary motion.
+ * Returns values ready to write onto the rig.
+ */
+export function sampleRagdollLimbs(rd: Ragdoll, time: number) {
+  const L = rd.limbs;
+  const fade = 1 - ragdollProgress(rd);
+  const amp = L.flailAmp * fade * (rd.grounded ? 0.55 : 1);
+  const w = time * L.flailRate;
+  const s = Math.sin, c = Math.cos;
+  return {
+    armL: [
+      L.armL[0] + s(w) * amp * 0.55,
+      L.armL[1] + c(w * 0.7) * amp * 0.35,
+      L.armL[2] + s(w + 0.8) * amp * 0.7,
+    ] as [number, number, number],
+    armR: [
+      L.armR[0] + s(w + 2.1) * amp * 0.55,
+      L.armR[1] + c(w * 0.7 + 1.2) * amp * 0.35,
+      L.armR[2] + s(w + 2.9) * -amp * 0.7,
+    ] as [number, number, number],
+    foreL: L.foreL + c(w * 1.1) * amp * 0.35,
+    foreR: L.foreR + c(w * 1.1 + 1.4) * amp * 0.35,
+    legL: [
+      L.legL[0] + s(w * 0.75 + 1) * amp * 0.5,
+      L.legL[1],
+      L.legL[2] + s(w * 0.6) * amp * 0.25,
+    ] as [number, number, number],
+    legR: [
+      L.legR[0] + s(w * 0.75 + 3) * amp * 0.5,
+      L.legR[1],
+      L.legR[2] + s(w * 0.6 + 1.5) * amp * 0.25,
+    ] as [number, number, number],
+    shinL: L.shinL + s(w * 0.9 + 0.5) * amp * 0.25,
+    shinR: L.shinR + s(w * 0.9 + 2.0) * amp * 0.25,
+    headX: L.headX + s(w * 0.5) * amp * 0.3,
+    headY: L.headY + c(w * 0.4) * amp * 0.25,
+  };
 }
 
 /** 0..1 progress through the ragdoll. */

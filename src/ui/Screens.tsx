@@ -6,6 +6,7 @@ import {
 } from '../game/save';
 import { getMountain, levelFromXp } from '../game/mountains';
 import type { XpLine } from '../game/progression';
+import { MODES, type ModeId } from '../game/modes';
 
 const PLACE = ['', '1st', '2nd', '3rd', '4th', '5th', '6th'];
 
@@ -34,6 +35,7 @@ const CONTROLS: [string, React.ReactNode][] = [
 export function Menu({
   save, onStart, onGarage, onMountains, onDifficulty,
   onToggleMusic, onToggleSfx, onToggleMotion, onToggleGhost,
+  mode = 'descent', onMode,
 }: {
   save: SaveData;
   onStart: () => void;
@@ -44,11 +46,14 @@ export function Menu({
   onToggleSfx: (v: boolean) => void;
   onToggleMotion: (v: boolean) => void;
   onToggleGhost: (v: boolean) => void;
+  mode?: ModeId;
+  onMode?: (id: ModeId) => void;
 }) {
   const music = save.music, sfx = save.sfx;
   const hasGhost = !!save.ghost[save.difficulty];
   const pb = save.best[save.difficulty];
   const pbScore = save.bestScore[save.difficulty] ?? 0;
+  const playableModes = MODES.filter(m => m.available);
 
   return (
     <div className="screen-pad absolute inset-0 z-20 flex items-center justify-center" style={{ background: 'radial-gradient(ellipse at 50% 40%, rgba(6,8,12,.35) 0%, rgba(4,5,8,.92) 75%)' }}>
@@ -111,6 +116,26 @@ export function Menu({
                 <span className="hud-label !text-[9px] text-[#ffd400]">{save.coins.toLocaleString()} SCRAP</span>
               </span>
             </button>
+            {onMode && playableModes.length > 1 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {playableModes.map(m => {
+                  const on = mode === m.id;
+                  return (
+                    <button key={m.id} type="button"
+                      onClick={() => { audio.uiClick(); onMode(m.id); }}
+                      className="title-skew px-3 py-1 transition-transform hover:translate-x-0.5"
+                      style={{
+                        background: on ? m.colour : 'transparent',
+                        border: `2px solid ${m.colour}`,
+                        boxShadow: on ? '3px 3px 0 #000' : undefined,
+                      }}>
+                      <span className="hud-label !text-[9px]"
+                        style={{ color: on ? '#000' : m.colour }}>{m.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             <div className="mt-4 flex flex-wrap gap-2">
               {([['MUSIC', music, () => onToggleMusic(!music)],
                  ['SFX', sfx, () => onToggleSfx(!sfx)],

@@ -7,8 +7,9 @@ import {
 } from './core';
 import { Track, Obstacle, ZONES } from './track';
 import {
-  createRider, RiderRig, RIDER_PALETTES, getBuild,
-  BB_POS, SHOCK_UPPER, SHOCK_LOWER, SHOCK_BASE_LEN, FORK_AXIS,
+  createRider, RiderRig, RIDER_PALETTES, getBuild, solveRiderIK, applyRiderStance,
+  CHEST_ATTACK, BB_POS, SHOCK_UPPER, SHOCK_LOWER, SHOCK_BASE_LEN, FORK_AXIS,
+  WHEEL_R, FRONT_AXLE_POS, REAR_AXLE_POS,
 } from './models';
 import {
   ParticlePool, makeSoftTexture, makeChunkTexture, makeSkyTexture, makeCloudTexture,
@@ -28,14 +29,14 @@ import {
 } from './env';
 import {
   CrashCause, CRASH_PROFILES, startRagdoll, stepRagdoll, crashCall,
-  type Ragdoll,
+  sampleRagdollLimbs, type Ragdoll,
 } from './crash';
 import {
   StyleTrick, STYLE_TRICKS, spinSteps, scoreTrick, previewName,
   type TrickTally,
 } from './tricks';
 import { getMode, type ModeId } from './modes';
-import { PerfGovernor, aiThinkInterval, LOD_BANDS } from './perf';
+import { PerfGovernor, FixedStep, aiThinkInterval, LOD_BANDS } from './perf';
 import {
   AI_TIERS, buildField, chaosRoll, tierFromLegacy,
   type AiBrain, type AiTier,
@@ -54,9 +55,17 @@ import {
   type Difficulty, type Ghost, DIFF_TUNING, GHOST_DT, encodeGhost,
   SKILL_MIN, SKILL_MAX,
 } from './save';
+import { BoostSystem } from './boostSystem';
+import { CheckpointSystem } from './checkpoints';
+import { GamepadInput } from './input';
 
 export const GRAV = 30;
 export const SOFT_CAP = 47;
+/**
+ * Chest pitch on top of pelvis/spine attack lean.
+ * Full DH lean lives in models.ts (PELVIS_ATTACK + SPINE_ATTACK + CHEST_ATTACK).
+ */
+export const ATTACK_PITCH = CHEST_ATTACK;
 /** Axle offsets from the bike's origin, in metres along the track. */
 export const AXLE_F = 0.60;
 export const AXLE_R = -0.62;
@@ -99,6 +108,20 @@ export interface Popup {
   vy: number;
   sx: number; sy: number;
 }
+
+/** Expanding gold/white impact ring for BONK hits (pooled). */
+interface ImpactRing {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  life: number;
+  maxLife: number;
+  startScale: number;
+  endScale: number;
+  peakAlpha: number;
+  active: boolean;
+}
+
+const IMPACT_RING_POOL = 8;
 
 export interface RivalHud { name: string; color: string; progress: number; place: number; }
 
@@ -165,6 +188,15 @@ export interface HudState {
   reducedMotion: boolean;
   trickText: string;
   trickHold: number;
+  /** mode-specific objective (e.g. time-attack clock) */
+  modeObjective: string;
+  modeDetail: string;
+  modeUrgent: boolean;
+  /** debug overlay extras */
+  debugVel: number;
+  debugAir: number;
+  debugCp: string;
+  debugInv: boolean;
   finishData: null | {
     time: number; place: number; score: number; bonks: number; tricks: number;
     topSpeed: number; bestTrick: string; bestTrickScore: number; airTotal: number;
@@ -301,9 +333,25 @@ export class Game {
   camLook = new THREE.Vector3();
   camRoll = 0;
   fov = 68;
-  boost = 0;
-  boosting = false;
+  /** single source of truth for the boost meter */
+  boostSys = new BoostSystem();
+  get boost() { return this.boostSys.charge; }
+  set boost(v: number) { this.boostSys.charge = Math.max(0, Math.min(100, v)); }
+  get boosting() { return this.boostSys.active; }
+  set boosting(v: boolean) { this.boostSys.active = v; }
   boostTime = 0;
+  /** section checkpoints + respawn anchors */
+  checkpoints = new CheckpointSystem();
+  /** fixed physics tick (120 Hz), decoupled from frame rate */
+  private fixed = new FixedStep(120, 6);
+  /** gamepad poller — OR'd into keyboard intent each frame */
+  private pad = new GamepadInput();
+  /** ?debug: invincibility, cheats, expanded overlay */
+  debugMode = typeof window !== 'undefined'
+    && (window.location.search.includes('debug') || window.location.search.includes('states'));
+  invincible = false;
+  /** mode clock remaining (Infinity = untimed) */
+  modeClock = Infinity;
   style = 0;
   combo = 0;
   comboTime = 0;
@@ -379,6 +427,7 @@ export class Game {
   private dirtPool!: ParticlePool;
   private sparkPool!: ParticlePool;
   private smokePool!: ParticlePool;
+  private impactRings: ImpactRing[] = [];
   private sky!: THREE.Mesh;
   private ridge!: THREE.Group;
   private clouds!: THREE.Group;
@@ -394,6 +443,7 @@ export class Game {
   private finishBlast = false;
   private roostAccum = 0;
   private moteAccum = 0;
+  private streakAccum = 0;
   private nearMissCd = 0;
   onPhaseChange?: (p: Phase) => void;
   quality: 'high' | 'low' = 'high';
@@ -408,9 +458,9 @@ export class Game {
   mode: ModeId = 'descent';
   /** adaptive quality governor */
   perfGov = new PerfGovernor();
-  /** ?states in the URL shows the live state machine readout */
-  debugStates = typeof window !== 'undefined'
-    && window.location.search.includes('states');
+  /** ?states / ?debug in the URL shows the live state machine readout */
+  get debugStates() { return this.debugMode; }
+  set debugStates(v: boolean) { this.debugMode = v; }
   // --- cold open state
   private introT = 0;
   private introFired = false;
@@ -446,6 +496,8 @@ export class Game {
       splitDelta: 0, splitShow: 0, splitHasPb: false,
       ghostActive: false, ghostGap: 0, reducedMotion: false,
       trickText: '', trickHold: 0, finishData: null,
+      modeObjective: '', modeDetail: '', modeUrgent: false,
+      debugVel: 0, debugAir: 0, debugCp: '', debugInv: false,
     };
     this.init();
   }
@@ -558,6 +610,7 @@ export class Game {
     this.track = new Track(20260114, 4600, SHALEBACK_SECTIONS, SHALEBACK_SETPIECES);
     this.scene.add(this.track.build());
     this.track.updateSceneryLod(0, 1, true);
+    this.checkpoints.build(this.track);
 
     // particles
     const soft = makeSoftTexture();
@@ -566,6 +619,28 @@ export class Game {
     this.smokePool = new ParticlePool(700, soft, THREE.NormalBlending);
     this.sparkPool = new ParticlePool(500, soft, THREE.AdditiveBlending);
     this.scene.add(this.smokePool.points, this.dirtPool.points, this.sparkPool.points);
+
+    // BONK impact rings — small pool, expand + fade, no per-hit alloc
+    const ringGeo = new THREE.RingGeometry(0.72, 1.0, 40);
+    for (let i = 0; i < IMPACT_RING_POOL; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffe090,
+        transparent: true,
+        opacity: 0,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        fog: false,
+      });
+      const mesh = new THREE.Mesh(ringGeo, mat);
+      mesh.visible = false;
+      mesh.renderOrder = 6;
+      this.scene.add(mesh);
+      this.impactRings.push({
+        mesh, mat, life: 0, maxLife: 0.32,
+        startScale: 0.4, endScale: 3.2, peakAlpha: 0.9, active: false,
+      });
+    }
 
     // racers
     this.buildRacers();
@@ -669,7 +744,7 @@ export class Game {
       grace: 0, lastObs: -1, obsCd: 0, crashMax: 1, recover: 0,
       state: BikeState.GROUNDED, prevState: BikeState.GROUNDED,
       stateT: 0, landTimer: 0, log: new TransitionLog(),
-      crankAngle: 0, pedalling: 0, headYaw: 0, weight: 0,
+      crankAngle: Math.PI * 0.5, pedalling: 0, headYaw: 0, weight: 0,
       chassisPitch: 0, pitchV: 0, contactF: true, contactR: true,
       pump: 0, pumpArmed: 0,
       mass: 86, swingT: 99, bonkCooldownPair: 0, ragdoll: null,
@@ -765,12 +840,13 @@ export class Game {
     });
     this.track.resetSpectators();
     this.track.refreshProps();
-    this.raceTime = 0; this.boost = 0; this.style = 0; this.combo = 0; this.comboTime = 0;
+    this.raceTime = 0; this.boostSys.reset(); this.style = 0; this.combo = 0; this.comboTime = 0;
     this.score = 0; this.bonks = 0; this.tricksLanded = 0; this.topSpeed = 0;
     this.airTotal = 0; this.bestTrick = ''; this.bestTrickScore = 0;
     this.airSpin = this.airFlip = this.airPose = 0;
     this.shake = 0; this.hitStop = 0; this.timeScale = 1; this.slowmo = 0;
     this.dirtPool.clear(); this.sparkPool.clear(); this.smokePool.clear();
+    this.clearImpactRings();
     this.clearPopups();
     this.hud.finishData = null;
     this.hud.crashed = 0;
@@ -786,6 +862,14 @@ export class Game {
     this.nearMisses = 0;
     this.scActive = null;
     this.splits = new Array(this.track.zones.length).fill(0);
+    this.checkpoints.reset();
+    this.checkpoints.pb = this.pbSplits.slice();
+    this.fixed.reset();
+    {
+      const m = getMode(this.mode);
+      const est = (this.track.length - 20) / 28;
+      this.modeClock = m.timeLimit(this.difficulty, est);
+    }
     this.ghostSamples = [];
     this.ghostAccum = 0;
     this.hud.ghostGap = 0;
@@ -800,6 +884,14 @@ export class Game {
     this.onPhaseChange?.(p);
   }
 
+  /** Switch race rules (Descent / Time Attack / …). Applied on next reset. */
+  setMode(id: ModeId) {
+    this.mode = id;
+    const m = getMode(id);
+    const est = (this.track.length - 20) / 28;
+    this.modeClock = m.timeLimit(this.difficulty, est);
+  }
+
   /** Full cold open. Used for a fresh drop-in. */
   startRace() {
     this.resetRace();
@@ -810,6 +902,7 @@ export class Game {
     this.introCount = -1;
     this.frozen = true;
     this.hud.holeshot = false;
+    bus.emit('race:start', { mountain: this.mountainId, mode: this.mode });
     this.setPhase('intro');
     audio.resume();
   }
@@ -891,12 +984,40 @@ export class Game {
     if (k === 'F9') { e.preventDefault(); this.screenshot(); return; }
     // F10 hides the HUD first, for clean captures
     if (k === 'F10') { e.preventDefault(); this.hudHidden = !this.hudHidden; return; }
+    // ---- debug cheats (?debug or ?states)
+    if (this.debugMode && this.hud.phase === 'race') {
+      if (k === 'F1') { e.preventDefault(); this.debugTeleport(1); return; }   // next CP
+      if (k === 'F2') { e.preventDefault(); this.debugTeleport(-1); return; }  // prev CP
+      if (k === 'F3') { e.preventDefault(); this.boostSys.gain(50); this.popup('+50 BOOST', 'sub', null, '#ffd400'); return; }
+      if (k === 'F4') { e.preventDefault(); this.player.v = Math.max(this.player.v, 48); this.popup('MAX SPEED', 'sub', null, '#7ef7ff'); return; }
+      if (k === 'F5') { e.preventDefault(); this.invincible = !this.invincible; this.popup(this.invincible ? 'INVINCIBLE' : 'VULNERABLE', 'sub', null, '#c0f000'); return; }
+      if (k === 'F6') { e.preventDefault(); this.slowmo = this.slowmo > 0 ? 0 : 8; this.popup(this.slowmo > 0 ? 'SLOW-MO' : 'REAL TIME', 'sub', null, '#9fd0ff'); return; }
+      if (k === 'F7') { e.preventDefault(); this.quickRestart(); return; }
+    }
     // during the cold open Escape means "skip", not "pause"
     if (k === 'Escape') {
       if (this.hud.phase === 'intro') this.skipIntro();
       else this.togglePause();
     }
   };
+
+  /** Dev: snap the player to a checkpoint index offset from current. */
+  private debugTeleport(dir: number) {
+    const list = this.checkpoints.list;
+    if (!list.length) return;
+    const cur = this.checkpoints.reached;
+    const idx = clamp(cur + dir, 0, list.length - 1);
+    const cp = list[idx];
+    const p = this.player;
+    p.s = cp.s + 4;
+    p.x = cp.x;
+    p.y = this.track.heightAt(p.s, p.x) + 0.6;
+    p.v = Math.max(p.v, 18);
+    p.vx = 0; p.vy = 0; p.crash = 0; p.grace = 0.8;
+    p.grounded = true;
+    this.checkpoints.reached = Math.max(this.checkpoints.reached, idx);
+    this.popup(`TP → ${cp.name}`, 'sub', null, '#7ef7c8');
+  }
   private onKeyUp = (e: KeyboardEvent) => { this.keys[e.code] = false; };
 
   /**
@@ -996,12 +1117,13 @@ export class Game {
     if (phase === 'intro') {
       this.introT += dt;
       if (this.tap('Enter')) this.skipIntro();
-      this.simulate(sdt, false);
+      this.stepPhysics(sdt, false);
       this.updateIntro(dt);
       this.updateWorldFx(dt);
       this.dirtPool.update(sdt);
       this.smokePool.update(sdt);
       this.sparkPool.update(sdt);
+      this.updateImpactRings(sdt);
       this.updatePopups(dt);
       this.syncHud();
       this.renderer.render(this.scene, this.camera);
@@ -1024,25 +1146,42 @@ export class Game {
         this.goFlash = 0.9;
         this.setPhase('race');
       }
-      this.simulate(sdt, false);
+      this.stepPhysics(sdt, false);
     } else if (phase === 'race') {
       this.frozen = false;
       if (this.goFlash > 0) {
         this.goFlash -= dt;
         this.hud.countLabel = this.goFlash > 0 ? 'GO!' : '';
       }
-      this.raceTime += sdt;
-      this.simulate(sdt, true);
+      this.stepPhysics(sdt, true);
       if (!this.player.finished) this.recordGhost(sdt);
       if (this.player.finished) {
         // let the roll-out, carve and pose play before the results card
         this.finishHold += dt;
         if (this.finishHold > 4.4) this.enterFinish();
       }
+      // mode clock uses wall time so hit-stop / slow-mo don't steal seconds
+      if (Number.isFinite(this.modeClock) && !this.player.finished) {
+        this.modeClock = Math.max(0, this.modeClock - dt);
+        const end = getMode(this.mode).checkEnd({
+          raceTime: this.raceTime, progress: clamp01(this.player.s / this.track.length),
+          place: this.player.place, fieldSize: this.racers.length,
+          score: this.score, tricks: this.tricksLanded, bonks: this.bonks,
+          shortcuts: this.shortcutsHit, nearMisses: this.nearMisses,
+          finished: this.player.finished, clock: this.modeClock,
+        });
+        if (end === 'timeup') {
+          this.player.finished = true;
+          this.player.finishTime = this.raceTime;
+          this.popup('TIME UP', 'trick', null, '#ff6a00');
+        }
+      }
     } else if (phase === 'finish') {
       if (this.replayData) this.updateReplay(dt);
-      else this.simulate(sdt * 0.6, false);
+      else this.stepPhysics(sdt * 0.6, false);
     } else {
+      // menu / paused — still latch pad so Start can unpause
+      this.latchInput(false);
       this.simulate(0, false);
     }
 
@@ -1051,6 +1190,7 @@ export class Game {
     this.dirtPool.update(sdt);
     this.smokePool.update(sdt);
     this.sparkPool.update(sdt);
+    this.updateImpactRings(sdt);
     this.updateRiderLod();
     this.updateGhost();
     this.updatePopups(dt);
@@ -1090,10 +1230,73 @@ export class Game {
     for (let i = 0; i < 6; i++) setTimeout(() => audio.chime(i * 2), i * 130);
   }
 
+  /**
+   * Run 0..N fixed physics ticks for this frame. Keeps landings, hops and
+   * bonks snappy when the frame rate dips.
+   */
+  /** edge-triggered actions latched once per rendered frame */
+  private frameTap = {
+    hop: false, bonkL: false, bonkR: false, mash: false, react: false,
+    padBoost: false, padSteer: 0, padPedal: false, padBrake: false,
+    padTuck: false, padConnected: false,
+  };
+
+  /**
+   * Latch keyboard + pad edges every frame, even when FixedStep yields 0
+   * ticks (high refresh rates). Edges survive until the next physics
+   * tick consumes them — so hops/bonks never silently drop.
+   */
+  private latchInput(live: boolean) {
+    const pad = this.pad.poll();
+    // pause works from any phase (resume from pause included)
+    if (pad.pauseTap) this.togglePause();
+    const hop = this.tap('KeyJ', 'ControlLeft') || pad.hopTap;
+    const bonkL = this.tap('KeyQ') || pad.bonkLTap;
+    const bonkR = this.tap('KeyE') || pad.bonkRTap;
+    const mash = this.tap('KeyW', 'ArrowUp', 'Space', 'KeyJ')
+      || pad.hopTap || pad.pedal;
+    const react = this.tap('KeyW', 'ArrowUp', 'Space')
+      || pad.hopTap || pad.pedal || pad.boost;
+    // OR into existing latches so a zero-tick frame keeps a prior edge
+    this.frameTap.hop = this.frameTap.hop || hop;
+    this.frameTap.bonkL = this.frameTap.bonkL || bonkL;
+    this.frameTap.bonkR = this.frameTap.bonkR || bonkR;
+    this.frameTap.mash = this.frameTap.mash || mash;
+    this.frameTap.react = this.frameTap.react || react;
+    this.frameTap.padBoost = pad.boost;
+    this.frameTap.padSteer = pad.steer;
+    this.frameTap.padPedal = pad.pedal;
+    this.frameTap.padBrake = pad.brake;
+    this.frameTap.padTuck = pad.tuck;
+    this.frameTap.padConnected = pad.connected;
+    void live;
+  }
+
+  private stepPhysics(dt: number, live: boolean) {
+    this.latchInput(live);
+    if (dt <= 0) { this.simulate(0, live); return; }
+    const n = this.fixed.count(dt);
+    if (n === 0) return;
+    const step = this.fixed.step;
+    for (let i = 0; i < n; i++) {
+      if (live) this.raceTime += step;
+      // only the first tick of the frame consumes edge-triggered actions
+      this.simulate(step, live, i === 0);
+      if (i === 0) {
+        this.frameTap.hop = false;
+        this.frameTap.bonkL = false;
+        this.frameTap.bonkR = false;
+        this.frameTap.mash = false;
+        this.frameTap.react = false;
+      }
+    }
+  }
+
   // =========================================================================
-  private simulate(dt: number, live: boolean) {
+  private simulate(dt: number, live: boolean, firstTick = true) {
     if (dt <= 0) return;
     const trk = this.track;
+    const ft = this.frameTap;
 
     // ---- player input
     const p = this.player;
@@ -1106,35 +1309,30 @@ export class Game {
       // All physics below is derived in track-space, so map the keys once, here.
       if (this.steerAxis !== null) {
         steer = -this.steerAxis;                       // screen -> track space
+      } else if (ft.padConnected && Math.abs(ft.padSteer) > 0.02) {
+        steer = -ft.padSteer;                          // screen -> track space
       } else {
         if (this.key('KeyA', 'ArrowLeft')) steer += 1;   // A = screen left
         if (this.key('KeyD', 'ArrowRight')) steer -= 1;  // D = screen right
       }
-      brake = this.key('KeyS', 'ArrowDown') && p.grounded;
-      pedal = (this.key('KeyW', 'ArrowUp') || (this.autoPedal && !brake)) && p.grounded;
-      tuck = this.key('ShiftLeft', 'ShiftRight') && !brake;
+      brake = (this.key('KeyS', 'ArrowDown') || ft.padBrake) && p.grounded;
+      pedal = (this.key('KeyW', 'ArrowUp') || ft.padPedal || (this.autoPedal && !brake)) && p.grounded;
+      tuck = (this.key('ShiftLeft', 'ShiftRight') || ft.padTuck) && !brake;
     }
-    // boost (ground / just-left-the-lip only)
-    const boostOk = p.grounded || p.airTime < 0.3;
-    if (canControl && this.key('Space') && this.boost > 2 && boostOk) {
-      if (!this.boosting) { audio.boost(); this.shakeAdd(0.5); }
-      this.boosting = true;
-    } else if (!this.key('Space') || this.boost <= 0 || !boostOk) this.boosting = false;
-    if (this.boosting) {
-      // BOOST EFFICIENCY: a bigger tank drains slower, so it lasts longer
-      this.boost = Math.max(0, this.boost - 34 * this.perf.boostBurn * dt);
-      if (this.boost <= 0) this.boosting = false;
-    }
+    // boost — ground only (Space is also Superman in the air; don't drain both)
+    const boostOk = p.grounded;
+    const wantBoost = canControl && (this.key('Space') || ft.padBoost) && boostOk;
+    this.boostSys.update(dt, wantBoost, canControl && boostOk, this.perf.boostBurn);
 
     // bonk (ground only — in the air Q/E become whips)
-    if (canControl && p.bonkCd <= 0 && canBonk(p.state)) {
-      if (this.tap('KeyQ')) this.doBonk(1);        // Q = swing screen-left (+x)
-      else if (this.tap('KeyE')) this.doBonk(-1);  // E = swing screen-right (-x)
+    if (canControl && firstTick && p.bonkCd <= 0 && canBonk(p.state)) {
+      if (ft.bonkL) this.doBonk(1);        // Q = swing screen-left (+x)
+      else if (ft.bonkR) this.doBonk(-1);  // E = swing screen-right (-x)
     }
 
     // hop
     let hop = false;
-    if (canControl && this.tap('KeyJ', 'ControlLeft') && p.grounded) hop = true;
+    if (canControl && firstTick && ft.hop && p.grounded) hop = true;
 
     // ---- air tricks on dedicated keys so steering never spins you out
     if (canControl && airborne) {
@@ -1214,33 +1412,32 @@ export class Game {
     // ---- endgame drama
     if (live) this.updateEndgame(dt);
 
-    // ---- zone announce
-    const zi = trk.zoneIndexAt(clamp01(p.s / trk.length));
-    if (zi !== this.lastZone && live) {
-      const first = this.lastZone < 0;
-      this.lastZone = zi;
-      this.hud.zoneFlash = 1;
-      if (zi > 0) audio.chime(4);
-      // ---- split timing: stamp the clock entering each new zone
-      if (!first && zi > 0) {
-        this.splits[zi] = this.raceTime;
-        const pb = this.pbSplits[zi];
-        if (pb !== undefined && pb > 0) {
-          const delta = this.raceTime - pb;
-          this.hud.splitDelta = delta;
+    // ---- checkpoints + zone announce (same section boundaries)
+    if (live) {
+      const hit = this.checkpoints.update(p.s, this.raceTime, dt);
+      if (hit && hit.index > 0) {
+        this.splits[hit.index] = this.raceTime;
+        this.hud.zoneFlash = 1;
+        audio.chime(4);
+        if (this.checkpoints.lastDelta !== null) {
+          this.hud.splitDelta = this.checkpoints.lastDelta;
           this.hud.splitHasPb = true;
           this.hud.splitShow = 3;
-          audio.chime(delta < 0 ? 7 : 0);
+          audio.chime(this.checkpoints.lastDelta < 0 ? 7 : 0);
         } else {
           this.hud.splitHasPb = false;
           this.hud.splitShow = 0;
         }
       }
     }
+    const zi = trk.zoneIndexAt(clamp01(p.s / trk.length));
+    if (zi !== this.lastZone && live) {
+      this.lastZone = zi;
+      if (this.hud.zoneFlash <= 0) this.hud.zoneFlash = 1;
+    }
     if (this.hud.splitShow > 0) this.hud.splitShow -= dt;
     this.hud.zoneFlash = Math.max(0, this.hud.zoneFlash - dt * 0.5);
 
-    if (this.boost > 0 && !this.boosting) this.boost = Math.min(100, this.boost);
     this.topSpeed = Math.max(this.topSpeed, p.v * 3.6);
   }
 
@@ -1285,7 +1482,7 @@ export class Game {
       r.y += r.vy * dt;
       if (r.y <= gh) { r.y = gh; r.vy = 0; }
 
-      r.wheelSpin += r.v * dt / 0.36;
+      r.wheelSpin += r.v * dt / WHEEL_R;
       // hands off the bars, one arm up, once they're nearly stopped
       if (r.isPlayer && r.v < 6) r.finishPose = Math.min(1, r.finishPose + dt * 2.2);
 
@@ -1316,8 +1513,10 @@ export class Game {
       // Mashing during a tumble claws back up to ~55% of the downtime and
       // buys back exit speed, so a wreck is something you fight, not watch.
       if (r.isPlayer && inp.live) {
-        if (this.tap('KeyW', 'ArrowUp', 'Space', 'KeyJ')) {
+        // once-per-frame mash (keyboard or gamepad A / RT)
+        if (this.frameTap.mash) {
           r.recover = clamp01(r.recover + 0.2);
+          this.frameTap.mash = false;
           audio.uiMove();
           this.hud.recoverPulse = 1;
         }
@@ -1371,7 +1570,7 @@ export class Game {
           audio.hop();
           if (r.recover > 0.55) {
             this.popup('QUICK RECOVERY!', 'sub', null, '#7ef7c8');
-            this.boost = Math.min(100, this.boost + 12);
+            this.boostSys.add('quickRecovery');
             audio.chime(5);
           }
           r.recover = 0;
@@ -1558,40 +1757,60 @@ export class Game {
     // the rider is actually putting power down.
     r.pedalling = damp(r.pedalling, inp.pedal && r.grounded ? 1 : 0, 9, dt);
 
-    // ---- PROGRESSIVE DIRT. Grime builds from riding, fastest in mud and
-    // when sliding; airtime lets a little flake off. Never fully clears, so
-    // a bike that has been down the mountain looks like it.
-    if (r.grounded && r.v > 3) {
-      const wet = surf.kind === 'mud' ? 3.2 : surf.kind === 'grass' ? 1.5 : 1;
-      const slide = 1 + Math.abs(r.vx) * 0.09;
-      r.dirt = Math.min(1, r.dirt + dt * 0.026 * wet * slide * clamp01(r.v / 20));
-      // pick up the local ground colour so mud reads brown and rock grey
-      _c1.setHex(this.track.zoneAt(r.s).dirt).lerp(_c2.setRGB(0.42, 0.36, 0.27), 0.45);
-      r.dirtTint.lerp(_c1, dt * 0.6);
-    } else if (!r.grounded) {
-      r.dirt = Math.max(0, r.dirt - dt * 0.012);
-    }
-    // wet fades back to dry; while wet the grime tint goes darker and
-    // glossier, which reads as a soaked bike rather than a dusty one
-    if (r.wet > 0) r.wet = Math.max(0, r.wet - dt * 0.35);
-    if (r.wet > 0.02) {
-      _c1.copy(r.dirtTint).multiplyScalar(1 - r.wet * 0.45);
-      r.rig.dirt.set(Math.max(r.dirt, r.wet * 0.55), _c1);
-    } else {
-      r.rig.dirt.set(r.dirt, r.dirtTint);
+    // ---- PROGRESSIVE DIRT. Per-surface rates + events. Never fully clears.
+    {
+      const zone = this.track.zoneAt(r.s);
+      // surface pickup rates: mud cakes, gravel dusts, rock barely sticks
+      const surfRate =
+        surf.kind === 'mud' ? 4.2 :
+        surf.kind === 'gravel' ? 2.4 :
+        surf.kind === 'grass' ? 1.6 :
+        surf.kind === 'rock' ? 0.55 :
+        1.15; // dirt
+      if (r.grounded && r.v > 3) {
+        const slide = 1 + Math.abs(r.vx) * 0.11 + (r.state === BikeState.DRIFTING ? 0.9 : 0);
+        const speedK = 0.35 + clamp01(r.v / 28) * 0.9;
+        r.dirt = Math.min(1, r.dirt + dt * 0.028 * surfRate * slide * speedK);
+        // tint toward local trail colour (mud brown, rock grey, etc.)
+        _c1.setHex(zone.dirt);
+        if (surf.kind === 'mud') _c1.lerp(_c2.setRGB(0.28, 0.20, 0.12), 0.55);
+        else if (surf.kind === 'rock') _c1.lerp(_c2.setRGB(0.45, 0.44, 0.42), 0.4);
+        else if (surf.kind === 'gravel') _c1.lerp(_c2.setRGB(0.5, 0.46, 0.38), 0.35);
+        else _c1.lerp(_c2.setRGB(0.42, 0.36, 0.27), 0.4);
+        r.dirtTint.lerp(_c1, dt * 0.75);
+      } else if (!r.grounded) {
+        // air: light flaking only
+        r.dirt = Math.max(0, r.dirt - dt * 0.01);
+      }
+      // braking roost cakes the rear
+      if (r.grounded && inp.brake && r.v > 8) {
+        r.dirt = Math.min(1, r.dirt + dt * 0.04 * surfRate);
+      }
+      // wet fades; while wet grime reads darker / soaked
+      if (r.wet > 0) r.wet = Math.max(0, r.wet - dt * 0.28);
+      if (r.wet > 0.02) {
+        _c1.copy(r.dirtTint).multiplyScalar(1 - r.wet * 0.5);
+        r.rig.dirt.set(Math.max(r.dirt, r.wet * 0.6), _c1);
+      } else {
+        r.rig.dirt.set(r.dirt, r.dirtTint);
+      }
     }
 
     // ---- fore/aft weight shift. Riders get back over the rear wheel on
     // steeps and under braking, and move forward to drive on the flat.
+    // This is the body language layer: readable from chase cam at speed.
     let wTarget = 0;
     wTarget -= clamp01((pitch - 0.14) / 0.20) * 0.85;      // steepness
-    if (inp.brake) wTarget -= 0.7;
-    if (inp.tuck) wTarget += 0.35;
-    if (inp.pedal && r.v < 22) wTarget += 0.45;
+    if (inp.brake) wTarget -= 0.85;                         // hard hang-back
+    if (inp.tuck) wTarget += 0.40;
+    if (inp.pedal && r.v < 22) wTarget += 0.50;             // drive forward
+    if (inp.boost && r.grounded) wTarget += 0.55;           // attack lean
+    // landing: squat over the bike for a beat (absorb impact)
+    if (r.landTimer > 0) wTarget -= 0.35 * clamp01(r.landTimer * 4);
     if (!r.grounded) wTarget = wTarget * 0.3 - 0.15;
     if (r.stun > 0) wTarget -= 0.3;
     wTarget += r.stWeight;                                  // personal stance
-    r.weight = damp(r.weight, clamp(wTarget, -1, 1), 4.5 * r.stTwitch, dt);
+    r.weight = damp(r.weight, clamp(wTarget, -1, 1), 5.2 * r.stTwitch, dt);
     if (inp.pedal && r.grounded) {
       // cadence rises with speed but tops out; riders spin out in tall gears
       const cadence = lerp(4.2, 11.5, clamp01(r.v / 26)) * r.stCadence;
@@ -1676,7 +1895,7 @@ export class Game {
       if (r.stateT > 0.8) {
         const pts = 60 * r.stateT * this.comboMult();
         this.addScore(pts);
-        this.boost = Math.min(100, this.boost + r.stateT * 6);
+        this.boostSys.gain(r.stateT * 6);
         this.popup(`DRIFT +${Math.round(pts)}`, 'sub', null, '#7ef7ff');
       }
     }
@@ -1684,6 +1903,14 @@ export class Game {
 
   private respawn(r: Racer) {
     const trk = this.track;
+    // snap to last checkpoint so a cliff fall doesn't re-spawn mid-void
+    if (r.isPlayer) {
+      const cp = this.checkpoints.lastBefore(r.s);
+      if (cp && r.s - cp.s > 18) {
+        r.s = cp.s + 6;
+        r.x = cp.x;
+      }
+    }
     const hw = trk.halfWidth(r.s);
     r.x = clamp(r.x, -hw * 0.6, hw * 0.6);
     r.y = trk.heightAt(r.s, r.x) + 0.6;
@@ -1742,17 +1969,31 @@ export class Game {
           this.spawnLandingBurst(r, dust);
           this.shakeAdd(clamp01(impact / 26) * 0.85);
           r.suspV -= Math.min(impact * 0.5, 10);
+          // heavy landings pack dirt onto the bike
+          r.dirt = Math.min(1, r.dirt + dust * 0.08);
+          _c1.setHex(this.track.zoneAt(r.s).dirt);
+          r.dirtTint.lerp(_c1, dust * 0.35);
         }
         // speed physics: reward smooth landings
         r.v -= impact * 0.11 * (1 - landQual) * 2.2;
         if (slopeF < -0.05) r.v += Math.min(4.5, impact * 0.10);
         // rear-wheel-first is the clean way down: keeps drive, stays settled
-        if (r.chassisPitch < -0.08 && r.chassisPitch > -0.42) {
+        const cleanRear = r.chassisPitch < -0.08 && r.chassisPitch > -0.42;
+        if (cleanRear) {
           r.v += Math.min(2.6, impact * 0.06);
           if (r.isPlayer && impact > 9) {
             this.style = Math.min(1, this.style + 0.2);
-            this.boost = Math.min(100, this.boost + 5);
+            this.boostSys.add('cleanLanding');
           }
+        }
+        // sell big clean airs: FOV punch + STOMPED callout + brief slow-mo
+        if (r.isPlayer && air > 0.9 && landQual > 0.55 && !misaligned) {
+          this.fov = Math.min(this.fov + 6, 92);
+          this.shakeAdd(0.35);
+          this.boostSys.add('cleanLanding', 1.4);
+          this.popup(landQual > 0.78 ? 'STOMPED!' : 'CLEAN', 'sub', null,
+            landQual > 0.78 ? '#c0f000' : '#7ef7c8');
+          if (air > 1.35 && landQual > 0.7) this.slowmo = Math.max(this.slowmo, 0.28);
         }
         r.v = Math.max(0, r.v);
       }
@@ -1778,6 +2019,14 @@ export class Game {
   private crashPlayer(cause: CrashCause, dir = 1) {
     const p = this.player;
     if (p.crash > 0) return;
+    if (this.invincible && cause !== CrashCause.OFF_TRACK) {
+      // still shove and flash so the hit reads, but stay upright
+      p.v *= 0.85;
+      p.stun = 0.15;
+      this.shakeAdd(0.3);
+      this.hud.hitFlash = 0.4;
+      return;
+    }
     const P = CRASH_PROFILES[cause];
     p.crash = P.duration;
     p.crashMax = P.duration;
@@ -1787,6 +2036,10 @@ export class Game {
     // off-track keeps its momentum (you're falling, not stopping)
     p.v *= cause === CrashCause.OFF_TRACK ? 0.72 : 0.22;
     p.vy = P.pop;
+    // crash cakes the bike — impact dust sticks
+    p.dirt = Math.min(1, p.dirt + 0.18 + P.debris * 0.004);
+    _c1.setHex(this.track.zoneAt(p.s).dirt).lerp(_c2.setRGB(0.35, 0.28, 0.2), 0.4);
+    p.dirtTint.lerp(_c1, 0.7);
 
     audio.crash();
     audio.duck(0.8, 1.1);
@@ -1808,6 +2061,7 @@ export class Game {
     r.ragdoll = startRagdoll(cause, dir);
     r.v *= 0.25;
     r.vy = P.pop * 0.8;
+    r.dirt = Math.min(1, r.dirt + 0.14);
     if (Math.abs(r.s - this.player.s) < 120) this.spawnCrashDebris(r, P.debris * 0.6);
   }
 
@@ -1911,7 +2165,11 @@ export class Game {
     const skill = clamp(r.skill + band2, SKILL_MIN, SKILL_MAX);
     // personality sets the ceiling; the band nudges it
     r.aiCap = B ? B.cap * (1 + band2 * 0.5) : 24.5 + skill * 15;
-    const wantSpeed = r.aiCap;
+    // first 30s: pack stays bunched so the holeshot is a real fight, not a parade
+    const early = this.raceTime < 28
+      ? 1 - clamp01(this.raceTime / 28) * 0.35
+      : 1;
+    const wantSpeed = r.aiCap * (0.88 + early * 0.12);
     // ---- CORNERING. Higher tiers believe in more grip, so they carry more
     // speed through the same corner rather than simply having a higher cap.
     const grip = B ? B.cornerGrip : 15 + r.corner * 9;
@@ -1956,8 +2214,10 @@ export class Game {
         if (Math.abs(other.y - r.y) > 2.4) continue;
         // more likely to swing at someone who's beating them
         const spite = other.s > r.s ? 1.5 : 0.7;
-        // combat sections crank everyone up; so does the mode
-        const arena = this.track.zoneAt(r.s).combat ? 2.3 : 1;
+        // combat sections crank everyone up; so does the mode;
+        // early race also turns up the heat so the pack is a brawl from the gate
+        const earlyFight = this.raceTime < 35 ? 1.45 : 1;
+        const arena = (this.track.zoneAt(r.s).combat ? 2.3 : 1) * earlyFight;
         const modeK = getMode(this.mode).aggressionScale;
         const Bc = r.brain;
         // THE BONKER hunts the player specifically; others take what's near
@@ -2138,6 +2398,14 @@ export class Game {
     a.bonkCooldownPair = 0.35;
     b.bonkCooldownPair = 0.35;
 
+    // contact dirt: both bikes pick up a bit of trail colour on impact
+    const dirtHit = 0.04 + res.power * 0.06;
+    a.dirt = Math.min(1, a.dirt + dirtHit * 0.6);
+    b.dirt = Math.min(1, b.dirt + dirtHit);
+    _c1.setHex(trk.zoneAt(b.s).dirt);
+    a.dirtTint.lerp(_c1, 0.25);
+    b.dirtTint.lerp(_c1, 0.4);
+
     // WALL BONK: drive them off the course properly, and make the terrain
     // finish the job rather than just relabelling a side hit
     if (res.type === BonkType.WALL) {
@@ -2182,11 +2450,13 @@ export class Game {
 
     const pts = res.score * this.comboMult() * (deliberate ? 1 : 0.6);
     this.addScore(pts);
-    this.boost = Math.min(100, this.boost + res.boost);
+    if (mega) this.boostSys.add('megaBonk', res.boost / 34);
+    else this.boostSys.add('bonk', res.boost / 13);
     this.style = Math.min(1, this.style + (mega ? 0.5 : 0.3));
 
     this.popupAt(world, `${flavour}  +${Math.round(pts)}`, res.colour, mega ? 34 : 28);
-    this.spawnImpactBurst(world, Math.sign(res.knockX), 0.6 + res.power);
+    // MEGA/WALL power floor so the impact ring always reads larger/brighter
+    this.spawnImpactBurst(world, Math.sign(res.knockX), (mega ? 1.25 : 0.6) + res.power);
     audio.cheer(0.4 + res.power * 0.5);
     this.hud.hitFlash = Math.max(this.hud.hitFlash, mega ? 0.75 : 0.5);
     this.hud.lastBonk = res.type;
@@ -2236,7 +2506,7 @@ export class Game {
     this.addCombo();
     const pts = base * this.comboMult();
     this.addScore(pts);
-    this.boost = Math.min(100, this.boost + 13);
+    this.boostSys.add('bonk');
     this.style = Math.min(1, this.style + 0.3);
     this.popupAt(world.clone(), `${label}  +${Math.round(pts)}`, '#ffd400', 30);
     this.spawnImpactBurst(world, dir, power);
@@ -2358,7 +2628,7 @@ export class Game {
             this.addCombo();
             const pts = (PROP_SCORE[o.type] ?? 100) * this.comboMult();
             this.addScore(pts);
-            this.boost = Math.min(100, this.boost + (PROP_BOOST[o.type] ?? 5));
+            this.boostSys.add('prop', (PROP_BOOST[o.type] ?? 5) / 6);
             this.popupAt(wp, `${PROP_CALL[o.type] ?? 'SMASH'}  +${Math.round(pts)}`,
               '#ffd400', 22);
           }
@@ -2414,7 +2684,7 @@ export class Game {
           this.addCombo();
           const pts = 120 * this.comboMult();
           this.addScore(pts);
-          this.boost = Math.min(100, this.boost + 6);
+          this.boostSys.add('prop');
           const wp = trk.worldPos(o.s, o.x, oh + 0.7, _v1).clone();
           this.popupAt(wp, `PLOW  +${Math.round(pts)}`, '#ffb020', 22);
           this.spawnImpactBurst(wp, dir, 0.7);
@@ -2461,10 +2731,14 @@ export class Game {
     if (r.v < 4) return;
     const info = patchSurface(kind);
     if (!info) return;
-    // wet tyres: entering water darkens the rubber and it stays dark for a
-    // few seconds after, which is what sells the surface as actually wet
-    if (info.spray === 'water' && r.isPlayer) {
+    // wet tyres: water darkens the bike for a few seconds after exit
+    if (info.spray === 'water') {
       r.wet = 1;
+      r.dirt = Math.min(1, r.dirt + 0.04);
+    } else if (info.spray === 'snow') {
+      // powder brightens / lightens the tint briefly
+      r.dirtTint.lerp(_c2.setRGB(0.85, 0.88, 0.92), 0.25);
+      r.dirt = Math.min(1, r.dirt + 0.03);
     }
     const trk = this.track;
     // slow and destabilise while in it
@@ -2638,7 +2912,7 @@ export class Game {
         this.nearMissCd = 0.6;
         this.nearMisses++;
         this.addScore(90 * this.comboMult());
-        this.boost = Math.min(100, this.boost + 7);
+        this.boostSys.add('nearMiss');
         this.style = Math.min(1, this.style + 0.18);
         this.popup('CLOSE SHAVE +' + Math.round(90 * this.comboMult()), 'sub', null, '#7ef7c8');
         audio.whoosh(0.7);
@@ -2657,7 +2931,7 @@ export class Game {
       if (ds > 2 && ds < 15 && Math.abs(r.x - p.x) < 3.0) {
         this.drafting = true;
         p.v += 4.5 * dt;
-        this.boost = Math.min(100, this.boost + 7 * dt);
+        this.boostSys.add('draft', dt);
         this.style = Math.min(1, this.style + 0.12 * dt);
         break;
       }
@@ -2687,8 +2961,8 @@ export class Game {
 
     this.tricksLanded++;
     this.addCombo();
-    this.addScore(pts);
-    this.boost = Math.min(100, this.boost + clamp(14 + pts / 42, 10, 46));
+    this.addScore(pts * getMode(this.mode).trickScale);
+    this.boostSys.add('trick', clamp((14 + pts / 42) / 14, 0.7, 3.2));
     this.style = 1;
     if (pts > this.bestTrickScore) { this.bestTrickScore = pts; this.bestTrick = res.name; }
 
@@ -2768,7 +3042,7 @@ export class Game {
       this.addCombo();
       const pts = 340 * this.comboMult();
       this.addScore(pts);
-      this.boost = Math.min(100, this.boost + 26);
+      this.boostSys.add('shortcut');
       this.style = 1;
       this.popup(`SHORTCUT!  −${saved.toFixed(0)}m  +${Math.round(pts)}`, 'trick', null, '#c0f000');
       audio.chime(9);
@@ -2830,10 +3104,16 @@ export class Game {
     // Body pitch: the chassis rides the line between the two contact patches,
     // plus a small vertical-velocity lean. This is what makes the bike look
     // like it's rolling over terrain instead of sliding along a curve.
+    // Landing squat + brake hang-back + accel attack are layered on top so
+    // the rider never reads as a rigid mannequin bolted to the frame.
+    const landCrouch = r.landTimer > 0 ? clamp01(r.landTimer * 3.2) * 0.14 : 0;
     const pitchTarget = (r.grounded ? clamp(-r.vy * 0.012, -0.16, 0.16) : clamp(-r.vy * 0.016, -0.3, 0.3))
-      - r.chassisPitch;
+      - r.chassisPitch
+      + landCrouch
+      + clamp01(-r.weight) * 0.06
+      - clamp01(r.weight) * 0.05;
     rig.body.rotation.x = damp(rig.body.rotation.x, pitchTarget, 14, dt);
-    rig.body.position.y = r.suspension * 0.35;
+    rig.body.position.y = r.suspension * 0.35 - landCrouch * 0.55;
 
     // ---- suspension travel ---------------------------------------------
     // The frame drops with `suspension`; the fork lowers and swingarm move
@@ -2855,39 +3135,21 @@ export class Game {
     rig.shock.quaternion.setFromUnitVectors(_yAxis, _v4.divideScalar(shockLen));
     rig.shock.scale.y = shockLen / SHOCK_BASE_LEN;
 
+    // style weights for IK / trick layers (player only)
+    let styleSuperman = 0, styleNoHand = 0, styleOneFoot = 0;
     // trick rotations for the player
     if (r.isPlayer) {
       rig.spin.rotation.y = damp(rig.spin.rotation.y, this.airSpin, 30, dt);
       rig.flip.rotation.x = damp(rig.flip.rotation.x, this.airFlip, 26, dt);
-      // ---- STYLE POSES. Each reads differently in silhouette, and they
-      // blend additively so combinations look like combinations.
       const A = this.styleActive;
       const on = (s: StyleTrick) => (A.has(s) ? 1 : 0);
-      const poseAmt = clamp01(this.airPose * 3) * on(StyleTrick.SUPERMAN);
-      const noHand = on(StyleTrick.NO_HANDER);
-      const oneFoot = on(StyleTrick.ONE_FOOTER);
+      styleSuperman = clamp01(this.airPose * 3) * on(StyleTrick.SUPERMAN);
+      styleNoHand = on(StyleTrick.NO_HANDER);
+      styleOneFoot = on(StyleTrick.ONE_FOOTER);
       const table = on(StyleTrick.TABLETOP);
       const whip = on(StyleTrick.TAILWHIP);
       const bars = on(StyleTrick.BARSPIN);
       const D = 11;
-
-      // superman: body stretched out behind the bike
-      rig.rider.position.z = damp(rig.rider.position.z,
-        -poseAmt * 0.62 + r.weight * 0.17, 12, dt);
-      rig.rider.position.y = damp(rig.rider.position.y,
-        poseAmt * 0.26 - clamp01(-r.weight) * 0.07, 12, dt);
-
-      // legs: superman extends both, one-footer kicks the right leg out
-      rig.legL.rotation.x = damp(rig.legL.rotation.x, poseAmt * 1.35, D, dt);
-      rig.legR.rotation.x = damp(rig.legR.rotation.x,
-        poseAmt * 1.35 + oneFoot * 1.15, D, dt);
-      rig.legR.rotation.z = damp(rig.legR.rotation.z, oneFoot * 0.85, D, dt);
-
-      // arms: no-hander throws both wide
-      rig.armL.rotation.z = damp(rig.armL.rotation.z, noHand * 1.25, D, dt);
-      rig.armR.rotation.z = damp(rig.armR.rotation.z, -noHand * 1.25, D, dt);
-      rig.armL.rotation.x = damp(rig.armL.rotation.x, -noHand * 0.5, D, dt);
-      rig.armR.rotation.x = damp(rig.armR.rotation.x, -noHand * 0.5, D, dt);
 
       // tabletop: whole bike laid flat sideways under the rider
       rig.bike.rotation.z = damp(rig.bike.rotation.z, table * 1.15, D, dt);
@@ -2899,16 +3161,10 @@ export class Game {
         Math.round(this.whipAngle / TAU) * TAU, 9, dt);
       rig.swingarm.rotation.y = this.whipAngle;
 
-      // barspin: bars and front wheel spin under the rider
+      // barspin: bars spin; fork yaw applied later with steer for IK
       this.barAngle += bars * 15 * dt;
       if (!bars) this.barAngle = damp(this.barAngle,
         Math.round(this.barAngle / TAU) * TAU, 11, dt);
-      rig.fork.rotation.y = r.steerVis + this.barAngle;
-    } else if (r.isPlayer) {
-      // grounded: unwind any leftover trick geometry
-      rig.bike.rotation.z = damp(rig.bike.rotation.z, 0, 12, dt);
-      rig.bike.rotation.y = damp(rig.bike.rotation.y, 0, 12, dt);
-      rig.swingarm.rotation.y = damp(rig.swingarm.rotation.y, 0, 12, dt);
     }
     if (!r.isPlayer && !r.grounded && r.trickSpin !== 0) {
       // rival is committed to a trick: spin it, then unwind on touchdown
@@ -2923,40 +3179,32 @@ export class Game {
       rig.flip.rotation.x = damp(rig.flip.rotation.x, 0, 9, dt);
       rig.spin.rotation.y = damp(rig.spin.rotation.y, 0, 9, dt);
     }
-    if (!r.isPlayer) {
-      rig.rider.position.z = damp(rig.rider.position.z, r.weight * 0.17, 10, dt);
-      rig.rider.position.y = damp(rig.rider.position.y,
-        -clamp01(-r.weight) * 0.07, 10, dt);
-    }
-    // Torso pitch: weight shift + superman pose. The victory contribution
-    // is added later, once the arm pipeline has computed it — resolving
-    // here alone is what used to make the finish pose vanish.
+    // Chest pitch base: CHEST_ATTACK + weight/superman deltas (pelvis carries main lean).
+    // Positive pitch = forward lean; brake opens up, accel tucks, superman flattens.
     _poseTorsoBase = r.crash <= 0
-      ? clamp01(-r.weight) * 0.26 - clamp01(r.weight) * 0.20
-        + (r.isPlayer ? clamp01(this.airPose * 3) * 0.5 : 0)
+      ? ATTACK_PITCH
+        - clamp01(-r.weight) * 0.10 + clamp01(r.weight) * 0.08
+        - styleSuperman * 0.22
       : rig.torso.rotation.x;
 
-    // crash tumble
+    // crash tumble — cause-specific body + secondary limb motion
     if (r.crash > 0) {
       const rd = r.ragdoll;
       if (rd) {
-        // each axis is driven independently, so the cause is legible from
-        // the silhouette: pitch = over the bars, roll = bonked sideways
         rig.flip.rotation.x = rd.pitch;
         rig.spin.rotation.y = rd.yaw;
         rig.lean.rotation.z = rd.roll;
         rig.body.rotation.x = 0;
-        // limbs flail, damping out as the rider comes to rest
-        const flail = (1 - clamp01(rd.t / rd.duration)) * 1.5;
-        const w = this.time * 17;
-        rig.armL.rotation.z = Math.sin(w) * flail;
-        rig.armR.rotation.z = Math.sin(w + 2.1) * -flail;
-        rig.armL.rotation.x = Math.cos(w * 0.8) * flail * 0.7;
-        rig.armR.rotation.x = Math.cos(w * 0.8 + 1.4) * flail * 0.7;
-        rig.legL.rotation.x = Math.sin(w * 0.7 + 1) * flail * 0.9;
-        rig.legR.rotation.x = Math.sin(w * 0.7 + 3) * flail * 0.9;
-        rig.head.rotation.x = Math.sin(w * 0.6) * flail * 0.5;
-        // the bike leaves without you
+        const lim = sampleRagdollLimbs(rd, this.time);
+        rig.armL.rotation.set(lim.armL[0], lim.armL[1], lim.armL[2]);
+        rig.armR.rotation.set(lim.armR[0], lim.armR[1], lim.armR[2]);
+        rig.foreL.rotation.set(lim.foreL, 0, 0);
+        rig.foreR.rotation.set(lim.foreR, 0, 0);
+        rig.legL.rotation.set(lim.legL[0], lim.legL[1], lim.legL[2]);
+        rig.legR.rotation.set(lim.legR[0], lim.legR[1], lim.legR[2]);
+        rig.shinL.rotation.set(lim.shinL, 0, 0);
+        rig.shinR.rotation.set(lim.shinR, 0, 0);
+        rig.head.rotation.set(lim.headX, lim.headY, 0);
         if (rd.bike.active) {
           rig.bike.position.set(rd.bike.ox, rd.bike.oy, rd.bike.os);
           rig.bike.rotation.set(rd.bike.spin, rd.bike.spin * 0.6, rd.bike.spin * 0.9);
@@ -2975,46 +3223,25 @@ export class Game {
 
     // steering + wheels
     r.steerVis = damp(r.steerVis, clamp(steerInput * 0.42 + r.yaw * 0.5, -0.6, 0.6), 12, dt);
-    rig.fork.rotation.y = r.steerVis;
-    r.wheelSpin += r.v * dt / 0.36;
+    const barSpin = r.isPlayer ? this.barAngle : 0;
+    rig.fork.rotation.y = r.steerVis + barSpin;
+    r.wheelSpin += r.v * dt / WHEEL_R;
     rig.frontWheel.rotation.x = r.wheelSpin;
     rig.rearWheel.rotation.x = r.wheelSpin;
-    // ---- drivetrain + legs -------------------------------------------
-    // Coasting settles the cranks level (feet balanced on the pedals, the
-    // downhill attack stance); pedalling cycles the legs against them.
+    // ---- drivetrain ---------------------------------------------------
     if (r.pedalling > 0.02) {
       rig.cranks.rotation.x = r.crankAngle;
     } else {
-      const level = Math.round(r.crankAngle / Math.PI) * Math.PI;
+      // Freewheel to horizontal pedals (π/2 + nπ) so rest stance isn't one-foot-up.
+      const level = Math.round((r.crankAngle - Math.PI * 0.5) / Math.PI) * Math.PI + Math.PI * 0.5;
       r.crankAngle = damp(r.crankAngle, level, 7, dt);
       rig.cranks.rotation.x = r.crankAngle;
     }
-    if (r.crash <= 0) {
-      // left crank sits half a revolution behind the right
-      const cyc = r.pedalling;
-      const phL = r.crankAngle + Math.PI;
-      const phR = r.crankAngle;
-      // suspension compression pulls the knees up a touch
-      const absorb = -r.suspension * 0.55;
-      const poseAmt = r.isPlayer ? clamp01(this.airPose * 3) : 0;
-      if (poseAmt < 0.05) {
-        const thigh = 0.30, knee = 0.55;
-        rig.legL.rotation.x = Math.cos(phL) * thigh * cyc + absorb;
-        rig.legR.rotation.x = Math.cos(phR) * thigh * cyc + absorb;
-        rig.shinL.rotation.x = -(Math.cos(phL - 1.2) * 0.5 + 0.5) * knee * cyc - absorb * 0.8;
-        rig.shinR.rotation.x = -(Math.cos(phR - 1.2) * 0.5 + 0.5) * knee * cyc - absorb * 0.8;
-      }
-    }
 
-    // A ragdoll owns every limb outright — no steering, absorption or pose
-    // layering should touch them mid-tumble. Returning here rather than
-    // falling through is what keeps a crash from twitching back toward the
-    // riding pose while the body is still cartwheeling.
+    // A ragdoll owns every limb outright.
     if (r.crash > 0 && r.ragdoll) {
       r.steerVis = damp(r.steerVis, 0, 6, dt);
       rig.fork.rotation.y = r.steerVis;
-      // the shadow block below is skipped, so place it here — a tumbling
-      // rider still needs a ground contact or they read as weightless
       const cgh = trk.heightAt(r.s, r.x);
       rig.shadow.position.copy(trk.worldPos(r.s, r.x, cgh + 0.05, _v2));
       rig.shadow.quaternion.setFromRotationMatrix(_m1.makeBasis(right, up, fwd));
@@ -3028,162 +3255,156 @@ export class Game {
       return;
     }
 
-    // bonk swing animation
+    // ---- body stance + bonk (before IK so shoulders move with the spine) ---
+    const st = r.steerVis;
+    let bonkArm = 0;
+    const vp = r.finishPose;
+    // Suspension fold + landing pulse + brake crouch + air crouch → knees/elbows.
+    // Absorb only drops the pelvis chain; hands/feet stay locked to anchors.
+    const landPulse = r.landTimer > 0 ? clamp01(r.landTimer * 3.5) * 0.42 : 0;
+    const brakeFold = r.grounded && r.weight < -0.35 ? clamp01(-r.weight) * 0.14 : 0;
+    const airCrouch = !r.grounded && r.airTime > 0.08
+      ? clamp01(r.airTime * 2.2) * 0.22 + clamp01(-r.vy * 0.04) * 0.15
+      : 0;
+    // High speed: slightly more loaded athletic posture
+    const speedLoad = r.grounded ? clamp01((r.v - 18) / 40) * 0.08 : 0;
+    const absorb = r.crash <= 0
+      ? clamp(-r.suspension * 1.45 + landPulse + brakeFold + airCrouch + speedLoad, 0, 0.88)
+      : 0;
+
+    let chestYawTarget = -st * 0.18 - r.lean * 0.06;
+    let bonkWeightBias = 0;
     if (r.bonkSwing > 0) {
       r.bonkSwing -= dt * 4.2;
       const t = clamp01(r.bonkSwing);
       const swing = Math.sin(t * Math.PI) * 1.55 * r.bonkDir;
-      const st2 = r.steerVis;
-      // BONK is a layer too: the swinging arm takes over, but the OTHER arm
-      // keeps steering. Previously the non-swinging arm was left wherever
-      // the last frame put it, which read as a dead limb mid-punch.
-      const swingA = r.bonkDir < 0 ? rig.armL : rig.armR;
-      const holdA = r.bonkDir < 0 ? rig.armR : rig.armL;
-      swingA.rotation.z = -swing;
-      swingA.rotation.y = swing * 0.6;
-      swingA.rotation.x = damp(swingA.rotation.x, -0.2, 10, dt);
-      holdA.rotation.y = damp(holdA.rotation.y, -st2 * 0.34, 12, dt);
-      holdA.rotation.z = damp(holdA.rotation.z, st2 * 0.20, 12, dt);
-      holdA.rotation.x = damp(holdA.rotation.x, 0, 12, dt);
-      rig.torso.rotation.y = swing * 0.32;
-      // BONK step 2: the whole bike yaws and heels over against the swing —
-      // Newton's third, and it stops the rider looking like a torso on rails
-      rig.bike.rotation.y = -swing * 0.22;
-      rig.bike.rotation.z = swing * 0.14;
-      rig.fork.rotation.y = st2 - swing * 0.3;
-      _poseTorsoX = 0;
-      _poseHeadX = 0;
+      bonkArm = r.bonkDir < 0 ? -1 : 1;
+      // Directional body reaction: bike + torso + hips, not a teleport
+      rig.bike.rotation.y = -swing * 0.28;
+      rig.bike.rotation.z = swing * 0.18;
+      rig.fork.rotation.y = st - swing * 0.35;
+      // thrown slightly open (less attack) on impact, recovers with the swing
+      _poseTorsoX = -0.12 * Math.sin(t * Math.PI);
+      _poseHeadX = -0.18 * Math.sin(t * Math.PI);
+      chestYawTarget = swing * 0.42;
+      bonkWeightBias = -0.35 * Math.sin(t * Math.PI);
     } else {
-      // Hands stay on the grips: as the fork turns, the inside arm pulls back
-      // and the outside arm pushes out. Without this the bars rotate away
-      // from the hands and the whole rig reads as detached.
-      const st = r.steerVis;
-      // ================================================================
-      // ADDITIVE POSE PIPELINE
-      //
-      // Previously five separate blocks each wrote armR.rotation directly,
-      // so whichever ran last won and the others silently did nothing —
-      // that is exactly what makes a rider read as a model bolted to a
-      // physics object rather than a person riding a bike.
-      //
-      // Now every layer CONTRIBUTES to a target, weighted by how much
-      // authority it should have this frame, and one damp per joint at the
-      // end drives the rig. Layers blend instead of fighting.
-      //
-      //   base      hands on the bars, steering
-      //   absorb    suspension load folding the elbows
-      //   style     trick poses (no-hander etc.)
-      //   bonk      the swing
-      //   victory   arm up at the line
-      // ================================================================
-      const P = _pose;
-      P.reset();
-
-      // ---- LAYER: base — hands on the grips, tracking the fork
-      P.armLY = -st * 0.34;
-      P.armRY = -st * 0.34;
-      P.armLZ = st * 0.20;
-      P.armRZ = st * 0.20;
-      P.torsoY = -st * 0.16;
-
-      // ---- LAYER: impact absorption. Elbows fold with the same signal
-      // that compresses the fork, so limbs and suspension act together.
-      const absorbA = clamp(-r.suspension * 1.4, -0.15, 0.65);
-      P.armLZ += absorbA * 0.5;
-      P.armRZ -= absorbA * 0.5;
-      P.armLX -= absorbA;
-      P.armRX -= absorbA;
-
-      // ---- LAYER: style tricks. Weighted so a partial pose still shows
-      // some steering influence rather than snapping between the two.
-      if (r.isPlayer && this.styleActive.size > 0) {
-        const noHand = this.styleActive.has(StyleTrick.NO_HANDER) ? 1 : 0;
-        if (noHand) {
-          const w = 0.85;
-          P.armLZ = lerp(P.armLZ, 1.25, w);
-          P.armRZ = lerp(P.armRZ, -1.25, w);
-          P.armLX = lerp(P.armLX, -0.5, w);
-          P.armRX = lerp(P.armRX, -0.5, w);
-        }
+      _poseTorsoX = vp > 0.01 ? -0.3 * vp : 0;
+      _poseHeadX = vp > 0.01 ? -0.35 * vp : 0;
+      // airborne: slight forward attack so the rider doesn't sit upright in the air
+      if (!r.grounded && r.airTime > 0.1 && styleSuperman < 0.2) {
+        _poseTorsoX += 0.06 * clamp01(r.airTime);
       }
-
-      // ---- LAYER: victory pose, blended by its own 0..1 weight
-      const vp = r.finishPose;
-      if (vp > 0.01) {
-        P.armRZ = lerp(P.armRZ, -2.15, vp);
-        P.armRX = lerp(P.armRX, -0.5, vp);
-        P.torsoX += -0.3 * vp;
-        P.headX += -0.35 * vp;
-      }
-
-      // ---- resolve: one damp per joint
-      rig.armL.rotation.y = damp(rig.armL.rotation.y, P.armLY, 12, dt);
-      rig.armR.rotation.y = damp(rig.armR.rotation.y, P.armRY, 12, dt);
-      rig.armL.rotation.z = damp(rig.armL.rotation.z, P.armLZ, 12, dt);
-      rig.armR.rotation.z = damp(rig.armR.rotation.z, P.armRZ, 12, dt);
-      rig.armL.rotation.x = damp(rig.armL.rotation.x, P.armLX, 14, dt);
-      rig.armR.rotation.x = damp(rig.armR.rotation.x, P.armRX, 14, dt);
-      rig.torso.rotation.y = damp(rig.torso.rotation.y, P.torsoY, 9, dt);
-      _poseTorsoX = P.torsoX;
-      _poseHeadX = P.headX;
-
-      // unwind the bonk's bike yaw once the swing is done
       rig.bike.rotation.y = damp(rig.bike.rotation.y, 0, 10, dt);
       if (r.grounded) rig.bike.rotation.z = damp(rig.bike.rotation.z, 0, 10, dt);
     }
 
-    // ---- head: look where you're going, not where the bike points -----
+    if (r.crash <= 0) {
+      // Single damp pass into the skeletal stance driver — no position hacks.
+      const pitch = damp(rig.torso.rotation.x, _poseTorsoBase + _poseTorsoX, 7.5, dt);
+      const yaw = damp(rig.torso.rotation.y, chestYawTarget, 9, dt);
+      applyRiderStance(rig, {
+        chestPitch: pitch,
+        chestYaw: yaw,
+        weight: clamp(r.weight + bonkWeightBias, -1, 1),
+        absorb,
+        superman: styleSuperman,
+        lean: r.lean,
+      });
+    }
+
+    // ---- two-bone IK: hands→grips, feet→pedals (anchor matrix space) ---
+    if (r.crash <= 0) {
+      solveRiderIK(rig, {
+        handOffL: styleNoHand,
+        handOffR: Math.max(styleNoHand, vp),
+        footOffR: styleOneFoot,
+        superman: styleSuperman,
+        bonkArm: bonkArm || undefined,
+        lockLegs: styleSuperman > 0.85,
+        absorb,
+        lean: r.lean,
+      });
+
+      // bonk: swinging arm overrides IK after solve; opposite arm stays on bars
+      if (bonkArm !== 0) {
+        const swing = Math.sin(clamp01(r.bonkSwing) * Math.PI) * 1.55 * r.bonkDir;
+        const swingA = bonkArm < 0 ? rig.armL : rig.armR;
+        const swingF = bonkArm < 0 ? rig.foreL : rig.foreR;
+        swingA.rotation.set(-0.35, swing * 0.7, -swing * 1.05);
+        swingF.rotation.set(0.45, 0, 0);
+      }
+
+      // victory arm raise
+      if (vp > 0.01) {
+        rig.armR.rotation.set(-0.5 * vp, 0, -2.15 * vp);
+        rig.foreR.rotation.set(0, 0, 0);
+      }
+
+      // superman / one-footer when fully released from pedals
+      if (styleSuperman > 0.85) {
+        rig.legL.rotation.set(styleSuperman * 1.2, 0, 0);
+        rig.legR.rotation.set(styleSuperman * 1.2, 0, 0);
+        rig.shinL.rotation.set(-styleSuperman * 0.15, 0, 0);
+        rig.shinR.rotation.set(-styleSuperman * 0.15, 0, 0);
+      } else if (styleOneFoot > 0.85) {
+        rig.legR.rotation.set(styleOneFoot * 1.1, 0, styleOneFoot * 0.85);
+        rig.shinR.rotation.set(-0.2, 0, 0);
+      }
+    }
+
+    // ---- head: look where you're going --------------------------------
     const lookTarget = r.crash > 0
       ? 0
       : clamp((-trk.curvatureAt(r.s + 20 + r.v * 0.5) * 34 - r.yaw * 0.5) * r.stHead,
         -0.75, 0.75);
     r.headYaw = damp(r.headYaw, lookTarget, 5 * r.stTwitch, dt);
     rig.head.rotation.y = r.headYaw;
-    // Chin lift SUMS with the victory-pose contribution rather than
-    // replacing it — this line used to clobber the finish pose entirely.
     const chinAir = r.grounded ? 0 : clamp(-r.vy * 0.012, -0.22, 0.22);
     rig.head.rotation.x = damp(rig.head.rotation.x, chinAir + _poseHeadX, 6, dt);
 
-    // torso resolves last, summing the weight-shift base with the victory
-    // contribution the arm pipeline produced above
-    if (r.crash <= 0) {
-      rig.torso.rotation.x = damp(rig.torso.rotation.x,
-        _poseTorsoBase + _poseTorsoX, 7, dt);
-    }
-
-    // shadow
+    // Soft contact shadow — offset slightly down-sun (golden-hour raking)
+    // so the blob reads as a real cast shadow, not a sticker under the bike.
     const gh = trk.heightAt(r.s, r.x);
-    const sPos = trk.worldPos(r.s, r.x, gh + 0.05, _v2);
+    const sunOffS = -0.35; // along-track, opposite the key light
+    const sunOffX = 0.28;
+    const sPos = trk.worldPos(r.s + sunOffS, r.x + sunOffX, gh + 0.04, _v2);
     rig.shadow.position.copy(sPos);
     rig.shadow.quaternion.setFromRotationMatrix(_m1.makeBasis(right, up, fwd));
     rig.shadow.rotateX(-Math.PI / 2);
     const airH = clamp01((r.y - gh) / 8);
-    const sc = 1 + airH * 1.7;
-    rig.shadow.scale.set(sc, sc, 1);
-    (rig.shadow.material as THREE.MeshBasicMaterial).opacity = 0.85 * (1 - airH * 0.72);
+    const sc = 1 + airH * 1.9;
+    // stretch with lean so banked turns still plant a readable footprint
+    rig.shadow.scale.set(sc * (1 + Math.abs(r.lean) * 0.15), sc * (1.05 + Math.abs(r.yaw) * 0.2), 1);
+    (rig.shadow.material as THREE.MeshBasicMaterial).opacity =
+      0.82 * (1 - airH * 0.75) * (r.grounded ? 1 : 0.55 + (1 - airH) * 0.45);
 
     // ---- per-wheel contact patches -------------------------------------
     // These sit at the real axle offsets and conform to the ground, so the
     // bike reads as planted rather than floating over a single blob.
     const lift = clamp01((r.y - gh) / 1.1);          // tight fade with height
     const contactOn = r.crash <= 0 && lift < 1;
-    const place = (m: THREE.Mesh, ds: number, spread: number) => {
+    const place = (m: THREE.Mesh, ds: number, spread: number, load: number) => {
       m.visible = contactOn;
       if (!contactOn) return;
-      const cs = r.s + ds;
-      const cx = r.x;
+      const cs = r.s + ds + sunOffS * 0.4;
+      const cx = r.x + sunOffX * 0.35;
       const cy = trk.heightAt(cs, cx);
-      m.position.copy(trk.worldPos(cs, cx, cy + 0.04, _v3));
+      m.position.copy(trk.worldPos(cs, cx, cy + 0.035, _v3));
       trk.frameAt(cs, _f1, _f2, _f3);
       m.quaternion.setFromRotationMatrix(_m1.makeBasis(_f2, _f3, _f1));
       m.rotateX(-Math.PI / 2);
-      // smears out and softens as the wheel unweights
-      const s2 = spread * (1 + lift * 1.6);
-      m.scale.set(s2, s2 * (1 + Math.abs(r.vx) * 0.02), 1);
-      (m.material as THREE.MeshBasicMaterial).opacity = 0.8 * (1 - lift) * (1 - lift);
+      // smears out and softens as the wheel unweights; darkens under load
+      const s2 = spread * (1 + lift * 1.6) * (0.85 + load * 0.35);
+      m.scale.set(s2 * (1 + Math.abs(r.vx) * 0.018), s2 * (1.1 + Math.abs(r.vx) * 0.03), 1);
+      (m.material as THREE.MeshBasicMaterial).opacity =
+        (0.55 + load * 0.35) * (1 - lift) * (1 - lift);
     };
-    place(rig.contactF, 0.60, 1);
-    place(rig.contactR, -0.62, 1.1);
+    // weight bias: braking loads rear, accel/boost loads front
+    const frontLoad = clamp01(0.55 + r.weight * 0.45 + (r.chassisPitch > 0 ? 0.2 : 0));
+    const rearLoad = clamp01(0.55 - r.weight * 0.45 + (r.chassisPitch < 0 ? 0.25 : 0));
+    place(rig.contactF, FRONT_AXLE_POS.z, 1, frontLoad);
+    place(rig.contactR, REAR_AXLE_POS.z, 1.15, rearLoad);
   }
 
   // -------------------------------------------------------------------------
@@ -3251,39 +3472,122 @@ export class Game {
       }
     }
 
-    // boost fire
+    // ---- BOOST TRAIL --------------------------------------------------
+    // Brand speed language: elongated gold/orange ribbon + cooler embers,
+    // not a fire hose. Sparse enough that the rider stays readable.
     if (inp.boost) {
       trk.frameAt(r.s, _f1, _f2, _f3);
-      const back = trk.worldPos(r.s - 1.0, r.x, r.y + 0.4, _v1);
-      for (let i = 0; i < 2; i++) {
+      const back = trk.worldPos(r.s - 1.05, r.x, r.y + 0.38, _v1);
+      const n = Math.max(1, Math.round(2 * pScale));
+      for (let i = 0; i < n; i++) {
+        const side = this.rng.range(-0.35, 0.35);
         this.sparkPool.spawn({
-          pos: back.clone().addScaledVector(_f2, this.rng.range(-0.4, 0.4)).addScaledVector(_f3, this.rng.range(0, 0.5)),
-          vel: _f1.clone().multiplyScalar(-this.rng.range(4, 14)).addScaledVector(_f3, this.rng.range(0.5, 2.4)),
-          life: this.rng.range(0.18, 0.42), size: this.rng.range(0.5, 1.3), endSize: 0.05,
-          color: _c2.setRGB(1, this.rng.range(0.5, 0.9), 0.15),
-          endColor: _c1.setRGB(1, 0.15, 0.0),
-          alpha: 0.95, gravity: -4, drag: 2.2,
+          pos: back.clone()
+            .addScaledVector(_f2, side)
+            .addScaledVector(_f3, this.rng.range(0.05, 0.45)),
+          // stretch opposite travel so the trail reads as a streak
+          vel: _f1.clone().multiplyScalar(-this.rng.range(10, 22) - r.v * 0.18)
+            .addScaledVector(_f3, this.rng.range(0.2, 1.6))
+            .addScaledVector(_f2, side * 1.4),
+          life: this.rng.range(0.16, 0.38),
+          size: this.rng.range(0.55, 1.45), endSize: 0.04,
+          color: _c2.setRGB(1, this.rng.range(0.55, 0.95), 0.12),
+          endColor: _c1.setRGB(1, 0.12, 0.02),
+          alpha: 0.92, gravity: -3.5, drag: 1.8,
+        });
+      }
+      // soft heat haze ribbon (smoke pool, additive-ish warm colour)
+      if (Math.random() < dt * 28 * pScale) {
+        this.smokePool.spawn({
+          pos: back.clone().addScaledVector(_f2, this.rng.range(-0.25, 0.25)),
+          vel: _f1.clone().multiplyScalar(-r.v * 0.22 - 4)
+            .addScaledVector(_f3, this.rng.range(0.3, 1.2)),
+          life: this.rng.range(0.22, 0.48),
+          size: this.rng.range(0.45, 0.9), endSize: this.rng.range(1.6, 3.2),
+          color: _c1.setRGB(1, 0.72, 0.28),
+          endColor: _c2.setRGB(1, 0.35, 0.05),
+          alpha: 0.38, gravity: -2, drag: 2.4,
         });
       }
     }
 
-    // Wind motes. Only above a real speed threshold, and at a fraction of
-    // the old rate: this used to fire ~34/sec whenever moving, which ate the
-    // smoke pool that landing and drift dust need. Motes are a speed cue,
-    // not an atmosphere — if they're always there they read as neither.
-    if (r.v > 22) {
-      this.moteAccum += dt * clamp01((r.v - 22) / 18) * 11 * pScale;
+    // ---- WET TIRE SPRAY -----------------------------------------------
+    // After water/puddles, tyres keep flinging dark spray until wet fades.
+    // Distinct from roost dust: cooler, wetter, smaller droplets.
+    if (r.wet > 0.08 && r.grounded && r.v > 5) {
+      const wk = clamp01(r.wet) * clamp01(r.v / 24);
+      if (Math.random() < dt * (18 + r.v * 0.8) * wk * pScale) {
+        trk.frameAt(r.s, _f1, _f2, _f3);
+        const rear = trk.worldPos(r.s - 0.55, r.x, r.y + 0.12, _v1);
+        for (let i = 0; i < 2; i++) {
+          this.sparkPool.spawn({
+            pos: rear.clone().addScaledVector(_f2, this.rng.range(-0.25, 0.25)),
+            vel: _f1.clone().multiplyScalar(-r.v * this.rng.range(0.12, 0.28))
+              .addScaledVector(_f2, this.rng.range(-5, 5))
+              .addScaledVector(_f3, this.rng.range(2.5, 7)),
+            life: this.rng.range(0.22, 0.5),
+            size: this.rng.range(0.06, 0.16), endSize: 0.02,
+            color: _c1.setRGB(0.55, 0.62, 0.68).multiplyScalar(0.7 + r.wet * 0.3),
+            alpha: 0.75, gravity: 20, drag: 0.7,
+          });
+        }
+        if (Math.random() < 0.45) {
+          this.smokePool.spawn({
+            pos: rear.clone(),
+            vel: _f1.clone().multiplyScalar(-r.v * 0.1)
+              .addScaledVector(_f3, this.rng.range(0.8, 2.2)),
+            life: this.rng.range(0.3, 0.65),
+            size: this.rng.range(0.35, 0.7), endSize: this.rng.range(1.2, 2.4),
+            color: _c1.setRGB(0.62, 0.68, 0.72),
+            alpha: 0.28 * r.wet, gravity: 4, drag: 1.8,
+          });
+        }
+      }
+    }
+
+    // Wind motes — speed cue only above a real threshold.
+    const windK = clamp01((r.v - 20) / 22) * (this.boosting ? 1.55 : 1);
+    if (windK > 0.05) {
+      this.moteAccum += dt * windK * 14 * pScale;
       while (this.moteAccum > 1) {
         this.moteAccum -= 1;
         const ahead = trk.worldPos(
-          r.s + this.rng.range(16, 38), r.x + this.rng.range(-12, 12),
-          trk.heightAt(r.s + 20, r.x) + this.rng.range(0.6, 7), _v1);
+          r.s + this.rng.range(14, 40), r.x + this.rng.range(-14, 14),
+          trk.heightAt(r.s + 22, r.x) + this.rng.range(0.5, 8), _v1);
         trk.frameAt(r.s, _f1, _f2, _f3);
         this.smokePool.spawn({
           pos: ahead.clone(),
-          vel: _f1.clone().multiplyScalar(-this.rng.range(1, 5)),
-          life: this.rng.range(0.5, 1.0), size: 0.05, endSize: 0.02,
-          color: _c2.setRGB(1, 0.98, 0.9), alpha: 0.45, gravity: 0.4, drag: 0.2,
+          vel: _f1.clone().multiplyScalar(-this.rng.range(2, 8) - r.v * 0.08)
+            .addScaledVector(_f2, this.rng.range(-1.5, 1.5)),
+          life: this.rng.range(0.4, 0.9), size: 0.06, endSize: 0.015,
+          color: _c2.setRGB(1, 0.98, 0.92), alpha: 0.4 + windK * 0.2,
+          gravity: 0.3, drag: 0.15,
+        });
+      }
+    }
+
+    // Speed streaks — short additive dashes past the camera path, only at
+    // high speed / boost. Readability first: sparse, brief, no screen wash.
+    if (r.v > 28 && !this.reducedMotion) {
+      const sk = clamp01((r.v - 28) / 18) * (this.boosting ? 1.8 : 1);
+      this.streakAccum += dt * sk * 22 * pScale;
+      trk.frameAt(r.s, _f1, _f2, _f3);
+      while (this.streakAccum > 1) {
+        this.streakAccum -= 1;
+        const side = this.rng.range(-6, 6);
+        const up = this.rng.range(0.3, 4.5);
+        const along = this.rng.range(2, 14);
+        const pos = trk.worldPos(r.s + along, r.x + side, r.y + up, _v1);
+        this.sparkPool.spawn({
+          pos: pos.clone(),
+          // streak opposite travel so they whip past
+          vel: _f1.clone().multiplyScalar(-r.v * this.rng.range(0.55, 1.1))
+            .addScaledVector(_f2, this.rng.range(-2, 2)),
+          life: this.rng.range(0.08, 0.18),
+          size: this.rng.range(0.35, 1.1), endSize: 0.02,
+          color: _c1.setRGB(1, 0.97, 0.9),
+          endColor: _c2.setRGB(0.85, 0.9, 1),
+          alpha: 0.35 + sk * 0.35, gravity: 0, drag: 0.4,
         });
       }
     }
@@ -3338,24 +3642,127 @@ export class Game {
   }
 
   private spawnImpactBurst(world: THREE.Vector3, dir: number, power: number) {
-    for (let i = 0; i < 22; i++) {
+    const mega = power >= 1.15;
+    const megaK = mega ? 1 : 0;
+    const pk = Math.max(0.55, this.perfGov.particleScale);
+    const nSpark = Math.floor((mega ? 32 : 22) * pk);
+    for (let i = 0; i < nSpark; i++) {
       const a = this.rng.range(0, TAU), b = this.rng.range(-0.4, 1);
       this.sparkPool.spawn({
         pos: world.clone(),
-        vel: new THREE.Vector3(Math.cos(a) * 6 * power + dir * 5, b * 8 + 3, Math.sin(a) * 6 * power),
-        life: this.rng.range(0.16, 0.42), size: this.rng.range(0.25, 0.9), endSize: 0.02,
-        color: _c1.setRGB(1, this.rng.range(0.8, 1), this.rng.range(0.3, 0.7)),
-        endColor: _c2.setRGB(1, 0.35, 0.05),
+        vel: new THREE.Vector3(
+          Math.cos(a) * (6 + megaK * 4) * power + dir * (5 + megaK * 3),
+          b * (8 + megaK * 4) + 3,
+          Math.sin(a) * (6 + megaK * 4) * power),
+        life: this.rng.range(0.16, mega ? 0.55 : 0.42),
+        size: this.rng.range(0.25, mega ? 1.2 : 0.9), endSize: 0.02,
+        color: mega
+          ? _c1.setRGB(1, this.rng.range(0.55, 0.95), this.rng.range(0.55, 0.95))
+          : _c1.setRGB(1, this.rng.range(0.8, 1), this.rng.range(0.3, 0.7)),
+        endColor: mega ? _c2.setRGB(1, 0.18, 0.55) : _c2.setRGB(1, 0.35, 0.05),
         alpha: 1, gravity: 12, drag: 1.6,
       });
     }
-    for (let i = 0; i < 10; i++) {
+    const nSmoke = Math.floor((mega ? 16 : 10) * pk);
+    for (let i = 0; i < nSmoke; i++) {
       this.smokePool.spawn({
         pos: world.clone(),
         vel: new THREE.Vector3(this.rng.range(-4, 4) + dir * 3, this.rng.range(0, 5), this.rng.range(-4, 4)),
-        life: this.rng.range(0.3, 0.7), size: 0.5, endSize: 2.6,
-        color: _c1.setRGB(1, 0.95, 0.85), alpha: 0.5, gravity: -1, drag: 2.4,
+        life: this.rng.range(0.3, mega ? 0.95 : 0.7), size: mega ? 0.7 : 0.5, endSize: mega ? 3.8 : 2.6,
+        color: mega ? _c1.setRGB(1, 0.85, 0.95) : _c1.setRGB(1, 0.95, 0.85),
+        alpha: mega ? 0.58 : 0.5, gravity: -1, drag: 2.4,
       });
+    }
+    // dirt clods on heavy hits — physical comedy, not gore
+    if (power > 0.7) {
+      const zone = this.track.zoneAt(this.player.s);
+      for (let i = 0; i < Math.floor(8 * pk * power); i++) {
+        const a = this.rng.range(0, TAU);
+        const sp = this.rng.range(3, 10) * power;
+        this.dirtPool.spawn({
+          pos: world.clone().add(new THREE.Vector3(0, 0.2, 0)),
+          vel: new THREE.Vector3(Math.cos(a) * sp + dir * 4, this.rng.range(2, 8), Math.sin(a) * sp),
+          life: this.rng.range(0.4, 1.0),
+          size: this.rng.range(0.12, 0.32), endSize: 0.06,
+          color: _c1.setHex(zone.dirt).multiplyScalar(this.rng.range(0.7, 1.15)),
+          alpha: 1, gravity: 24, drag: 0.75, spin: this.rng.range(-12, 12),
+          bounce: 0.25,
+        });
+      }
+    }
+    // expanding gold/white ring — the brand "IMPACT" glyph for a BONK
+    this.spawnImpactRing(world, power, 0xffd060);
+    // MEGA: second hot-pink ring (brand punch) — offset slightly so it
+    // reads as a double-hit rather than a thicker single ring
+    if (mega) {
+      this.spawnImpactRing(world, power * 0.85, 0xff2e88, 0.12);
+    }
+  }
+
+  /**
+   * Grab a pooled ring and fire it from `world`. Higher `power` (MEGA / wall)
+   * expands farther, lasts a beat longer, and burns brighter white-gold.
+   * Optional `colorHex` + `yLift` for dual-ring MEGA brand language.
+   */
+  private spawnImpactRing(world: THREE.Vector3, power: number, colorHex = 0xffd060, yLift = 0) {
+    let ring: ImpactRing | null = null;
+    for (const r of this.impactRings) {
+      if (!r.active) { ring = r; break; }
+    }
+    // pool full: recycle the oldest (lowest remaining life)
+    if (!ring) {
+      ring = this.impactRings[0];
+      for (let i = 1; i < this.impactRings.length; i++) {
+        if (this.impactRings[i].life < ring.life) ring = this.impactRings[i];
+      }
+    }
+
+    const mega = power >= 1.15;
+    const p = clamp(power, 0.35, 2.0);
+    ring.active = true;
+    ring.maxLife = mega ? 0.45 : 0.28 + p * 0.04;
+    ring.life = ring.maxLife;
+    ring.startScale = mega ? 0.55 : 0.45;
+    ring.endScale = (mega ? 5.8 : 2.6) + p * 1.4;
+    ring.peakAlpha = mega ? 1.0 : 0.72 + p * 0.12;
+    ring.mat.color.setHex(colorHex);
+    ring.mat.opacity = ring.peakAlpha;
+    ring.mesh.position.copy(world);
+    ring.mesh.position.y += 0.55 + yLift;
+    // face the camera so the ring reads as a flat brand hit mark
+    ring.mesh.quaternion.copy(this.camera.quaternion);
+    ring.mesh.scale.setScalar(ring.startScale);
+    ring.mesh.visible = true;
+  }
+
+  private updateImpactRings(dt: number) {
+    for (const r of this.impactRings) {
+      if (!r.active) continue;
+      r.life -= dt;
+      if (r.life <= 0) {
+        r.active = false;
+        r.mesh.visible = false;
+        r.mat.opacity = 0;
+        continue;
+      }
+      const t = 1 - r.life / r.maxLife; // 0 → 1
+      // ease-out expand; fade after the first third so the hit pops then softens
+      const ease = 1 - (1 - t) * (1 - t);
+      const sc = r.startScale + (r.endScale - r.startScale) * ease;
+      r.mesh.scale.setScalar(sc);
+      // billboard each frame so chase-cam rolls don't turn the ring into a line
+      r.mesh.quaternion.copy(this.camera.quaternion);
+      const fade = t < 0.25 ? 1 : 1 - (t - 0.25) / 0.75;
+      r.mat.opacity = r.peakAlpha * fade * fade;
+    }
+  }
+
+  private clearImpactRings() {
+    for (const r of this.impactRings) {
+      r.active = false;
+      r.life = 0;
+      r.mesh.visible = false;
+      r.mat.opacity = 0;
     }
   }
 
@@ -3489,6 +3896,7 @@ export class Game {
       : new Track(m.seed, m.length);
     this.scene.add(this.track.build());
     this.track.updateSceneryLod(0, 1, true);
+    this.checkpoints.build(this.track);
     this.lastZone = -1;
     this.menuTime = 0;
     this.resetRace();
@@ -3520,7 +3928,7 @@ export class Game {
 
     // rider choice drives the silhouette, not just the palette
     const rig = createRider(loadoutColors(l), getBuild(RIDER_BUILD_OF[l.rider] ?? 'allround'));
-    // Wheel size is capped tight: the physics ground plane assumes a 0.36m
+    // Wheel size is capped tight: the physics ground plane assumes WHEEL_R
     // radius, so a large deviation floats the bike or sinks it into the
     // dirt. Keep the visual difference subtle enough to stay grounded.
     const ws = clamp(bike.wheelScale, 0.96, 1.06);
@@ -3586,7 +3994,7 @@ export class Game {
       foe.s += foe.v * dt;
       foe.y = this.track.heightAt(foe.s, foe.x);
       foe.crankAngle += 11 * dt;
-      foe.wheelSpin += foe.v * dt / 0.36;
+      foe.wheelSpin += foe.v * dt / WHEEL_R;
       p.headYaw = damp(p.headYaw, -0.5, 6, dt);
     }
 
@@ -3594,8 +4002,11 @@ export class Game {
     const inWindow = t >= INTRO.react && t < INTRO.react + 1.0;
     h.reactWindow = inWindow ? 1 - (t - INTRO.react) / 1.0 : 0;
     if (inWindow && !this.introReacted) {
-      if (this.tap('KeyW', 'ArrowUp', 'Space')) {
+      // poll pad here — intro path doesn't run stepPhysics edge latches fully
+      this.latchInput(false);
+      if (this.frameTap.react || this.tap('KeyW', 'ArrowUp', 'Space')) {
         this.introReacted = true;
+        this.frameTap.react = false;
         h.holeshot = true;
         audio.chime(8);
         audio.cheer(0.7);
@@ -3632,7 +4043,7 @@ export class Game {
         this.shakeAdd(0.9);
         // holeshot reward: a real head start you earned
         if (h.holeshot) {
-          this.boost = Math.min(100, this.boost + 45);
+          this.boostSys.gain(45);
           this.player.v = 9;
           this.popup('HOLESHOT!', 'trick', null, '#c0f000');
           this.addScore(250);
@@ -3820,11 +4231,11 @@ export class Game {
 
     // a crash is worth watching: pull back and up so the tumble is in frame
     const crashK = p.crash > 0 ? clamp01(p.crash / Math.max(0.4, p.crashMax)) : 0;
-    const back = 7.6 + speed01 * 3.6 + air * 2.6 + (this.boosting ? -0.8 : 0)
+    // Slightly closer/higher than before so the rider silhouette (helmet →
+    // bars → wheels) stays readable at chase distance, not a speck of blobs.
+    const back = 6.8 + speed01 * 3.2 + air * 2.4 + (this.boosting ? -0.7 : 0)
       + crashK * 3.4;
-    // camera drops toward the deck with speed: ground detail passes closer
-    // to the lens, which reads as faster than raising it would
-    const height = 2.75 - speed01 * 0.55 + air * 1.5 + aboveGround * 0.55
+    const height = 2.95 - speed01 * 0.45 + air * 1.5 + aboveGround * 0.55
       + crashK * 2.2;
     const camS = p.s - back;
     const camX = p.x * 0.62;
@@ -3839,10 +4250,11 @@ export class Game {
       this.camPos.z = damp(this.camPos.z, want.z, rate, dt);
     }
 
-    // look target
-    const lookS = p.s + 9 + p.v * 0.28;
+    // Look a bit closer to the rider (not far down-track) so the bike+body
+    // read as one unit; still lead the path for race feel.
+    const lookS = p.s + 5.5 + p.v * 0.22;
     const lookX = p.x * 0.55;
-    const lookH = trk.heightAt(lookS, lookX) + 1.9 + aboveGround * 0.45;
+    const lookH = trk.heightAt(lookS, lookX) + 1.55 + aboveGround * 0.45;
     const lookWant = trk.worldPos(lookS, lookX, lookH, _v2);
     if (snap) this.camLook.copy(lookWant);
     else {
@@ -3869,13 +4281,16 @@ export class Game {
     this.camRoll = damp(this.camRoll, targetRoll, 7, dt);
     this.camera.rotateZ(this.camRoll);
 
-    // ---- SENSE OF SPEED. Three cues stack rather than relying on FOV
-    // alone: the lens widens, the camera drops toward the deck (so ground
-    // detail rips past closer to the eye), and it tucks in behind.
+    // ---- SENSE OF SPEED. FOV + deck drop + tuck-in (position above).
+    // Curve is nonlinear: mid-speed barely widens, top-end / boost punches.
     const fovK = this.reducedMotion ? 0.35 : 1;
-    const targetFov = 66 + (speed01 * 16 + (this.boosting ? 9 : 0)
-      + (p.crash > 0 ? -6 : 0) + air * 3) * fovK;
-    this.fov = damp(this.fov, targetFov, 5, dt);
+    const speedPunch = speed01 * speed01; // ease-in
+    const targetFov = 65
+      + (speedPunch * 14 + speed01 * 6
+        + (this.boosting ? 11 : 0)
+        + (p.crash > 0 ? -7 : 0)
+        + air * 4) * fovK;
+    this.fov = damp(this.fov, targetFov, this.boosting ? 7 : 5, dt);
     if (Math.abs(this.camera.fov - this.fov) > 0.01) {
       this.camera.fov = this.fov;
       this.camera.updateProjectionMatrix();
@@ -3942,6 +4357,11 @@ export class Game {
     this.track.updateSpectators(p.s, this.time, dt, this.perfGov.crowdScale);
     this.track.updateSceneryLod(p.s, this.perfGov.lodScale);
     this.track.animateWater(this.time);
+    // foliage sway: ambient + speed + boost (shader uniforms only)
+    const windK = this.reducedMotion ? 0.25 : 1;
+    const windStr =
+      (0.35 + clamp01(p.v / 40) * 1.15 + (this.boosting ? 0.55 : 0)) * windK;
+    this.track.animateWind(this.time, windStr);
 
     // crowd reaction near player
     this.hud.offTrack = Math.abs(p.x) > this.track.halfWidth(p.s) + 0.5;
@@ -4268,6 +4688,26 @@ export class Game {
       const info = this.renderer.info.render;
       h.draws = info.calls;
       h.tris = info.triangles;
+      h.debugVel = p.v;
+      h.debugAir = p.airTime;
+      const cp = this.checkpoints.lastBefore(p.s);
+      h.debugCp = cp ? `${cp.index}:${cp.name}` : '—';
+      h.debugInv = this.invincible;
+    }
+    // mode objective strip
+    {
+      const rules = getMode(this.mode);
+      const mh = rules.hud({
+        raceTime: this.raceTime,
+        progress: clamp01(p.s / this.track.length),
+        place: p.place, fieldSize: this.racers.length,
+        score: this.score, tricks: this.tricksLanded, bonks: this.bonks,
+        shortcuts: this.shortcutsHit, nearMisses: this.nearMisses,
+        finished: p.finished, clock: this.modeClock,
+      });
+      h.modeObjective = mh.objective;
+      h.modeDetail = mh.detail;
+      h.modeUrgent = mh.urgent;
     }
     h.recover = p.recover;
     h.recoverPulse = Math.max(0, h.recoverPulse - this.lastDt * 5);
@@ -4351,22 +4791,6 @@ const _c1 = new THREE.Color();
 const _c2 = new THREE.Color();
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
-/**
- * Scratch accumulator for the additive pose pipeline. Reused every frame so
- * the layering costs no allocation.
- */
-const _pose = {
-  armLX: 0, armLY: 0, armLZ: 0,
-  armRX: 0, armRY: 0, armRZ: 0,
-  torsoX: 0, torsoY: 0,
-  headX: 0,
-  reset() {
-    this.armLX = this.armLY = this.armLZ = 0;
-    this.armRX = this.armRY = this.armRZ = 0;
-    this.torsoX = this.torsoY = 0;
-    this.headX = 0;
-  },
-};
 /** carried out of the arm block so the head/torso resolves can sum them */
 let _poseTorsoX = 0;
 let _poseHeadX = 0;
