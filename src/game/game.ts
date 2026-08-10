@@ -58,6 +58,7 @@ import {
 import { BoostSystem } from './boostSystem';
 import { CheckpointSystem } from './checkpoints';
 import { GamepadInput } from './input';
+import { CameraRig, INTRO } from './camera';
 
 export const GRAV = 30;
 export const SOFT_CAP = 47;
@@ -81,25 +82,6 @@ export type Phase = 'menu' | 'intro' | 'countdown' | 'race' | 'finish' | 'paused
  * The whole thing runs ~8.5s and ends the instant the racers launch, so the
  * player is riding before they've finished reading anything.
  */
-const INTRO = {
-  /** low wide shot, rider silhouetted against the drop */
-  wide: 0,
-  /** camera swings around behind the rider, revealing the mountain */
-  swing: 2.6,
-  /** rival rolls up alongside */
-  rival: 4.4,
-  /** the look */
-  glance: 5.6,
-  /** rival stands up and goes */
-  jump: 6.9,
-  /** reaction window opens — ~1s to answer */
-  react: 6.9,
-  /** 3 - 2 - 1 */
-  count: 7.9,
-  /** SEND IT */
-  send: 10.9,
-  end: 11.6,
-};
 
 export interface Popup {
   el: HTMLDivElement;
@@ -327,12 +309,7 @@ export class Game {
   raceTime = 0;
   timeScale = 1;
   hitStop = 0;
-  shake = 0;
-  shakeDir = new THREE.Vector3();
-  camPos = new THREE.Vector3();
-  camLook = new THREE.Vector3();
-  camRoll = 0;
-  fov = 68;
+  rig!: CameraRig;
   /** single source of truth for the boost meter */
   boostSys = new BoostSystem();
   get boost() { return this.boostSys.charge; }
@@ -373,7 +350,16 @@ export class Game {
   // ---- ghost
   ghostData: Ghost | null = null;
   showGhost = true;
-  reducedMotion = false;
+  /**
+   * Accessibility. The rig scales shake / roll / FOV surge off the same
+   * flag, so it is mirrored there on write rather than read across.
+   */
+  private _reducedMotion = false;
+  get reducedMotion() { return this._reducedMotion; }
+  set reducedMotion(v: boolean) {
+    this._reducedMotion = v;
+    if (this.rig) this.rig.reducedMotion = v;
+  }
   private ghostRig: RiderRig | null = null;
   private ghostSamples: { s: number; x: number; y: number; lean: number }[] = [];
   private ghostAccum = 0;
@@ -381,7 +367,6 @@ export class Game {
   private replayData: Ghost | null = null;
   private replayT = 0;
   private replayShot = -1;
-  private camSnap = false;
   // trick state
   airSpin = 0; airFlip = 0; airPose = 0; airPeak = 0; airStartY = 0;
   /** seconds each style trick has been held this air */
@@ -395,7 +380,6 @@ export class Game {
   trickStepAudio = 0;
   frozen = false;
   goFlash = 0;
-  menuTime = 0;
   lastDt = 1 / 60;
   slowmo = 0;
 
@@ -535,7 +519,8 @@ export class Game {
     this.fog = new THREE.FogExp2(0xbcd4e6, 0.0022);
     this.scene.fog = this.fog;
 
-    this.camera = new THREE.PerspectiveCamera(this.fov, w / h, 0.4, 6000);
+    this.rig = new CameraRig(w / h);
+    this.camera = this.rig.camera;
     this.scene.add(this.camera);
 
     // ---- LATE AFTERNOON / GOLDEN MOUNTAIN -----------------------------
@@ -844,7 +829,7 @@ export class Game {
     this.score = 0; this.bonks = 0; this.tricksLanded = 0; this.topSpeed = 0;
     this.airTotal = 0; this.bestTrick = ''; this.bestTrickScore = 0;
     this.airSpin = this.airFlip = this.airPose = 0;
-    this.shake = 0; this.hitStop = 0; this.timeScale = 1; this.slowmo = 0;
+    this.rig.reset(); this.hitStop = 0; this.timeScale = 1; this.slowmo = 0;
     this.dirtPool.clear(); this.sparkPool.clear(); this.smokePool.clear();
     this.clearImpactRings();
     this.clearPopups();
@@ -965,8 +950,7 @@ export class Game {
       const h = this.container.clientHeight || window.innerHeight;
       if (w < 2 || h < 2) return;
       this.renderer.setSize(w, h);
-      this.camera.aspect = w / h;
-      this.camera.updateProjectionMatrix();
+      this.rig.resize(w / h);
     };
     apply();
     // iOS reports the old viewport during orientationchange; re-read once
@@ -1988,7 +1972,7 @@ export class Game {
         }
         // sell big clean airs: FOV punch + STOMPED callout + brief slow-mo
         if (r.isPlayer && air > 0.9 && landQual > 0.55 && !misaligned) {
-          this.fov = Math.min(this.fov + 6, 92);
+          this.rig.punchFov(6, 92);
           this.shakeAdd(0.35);
           this.boostSys.add('cleanLanding', 1.4);
           this.popup(landQual > 0.78 ? 'STOMPED!' : 'CLEAN', 'sub', null,
@@ -3898,7 +3882,7 @@ export class Game {
     this.track.updateSceneryLod(0, 1, true);
     this.checkpoints.build(this.track);
     this.lastZone = -1;
-    this.menuTime = 0;
+    this.rig.resetMenuClock();
     this.resetRace();
     this.updateCamera(0.016, true);
   }
@@ -4063,244 +4047,29 @@ export class Game {
   }
 
   private introCamera(t: number, dt: number) {
-    const trk = this.track;
-    const p = this.player;
-    const first = t < dt * 2;
-    const rate = first ? 999 : 3.2;
-    let cs: number, cx: number, ch: number, ls: number, lx: number, lh: number, fov: number;
-
-    if (t < INTRO.swing) {
-      // low and in front, looking back up at the rider against the sky
-      const k = clamp01(t / INTRO.swing);
-      cs = p.s + lerp(9, 5.5, k);
-      cx = p.x + lerp(3.4, 1.6, k);
-      ch = lerp(0.6, 1.5, k);
-      ls = p.s; lx = p.x; lh = 1.5;
-      fov = lerp(42, 50, k);
-    } else if (t < INTRO.rival) {
-      // swing around behind, revealing the drop
-      const k = smootherstep(clamp01((t - INTRO.swing) / (INTRO.rival - INTRO.swing)));
-      const a = lerp(0, Math.PI, k);
-      cs = p.s + Math.cos(a) * 6.5;
-      cx = p.x + Math.sin(a) * 5.0;
-      ch = lerp(1.5, 3.1, k);
-      ls = p.s + 14; lx = p.x; lh = 0.4;
-      fov = lerp(50, 62, k);
-    } else if (t < INTRO.jump) {
-      // two-shot: both riders in frame
-      cs = p.s - 5.4; cx = p.x - 1.4; ch = 2.5;
-      ls = p.s + 3; lx = p.x + 1.6; lh = 1.5;
-      fov = 52;
-    } else if (t < INTRO.send) {
-      // settle into the race chase
-      const k = smootherstep(clamp01((t - INTRO.jump) / (INTRO.send - INTRO.jump)));
-      cs = lerp(p.s - 5.4, p.s - 7.6, k);
-      cx = lerp(p.x - 1.4, p.x * 0.62, k);
-      ch = lerp(2.5, 2.9, k);
-      ls = lerp(p.s + 3, p.s + 12, k); lx = p.x * 0.55; lh = lerp(1.5, 1.9, k);
-      fov = lerp(52, 66, k);
-    } else {
-      // punch in on the launch
-      cs = p.s - 7.0; cx = p.x * 0.62; ch = 2.8;
-      ls = p.s + 13; lx = p.x * 0.55; lh = 1.9;
-      fov = 72;
-    }
-
-    const want = trk.worldPos(cs, cx, trk.heightAt(cs, cx) + ch, _v1);
-    this.camPos.x = damp(this.camPos.x, want.x, rate, dt);
-    this.camPos.y = damp(this.camPos.y, want.y, rate, dt);
-    this.camPos.z = damp(this.camPos.z, want.z, rate, dt);
-    const look = trk.worldPos(ls, lx, trk.heightAt(ls, lx) + lh, _v2);
-    this.camLook.x = damp(this.camLook.x, look.x, first ? 999 : 4.5, dt);
-    this.camLook.y = damp(this.camLook.y, look.y, first ? 999 : 4.5, dt);
-    this.camLook.z = damp(this.camLook.z, look.z, first ? 999 : 4.5, dt);
-
-    this.camera.position.copy(this.camPos);
-    if (this.shake > 0) {
-      this.shake = Math.max(0, this.shake - dt * 2.6);
-      const m = this.shake * this.shake * 0.9;
-      this.camera.position.x += (Math.random() * 2 - 1) * m;
-      this.camera.position.y += (Math.random() * 2 - 1) * m;
-    }
-    this.camera.lookAt(this.camLook);
-    this.camRoll = damp(this.camRoll, t < INTRO.swing ? 0.05 : 0, 3, dt);
-    this.camera.rotateZ(this.camRoll);
-    this.fov = damp(this.fov, fov, 4, dt);
-    this.camera.fov = this.fov;
-    this.camera.updateProjectionMatrix();
-  }
-
-  /** Slow cinematic sweep down the mountain behind the main menu. */
-  private cinematicCamera(dt: number) {
-    const trk = this.track;
-    this.menuTime += dt;
-    const loop = 74;
-    const t = (this.menuTime % loop) / loop;
-    const s = 40 + t * (this.track.length - 260);
-    const wob = Math.sin(this.menuTime * 0.42);
-    const hw = trk.halfWidth(s);
-    const x = wob * hw * 0.75;
-    const h = trk.heightAt(s, x) + 5.4 + Math.sin(this.menuTime * 0.31) * 2.2;
-    // the flyby ranges far from the grid, so scenery must band around the
-    // camera rather than the parked player
-    trk.updateSceneryLod(s, this.perfGov.lodScale);
-    const want = trk.worldPos(s, x, h, _v1);
-    const first = this.menuTime < dt * 2;
-    const rate = first ? 999 : 1.6;
-    this.camPos.x = damp(this.camPos.x, want.x, rate, dt);
-    this.camPos.y = damp(this.camPos.y, want.y, rate, dt);
-    this.camPos.z = damp(this.camPos.z, want.z, rate, dt);
-    const lookS = s + 40;
-    const lookWant = trk.worldPos(lookS, x * 0.3, trk.heightAt(lookS, 0) + 2, _v2);
-    this.camLook.x = damp(this.camLook.x, lookWant.x, first ? 999 : 1.8, dt);
-    this.camLook.y = damp(this.camLook.y, lookWant.y, first ? 999 : 1.8, dt);
-    this.camLook.z = damp(this.camLook.z, lookWant.z, first ? 999 : 1.8, dt);
-    this.camera.position.copy(this.camPos);
-    this.camera.lookAt(this.camLook);
-    this.camRoll = damp(this.camRoll, wob * 0.04, 2, dt);
-    this.camera.rotateZ(this.camRoll);
-    this.fov = damp(this.fov, 58, 2, dt);
-    this.camera.fov = this.fov;
-    this.camera.updateProjectionMatrix();
-  }
-
-  /**
-   * FINISH CAMERA. Pulls back and rises as the rider crosses, then swings
-   * around to the side so the carve and the victory pose are both in frame.
-   * Deliberately slow rates — the whole point is that it feels like the
-   * camera is savouring the moment rather than tracking a race.
-   */
-  private finishCamera(dt: number) {
-    const trk = this.track;
-    const p = this.player;
-    const t = p.finishRoll;
-
-    // 0-1.0s: drop back and up, still behind
-    // 1.0s+ : arc around to the carve side, framing the rider three-quarter
-    const arc = smootherstep(clamp01((t - 1.0) / 2.4));
-    const back = lerp(8.5, 13.5, clamp01(t / 2.5));
-    const height = lerp(3.0, 6.2, clamp01(t / 3.0));
-    const side = arc * 9 * -p.finishCarve;
-
-    const cs = p.s - back;
-    const cx = p.x + side;
-    const want = trk.worldPos(cs, cx, trk.heightAt(cs, cx) + height, _v1);
-    const rate = 2.6;
-    this.camPos.x = damp(this.camPos.x, want.x, rate, dt);
-    this.camPos.y = damp(this.camPos.y, want.y, rate, dt);
-    this.camPos.z = damp(this.camPos.z, want.z, rate, dt);
-
-    // look slightly ahead of the rider early, then settle onto them
-    const lookS = p.s + lerp(6, 0.5, arc);
-    const look = trk.worldPos(lookS, p.x, trk.heightAt(lookS, p.x) + 1.6, _v2);
-    this.camLook.x = damp(this.camLook.x, look.x, 3.2, dt);
-    this.camLook.y = damp(this.camLook.y, look.y, 3.2, dt);
-    this.camLook.z = damp(this.camLook.z, look.z, 3.2, dt);
-
-    this.camera.position.copy(this.camPos);
-    if (this.shake > 0) {
-      this.shake = Math.max(0, this.shake - dt * 2.6);
-      const m = this.shake * this.shake * 0.7;
-      this.camera.position.x += (Math.random() * 2 - 1) * m;
-      this.camera.position.y += (Math.random() * 2 - 1) * m;
-    }
-    this.camera.lookAt(this.camLook);
-    this.camRoll = damp(this.camRoll, arc * 0.05 * p.finishCarve, 2, dt);
-    this.camera.rotateZ(this.camRoll);
-    // widen slightly as we pull out, so the mountain comes back into frame
-    this.fov = damp(this.fov, lerp(70, 58, clamp01(t / 2.5)), 2.2, dt);
-    this.camera.fov = this.fov;
-    this.camera.updateProjectionMatrix();
+    this.rig.intro(this.track, this.player, t, dt);
   }
 
   private updateCamera(dt: number, snap: boolean) {
-    if (this.hud.phase === 'menu') { this.cinematicCamera(dt); return; }
-    if (this.hud.phase === 'intro') return;   // the cold open drives it
-    // the finish sequence owns the camera from the moment of crossing
-    if (this.player.finished && this.hud.phase === 'race') {
-      this.finishCamera(dt);
+    const phase = this.hud.phase;
+    if (phase === 'menu') {
+      // the flyby ranges far from the grid, so scenery must band around the
+      // camera rather than the parked player
+      const s = this.rig.cinematic(this.track, dt);
+      this.track.updateSceneryLod(s, this.perfGov.lodScale);
       return;
     }
-    if (this.replayData && this.hud.phase === 'finish') return;  // replay drives it
-    const trk = this.track;
-    const p = this.player;
-    const speed01 = clamp01(p.v / 42);
-    const air = clamp01(p.airTime / 1.4);
-    const gh = trk.heightAt(p.s, p.x);
-    const aboveGround = clamp(p.y - gh, 0, 22);
-
-    // a crash is worth watching: pull back and up so the tumble is in frame
-    const crashK = p.crash > 0 ? clamp01(p.crash / Math.max(0.4, p.crashMax)) : 0;
-    // Slightly closer/higher than before so the rider silhouette (helmet →
-    // bars → wheels) stays readable at chase distance, not a speck of blobs.
-    const back = 6.8 + speed01 * 3.2 + air * 2.4 + (this.boosting ? -0.7 : 0)
-      + crashK * 3.4;
-    const height = 2.95 - speed01 * 0.45 + air * 1.5 + aboveGround * 0.55
-      + crashK * 2.2;
-    const camS = p.s - back;
-    const camX = p.x * 0.62;
-    const camH = trk.heightAt(camS, camX) + height;
-
-    const want = trk.worldPos(camS, camX, camH, _v1);
-    if (snap) this.camPos.copy(want);
-    else {
-      const rate = this.hud.phase === 'race' ? 11 : 6;
-      this.camPos.x = damp(this.camPos.x, want.x, rate, dt);
-      this.camPos.y = damp(this.camPos.y, want.y, rate * 0.85, dt);
-      this.camPos.z = damp(this.camPos.z, want.z, rate, dt);
+    if (phase === 'intro') return;                          // the cold open drives it
+    if (this.player.finished && phase === 'race') {         // the finish sequence owns it
+      this.rig.finish(this.track, this.player, dt);
+      return;
     }
-
-    // Look a bit closer to the rider (not far down-track) so the bike+body
-    // read as one unit; still lead the path for race feel.
-    const lookS = p.s + 5.5 + p.v * 0.22;
-    const lookX = p.x * 0.55;
-    const lookH = trk.heightAt(lookS, lookX) + 1.55 + aboveGround * 0.45;
-    const lookWant = trk.worldPos(lookS, lookX, lookH, _v2);
-    if (snap) this.camLook.copy(lookWant);
-    else {
-      this.camLook.x = damp(this.camLook.x, lookWant.x, 8, dt);
-      this.camLook.y = damp(this.camLook.y, lookWant.y, 7, dt);
-      this.camLook.z = damp(this.camLook.z, lookWant.z, 8, dt);
-    }
-
-    this.camera.position.copy(this.camPos);
-    // shake
-    if (this.shake > 0) {
-      this.shake = Math.max(0, this.shake - dt * 2.6);
-      const m = this.shake * this.shake * 0.9;
-      this.camera.position.x += (Math.random() * 2 - 1) * m;
-      this.camera.position.y += (Math.random() * 2 - 1) * m;
-      this.camera.position.z += (Math.random() * 2 - 1) * m;
-    }
-    this.camera.lookAt(this.camLook);
-
-    // roll with lean + drift
-    const rollScale = this.reducedMotion ? 0.4 : 1;
-    const targetRoll = (-p.lean * 0.22 - p.yaw * 0.10) * rollScale
-      + (this.shake > 0 ? (Math.random() - 0.5) * this.shake * 0.06 : 0);
-    this.camRoll = damp(this.camRoll, targetRoll, 7, dt);
-    this.camera.rotateZ(this.camRoll);
-
-    // ---- SENSE OF SPEED. FOV + deck drop + tuck-in (position above).
-    // Curve is nonlinear: mid-speed barely widens, top-end / boost punches.
-    const fovK = this.reducedMotion ? 0.35 : 1;
-    const speedPunch = speed01 * speed01; // ease-in
-    const targetFov = 65
-      + (speedPunch * 14 + speed01 * 6
-        + (this.boosting ? 11 : 0)
-        + (p.crash > 0 ? -7 : 0)
-        + air * 4) * fovK;
-    this.fov = damp(this.fov, targetFov, this.boosting ? 7 : 5, dt);
-    if (Math.abs(this.camera.fov - this.fov) > 0.01) {
-      this.camera.fov = this.fov;
-      this.camera.updateProjectionMatrix();
-    }
+    if (this.replayData && phase === 'finish') return;      // replay drives it
+    this.rig.chase(this.track, this.player, dt, this.boosting, phase === 'race', snap);
   }
 
-  /** All shake funnels through here so accessibility can scale it globally. */
   private shakeAdd(v: number) {
-    const scale = this.reducedMotion ? 0.22 : 1;
-    this.shake = Math.min(2.2, this.shake + v * scale);
+    this.rig.addShake(v);
   }
 
   private updateWorldFx(dt: number) {
@@ -4543,7 +4312,7 @@ export class Game {
     const shot = Math.floor(this.replayT / SHOT) % 4;
     if (shot !== this.replayShot) {
       this.replayShot = shot;
-      this.camSnap = true;
+      this.rig.cut();
     }
 
     const raw = this.replayT / g.dt;
@@ -4554,37 +4323,12 @@ export class Game {
     const x = lerp(g.frames[a + 1], g.frames[b + 1], t);
     const y = lerp(g.frames[a + 2], g.frames[b + 2], t);
 
-    const trk = this.track;
     // put the rider where the replay says, so the camera has a subject
     const p = this.player;
     p.s = s; p.x = x; p.y = y;
     this.poseRacer(p, dt, 0);
 
-    let cs = s, cx = x, ch = 3;
-    switch (shot) {
-      case 0: cs = s - 8.5; cx = x * 0.6; ch = 3.0; break;   // chase
-      case 1: cs = s + 11; cx = x * 0.4; ch = 2.4; break;    // look back
-      case 2: cs = s - 2; cx = x + 9; ch = 4.5; break;       // side pan
-      case 3: cs = s - 5; cx = x * 0.5; ch = 9.0; break;     // high crane
-    }
-    const want = trk.worldPos(cs, cx, trk.heightAt(cs, cx) + ch, _v1);
-    const rate = this.camSnap ? 999 : 3.4;
-    this.camPos.x = damp(this.camPos.x, want.x, rate, dt);
-    this.camPos.y = damp(this.camPos.y, want.y, rate, dt);
-    this.camPos.z = damp(this.camPos.z, want.z, rate, dt);
-
-    const look = trk.worldPos(s, x, trk.heightAt(s, x) + 1.4, _v2);
-    this.camLook.x = damp(this.camLook.x, look.x, this.camSnap ? 999 : 5, dt);
-    this.camLook.y = damp(this.camLook.y, look.y, this.camSnap ? 999 : 5, dt);
-    this.camLook.z = damp(this.camLook.z, look.z, this.camSnap ? 999 : 5, dt);
-    this.camSnap = false;
-
-    this.camera.position.copy(this.camPos);
-    this.camera.lookAt(this.camLook);
-    this.camera.rotateZ(shot === 2 ? 0.06 : 0);
-    this.fov = damp(this.fov, shot === 3 ? 52 : 64, 3, dt);
-    this.camera.fov = this.fov;
-    this.camera.updateProjectionMatrix();
+    this.rig.replay(this.track, s, x, shot, dt);
   }
 
   /** Begin replaying the run that just finished. */
@@ -4592,7 +4336,7 @@ export class Game {
     this.replayData = this.takeGhost();
     this.replayT = 0;
     this.replayShot = -1;
-    this.camSnap = true;
+    this.rig.cut();
   }
 
   stopReplay() { this.replayData = null; }
