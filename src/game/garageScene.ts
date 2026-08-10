@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 import * as THREE from 'three';
 import {
-  createRider, getBuild, solveRiderIK, applyRiderStance, type RiderRig,
+  createRider, getBuild, shapeForBike, solveRiderIK, applyRiderStance, type RiderRig,
   CHEST_ATTACK, BB_POS, SHOCK_UPPER, SHOCK_LOWER, SHOCK_BASE_LEN, FORK_AXIS,
 } from './models';
 import { type Loadout, getBike, loadoutColors, RIDER_BUILD_OF } from './garage';
@@ -185,8 +185,11 @@ export class GarageScene {
       });
       this.rig = null;
     }
-    const rig = createRider(loadoutColors(l), getBuild(RIDER_BUILD_OF[l.rider] ?? 'allround'));
     const bike = getBike(l.bike);
+    const rig = createRider(
+      loadoutColors(l),
+      getBuild(RIDER_BUILD_OF[l.rider] ?? 'allround'),
+      shapeForBike(bike.id, bike.tubeScale));
     // Match race: clamp wheel scale so tyres stay planted on the plinth and
     // inside the fork. Scaling rig.bike would desync grips/pedals from the rider.
     const ws = clamp(bike.wheelScale, 0.96, 1.06);

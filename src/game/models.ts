@@ -731,8 +731,86 @@ export function auditBikeGeometry(rig: RiderRig): {
   };
 }
 
-export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): RiderRig {
+// ---------------------------------------------------------------------------
+// FRAME SHAPE PER BIKE CLASS
+//
+// All four bikes share one set of mounts — BB_POS, SWING_AXLE, SHOCK_UPPER /
+// SHOCK_LOWER, FORK_AXIS and the two axles — because the physics reads those.
+// A per-bike fork of them would be a second set of numbers that drifts away
+// from the first, so nothing here moves a mount.
+//
+// What varies is everything hung between the mounts: tube gauge, tube
+// cross-section, whether the frame is braced, where the visual-only top-tube
+// and saddle nodes sit, and bar rise / width. Every field below is a radius, a
+// position or a scale on a mesh that already exists — the only two that change
+// the mesh count are `truss` and `gusset`.
+// ---------------------------------------------------------------------------
+export interface BikeShape {
+  /** tube radius multiplier — comes from BikeDef.tubeScale via shapeForBike */
+  tube: number;
+  /**
+   * Tube cross-section. tube() puts the tube axis on local +Y, so sectionX is
+   * lateral width (the head-on read) and sectionZ is depth in the plane of the
+   * frame — which is the side/chase read, and therefore the one that has to
+   * move if a bike is meant to look thin or fat while you are racing it.
+   */
+  sectionX: number;
+  sectionZ: number;
+  /** extra bracing across the main triangle (+2 meshes) */
+  truss: boolean;
+  /** head-tube gusset — dropped on frames meant to read sparse (-1 mesh) */
+  gusset: boolean;
+  /** metres the visual top-tube / saddle nodes drop; + is slammed */
+  drop: number;
+  /** metres the same nodes stretch apart along Z */
+  reach: number;
+  /** bar rise in metres on top of GRIP_LOCAL.y */
+  rise: number;
+  /** bar half-width multiplier */
+  barW: number;
+  /** lateral spread of chainstays / seatstays / fork legs */
+  spread: number;
+}
+
+export const BIKE_SHAPE_DEFAULT: BikeShape = {
+  tube: 1, sectionX: 1, sectionZ: 1, truss: false, gusset: true,
+  drop: 0, reach: 0, rise: 0, barW: 1, spread: 1,
+};
+
+/**
+ * Per-class character, keyed by garage bike id.
+ *
+ *   HORNET  the reference frame — the other three are read against it
+ *   SLAB    scaffolding: fat slabbed beams, a truss, wide stays, high bars
+ *   WISP    thin knife-profile tubes, no gusset, narrow stays, short frame
+ *   BOLT    long and low: slammed top tube, stretched reach, low wide bars
+ */
+const BIKE_SHAPES: Record<string, Omit<BikeShape, 'tube'>> = {
+  hornet: { sectionX: 1.00, sectionZ: 1.00, truss: false, gusset: true,  drop:  0.000, reach:  0.00, rise:  0.000, barW: 1.00, spread: 1.00 },
+  slab:   { sectionX: 1.45, sectionZ: 1.02, truss: true,  gusset: true,  drop: -0.030, reach: -0.02, rise:  0.036, barW: 1.14, spread: 1.28 },
+  wisp:   { sectionX: 0.70, sectionZ: 1.15, truss: false, gusset: false, drop:  0.020, reach: -0.05, rise:  0.012, barW: 0.94, spread: 0.80 },
+  bolt:   { sectionX: 1.06, sectionZ: 1.20, truss: false, gusset: true,  drop:  0.085, reach:  0.06, rise: -0.032, barW: 1.06, spread: 1.06 },
+};
+
+/**
+ * BikeDef.tubeScale is a gauge ratio in a narrow band (0.76 … 1.26). Read
+ * literally it is invisible at chase distance, so the deviation from 1 is
+ * amplified before it becomes a radius: the ordering and the ratios stay the
+ * garage's, only the magnitude is tuned for the camera.
+ */
+export function shapeForBike(id: string, tubeScale = 1): BikeShape {
+  const s = BIKE_SHAPES[id] ?? BIKE_SHAPES.hornet;
+  const t = 1 + (tubeScale - 1) * 2.0;
+  return { ...s, tube: Math.max(0.5, Math.min(1.7, t)) };
+}
+
+export function createRider(
+  c: RiderColors,
+  build: RiderBuild = BUILD_DEFAULT,
+  shape: BikeShape = BIKE_SHAPE_DEFAULT,
+): RiderRig {
   const B = build;
+  const sh = shape;
   const root = new THREE.Group();
   const lean = new THREE.Group(); root.add(lean);
   const body = new THREE.Group(); lean.add(body);
@@ -764,12 +842,29 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
   offset.add(bike);
 
   // Local aliases (Vectors for tube()) — never invent independent positions.
+  // BB / HB / AX / RA are physics mounts and are used exactly as declared.
+  // HT and ST are visual-only nodes (top tube ends, saddle), so the frame
+  // shape is allowed to slam and stretch those and nothing else.
   const BB = BB_POS.clone();
   const HB = HEAD_B.clone();
-  const HT = HEAD_T.clone();
-  const ST = SEAT_T.clone();
+  const HT = HEAD_T.clone().add(V(0, -sh.drop, sh.reach));
+  const ST = SEAT_T.clone().add(V(0, -sh.drop, -sh.reach));
   const AX = FORK_AXLE_LOCAL.clone(); // front axle in fork space
   const RA = SWING_AXLE.clone();      // rear axle in swingarm space
+
+  /**
+   * Frame tube at this bike's gauge and cross-section. `k` dials how much of
+   * the section profile applies: the main triangle takes it whole, stays and
+   * fork legs take half so they don't read as bent.
+   */
+  const ftube = (
+    a: THREE.Vector3, b: THREE.Vector3, r: number, m: THREE.Material,
+    seg = 7, k = 1,
+  ): THREE.Mesh => {
+    const t = tube(a, b, r * sh.tube, m, seg);
+    t.scale.set(1 + (sh.sectionX - 1) * k, 1, 1 + (sh.sectionZ - 1) * k);
+    return t;
+  };
 
   // ---- FRAME (static) -------------------------------------------------
   const frame = new THREE.Group();
@@ -777,10 +872,10 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
   bike.add(frame);
 
   // Main triangle: down / top / seat + head tube
-  const downTube = tube(BB, HB, 0.048, mFrame, 8);
-  const topTube = tube(ST, HT, 0.042, mFrame, 8);
-  const seatTube = tube(BB, ST, 0.044, mFrame, 8);
-  const headTube = tube(HB, HT, 0.055, mDark, 8);
+  const downTube = ftube(BB, HB, 0.048, mFrame, 8);
+  const topTube = ftube(ST, HT, 0.042, mFrame, 8);
+  const seatTube = ftube(BB, ST, 0.044, mFrame, 8);
+  const headTube = ftube(HB, HT, 0.055, mDark, 8);
   frame.add(downTube, topTube, seatTube, headTube);
   addOutlineShell(downTube, 1.05);
   addOutlineShell(topTube, 1.05);
@@ -789,16 +884,29 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
   // BB shell — the visual hub of the drivetrain
   const bbShell = new THREE.Mesh(
     new THREE.SphereGeometry(0.055, 10, 8), mDark);
-  bbShell.scale.set(1.35, 1.0, 1.15);
+  bbShell.scale.set(1.35 * sh.sectionX, 1.0, 1.15 * sh.sectionZ);
   bbShell.position.copy(BB);
   frame.add(bbShell);
 
-  // Short head-tube gusset so the triangle reads continuous at the crown
-  const gusset = tube(
-    V(BB.x, BB.y + 0.12, BB.z + 0.18),
-    V(HB.x, HB.y - 0.04, HB.z - 0.02),
-    0.028, mFrame, 6);
-  frame.add(gusset);
+  // Short head-tube gusset so the triangle reads continuous at the crown.
+  // Sparse frames go without it — the gap under the head tube is the tell.
+  if (sh.gusset) {
+    frame.add(ftube(
+      V(BB.x, BB.y + 0.12, BB.z + 0.18),
+      V(HB.x, HB.y - 0.04, HB.z - 0.02),
+      0.028, mFrame, 6));
+  }
+
+  // Brawler bracing: a diagonal through the main triangle plus a second top
+  // tube under the first. Only frames with truss carry these (+2 meshes).
+  if (sh.truss) {
+    frame.add(ftube(
+      V(0, BB.y + 0.22, BB.z + 0.16), V(0, ST.y - 0.06, ST.z + 0.02),
+      0.030, mFrame, 6));
+    frame.add(ftube(
+      V(0, ST.y - 0.11, ST.z + 0.02), V(0, HT.y - 0.14, HT.z + 0.01),
+      0.026, mFrame, 6));
+  }
 
   // Short seat post + low DH saddle (not a tall antenna behind the rider)
   const seatPostTop = V(ST.x, ST.y + 0.04, ST.z - 0.01);
@@ -817,11 +925,12 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
 
   // Dual chainstays (left / right) — main load path BB → rear axle
   const stayY = 0.0;
+  const spread = sh.spread;
   [-1, 1].forEach(s => {
-    const cs = tube(
-      V(s * 0.045, stayY, 0.02),
-      V(s * 0.055, RA.y, RA.z),
-      0.032, mFrame, 7);
+    const cs = ftube(
+      V(s * 0.045 * spread, stayY, 0.02),
+      V(s * 0.055 * spread, RA.y, RA.z),
+      0.032, mFrame, 7, 0.5);
     swingarm.add(cs);
   });
   // Bridge plate near the axle
@@ -834,10 +943,10 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
   // Seatstays: rear axle → rocker / shock lower (forms the rear triangle)
   const rockerPos = SHOCK_LOWER.clone();
   [-1, 1].forEach(s => {
-    const ss = tube(
-      V(s * 0.05, RA.y + 0.02, RA.z + 0.02),
-      V(s * 0.04, rockerPos.y + 0.02, rockerPos.z),
-      0.026, mFrame, 6);
+    const ss = ftube(
+      V(s * 0.05 * spread, RA.y + 0.02, RA.z + 0.02),
+      V(s * 0.04 * spread, rockerPos.y + 0.02, rockerPos.z),
+      0.026, mFrame, 6, 0.5);
     swingarm.add(ss);
   });
   // Rocker link (shock lower mount)
@@ -848,7 +957,7 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
   rocker.position.copy(rockerPos);
   swingarm.add(rocker);
   // Small brace from pivot toward rocker
-  swingarm.add(tube(V(0, 0.01, -0.08), rockerPos.clone(), 0.022, mDark, 5));
+  swingarm.add(ftube(V(0, 0.01, -0.08), rockerPos.clone(), 0.022, mDark, 5, 0.5));
 
   // Rear wheel — parented to swingarm at local axle
   const mRotor = RIDER_MAT.brake(0xb8bcc4);
@@ -888,34 +997,36 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
 
   // Crown bridges the steerer to the stanchions
   const crown = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.04, 0.24, 3, 8), mDark);
+    new THREE.CapsuleGeometry(0.04 * sh.tube, 0.24 * sh.spread, 3, 8), mDark);
   crown.rotation.z = Math.PI / 2;
   crown.scale.set(1, 1, 1.2);
   crown.position.set(0, 0.01, 0.01);
   fork.add(crown);
 
   // Steerer stub up into the head tube / stem
-  fork.add(tube(V(0, 0.0, 0), V(0, 0.22, -0.04), 0.028, mDark, 6));
+  fork.add(tube(V(0, 0.0, 0), V(0, 0.22, -0.04), 0.028 * sh.tube, mDark, 6));
 
   // Stanchions outside the tyre width; stop well above the tyre carcass so
   // they never read as spears through the front wheel (garage close-up bug).
   const mStanchion = RIDER_MAT.stanchion(0xd6dae0);
-  const forkSpread = 0.12; // half-width > tyre section
+  const forkSpread = 0.12 * sh.spread; // half-width > tyre section
   const stanchEnd = AX.clone().multiplyScalar(0.42);
   [-1, 1].forEach(s => {
-    fork.add(tube(
+    fork.add(ftube(
       V(s * forkSpread, 0.0, 0.0),
       V(s * forkSpread, stanchEnd.y, stanchEnd.z),
-      0.022, mStanchion, 6));
+      0.022, mStanchion, 6, 0.5));
   });
 
-  // Stem + wide DH bar
-  const gripX = GRIP_HALF_W;
-  const gripY = GRIP_LOCAL.y;
+  // Stem + wide DH bar. Rise and width are the cockpit half of the class
+  // read — SLAB towers, BOLT is slammed — and the grips ARE the hand IK
+  // targets, so the arms follow without any pose change.
+  const gripX = GRIP_HALF_W * sh.barW;
+  const gripY = GRIP_LOCAL.y + sh.rise;
   const gripZ = GRIP_LOCAL.z;
-  fork.add(tube(V(0, 0.18, -0.02), V(0, gripY, gripZ - 0.02), 0.024, mDark, 6));
+  fork.add(tube(V(0, gripY - 0.045, -0.02), V(0, gripY, gripZ - 0.02), 0.024 * sh.tube, mDark, 6));
   const bar = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.022, 0.022, gripX * 2 + 0.10, 8), mFrame);
+    new THREE.CylinderGeometry(0.022 * sh.tube, 0.022 * sh.tube, gripX * 2 + 0.10, 8), mFrame);
   bar.rotation.z = Math.PI / 2;
   bar.position.set(0, gripY, gripZ);
   fork.add(bar);
@@ -947,14 +1058,14 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
   fork.add(forkLower);
   const lowerStart = AX.clone().multiplyScalar(0.38);
   [-1, 1].forEach(s => {
-    forkLower.add(tube(
+    forkLower.add(ftube(
       V(s * forkSpread, lowerStart.y, lowerStart.z),
       V(s * forkSpread, AX.y, AX.z),
-      0.032, mDark, 6));
+      0.032, mDark, 6, 0.5));
   });
   // Arch above the tyre, not through it
   const arch = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.026, 0.12, 3, 6), mDark);
+    new THREE.CapsuleGeometry(0.026 * sh.tube, 0.12 * sh.spread, 3, 6), mDark);
   arch.rotation.z = Math.PI / 2;
   arch.position.copy(AX.clone().multiplyScalar(0.55));
   forkLower.add(arch);
@@ -1047,8 +1158,14 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
   const shinLen = 0.34 * B.legs * S;
   const armR0 = 0.058 * B.limbs * S;
   const legR0 = 0.066 * B.limbs * S;
-  const hipW = 0.10 * B.bulk * S;
-  const shW = 0.155 * B.shoulders * S;
+  // The chase camera reads shoulders before anything else, so the archetype
+  // spread is amplified here — and only here, so limb lengths stay human and
+  // the IK keeps solving. Everything downstream uses these, not B.shoulders /
+  // B.bulk directly, or the exaggeration would compound unevenly.
+  const shoulderK = 1 + (B.shoulders - 1) * 1.45;
+  const bulkK = 1 + (B.bulk - 1) * 1.35;
+  const hipW = 0.10 * bulkK * S;
+  const shW = 0.155 * shoulderK * S;
 
   // ---- PELVIS ---------------------------------------------------------
   const pelvis = new THREE.Group();
@@ -1058,7 +1175,7 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
 
   // Hips: one mass, not stacked spheres
   const hipsMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.095 * B.bulk * S, 10, 8), mPants);
+    new THREE.SphereGeometry(0.095 * bulkK * S, 10, 8), mPants);
   hipsMesh.scale.set(1.45, 0.85, 1.05);
   hipsMesh.position.set(0, 0.01, 0.01);
   pelvis.add(hipsMesh);
@@ -1071,9 +1188,10 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
   spine.rotation.x = SPINE_ATTACK;
   pelvis.add(spine);
 
+  // Back profile: heavy builds carry a slab back, light ones taper to a V.
   const midBack = new THREE.Mesh(
-    new THREE.SphereGeometry(0.07 * B.bulk * S, 8, 6), mJersey);
-  midBack.scale.set(1.15 * B.shoulders, 0.85, 0.9);
+    new THREE.SphereGeometry(0.07 * bulkK * S, 8, 6), mJersey);
+  midBack.scale.set(1.15 * (shoulderK * 0.55 + 0.45), 0.85, 0.9 * bulkK);
   midBack.position.set(0, 0.06 * S, 0.0);
   spine.add(midBack);
 
@@ -1084,15 +1202,17 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
 
   // Athletic torso: capsule + shoulder shelf (not a fridge box).
   const chestMesh = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.10 * B.bulk * S, 0.22 * S, 5, 12), mJersey);
-  chestMesh.scale.set(1.22 * B.shoulders, 1, 0.92);
+    new THREE.CapsuleGeometry(0.10 * bulkK * S, 0.22 * S, 5, 12), mJersey);
+  chestMesh.scale.set(1.22 * shoulderK, 1, 0.92 * (0.82 + 0.18 * bulkK));
   chestMesh.position.set(0, 0.14 * S, 0.02);
   torso.add(chestMesh);
   addOutlineShell(chestMesh, 1.08);
 
+  // Waist stays nearer neutral than the chest, so a wide build reads as a
+  // taper down to the hips rather than a uniformly inflated cylinder.
   const waist = new THREE.Mesh(
-    new THREE.SphereGeometry(0.085 * B.bulk * S, 10, 8), mJersey);
-  waist.scale.set(1.18 * B.shoulders, 0.65, 0.88);
+    new THREE.SphereGeometry(0.085 * bulkK * S, 10, 8), mJersey);
+  waist.scale.set(1.18 * (shoulderK * 0.4 + 0.6), 0.65, 0.88);
   waist.position.set(0, 0.01 * S, 0.0);
   torso.add(waist);
 
@@ -1100,20 +1220,25 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
   const shoulderY = 0.24 * S;
   const shoulderZ = 0.02;
   [-1, 1].forEach(s => {
-    const sh = new THREE.Mesh(
+    const cap = new THREE.Mesh(
       new THREE.SphereGeometry(0.055 * B.limbs * S, 8, 6), mJersey);
-    sh.scale.set(1.15, 0.8, 1.05);
-    sh.position.set(s * shW, shoulderY, shoulderZ);
-    torso.add(sh);
+    cap.scale.set(1.15 * (shoulderK * 0.6 + 0.4), 0.8, 1.05);
+    cap.position.set(s * shW, shoulderY, shoulderZ);
+    torso.add(cap);
   });
 
   if (B.armour > 0.4) {
     [-1, 1].forEach((s, i) => {
       if (B.asymmetric && i === 0) return;
       const pad = new THREE.Mesh(
-        new THREE.SphereGeometry(0.052 * B.shoulders * S, 8, 6), mArmour);
-      pad.scale.set(1.2, 0.7, 1.25);
-      pad.position.set(s * shW * 0.92, shoulderY - 0.02 * S, shoulderZ + 0.04);
+        new THREE.SphereGeometry(0.052 * shoulderK * S, 8, 6), mArmour);
+      // The more armour, the squarer and further outboard — that is what
+      // turns a rounded shoulder into a shoulder *line* from behind.
+      pad.scale.set(1.15 + 0.55 * B.armour, 0.62, 1.22);
+      pad.position.set(
+        s * shW * (0.92 + 0.16 * B.armour),
+        shoulderY + (B.armour - 0.5) * 0.04 * S,
+        shoulderZ + 0.04);
       torso.add(pad);
     });
   }
@@ -1123,52 +1248,84 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
   numPlate.rotation.x = 0.15;
   torso.add(numPlate);
 
+  // Back protector — the third rear-view read after helmet and shoulders.
+  // A big pack stands proud as a turtle shell; a small one is a flat spine
+  // strip. Same mesh either way, only the scale changes.
+  const pk = B.pack;
   const pack = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.048 * B.pack * S, 0.10 * B.pack * S, 3, 7),
+    new THREE.CapsuleGeometry(0.050 * pk * S, 0.13 * pk * S, 3, 7),
     RIDER_MAT.pants(c.accent));
-  pack.scale.set(1.05, 1, 0.55);
-  pack.position.set(0, 0.12 * S, -0.08 * S);
+  pack.scale.set(1.0 + (pk - 1) * 0.9, 1, 0.42 + 0.34 * pk);
+  pack.position.set(0, 0.12 * S, -(0.075 + 0.030 * pk) * S);
   torso.add(pack);
   if (B.armour > 0.7) {
     for (let i = 0; i < 3; i++) {
-      const rib = softPad(0.15 * B.pack * S, 0.028 * S, 0.03 * S, mArmour, 5);
-      rib.position.set(0, 0.06 * S + i * 0.055 * S, -0.11 * S);
+      const rib = softPad(0.17 * pk * S, 0.030 * S, 0.032 * S, mArmour, 5);
+      rib.position.set(0, 0.055 * S + i * 0.058 * S, -(0.105 + 0.030 * pk) * S);
       torso.add(rib);
     }
   }
 
   if (B.brace) {
     const collar = new THREE.Mesh(
-      new THREE.TorusGeometry(0.095 * S, 0.028 * S, 5, 14), RIDER_MAT.armour(c.accent));
+      new THREE.TorusGeometry(0.095 * shoulderK * S, 0.030 * S, 5, 14),
+      RIDER_MAT.armour(c.accent));
     collar.position.set(0, shoulderY + 0.02 * S, 0.04);
     collar.rotation.x = Math.PI / 2 - 0.28;
     torso.add(collar);
   }
 
   // ---- NECK → HEAD ----------------------------------------------------
+  // Armour sinks the helmet down between the pads; a light unbraced build
+  // carries it high on a long neck. From behind that gap — or the lack of it
+  // — separates GRUD from BEX before you can resolve either helmet.
+  const neckLen = 1 - B.armour * 0.45 + (B.brace ? -0.12 : 0.06);
   const neck = new THREE.Group();
-  neck.position.set(0, shoulderY + 0.04 * S, 0.04);
+  neck.position.set(0, shoulderY + 0.04 * S * neckLen, 0.04);
   torso.add(neck);
   const neckMesh = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.032 * S, 0.04 * S, 3, 7), mSkin);
-  neckMesh.position.y = 0.03 * S;
+    new THREE.CapsuleGeometry(0.032 * (1 + B.armour * 0.35) * S, 0.04 * S * neckLen, 3, 7),
+    mSkin);
+  neckMesh.position.y = 0.03 * S * neckLen;
   neck.add(neckMesh);
 
   // Full-face DH helmet — sits above the bar plane in rest attack stance
   const head = new THREE.Group();
-  head.position.set(0, 0.13 * S, 0.03 * S);
+  head.position.set(0, 0.13 * S * (0.6 + 0.4 * neckLen), 0.03 * S);
   neck.add(head);
 
   // Head ≈ 1/8 body — previous 0.108 ballooned in garage close-up
   const H = 0.092 * B.helmet * S;
+
+  /**
+   * The five lid families have to be five different OUTLINES from directly
+   * behind, because that is the view the chase camera spends the whole race
+   * in. Rear-view read, in order:
+   *
+   *   round  neutral circle — the reference the other four are read against
+   *   aero   narrow and long, broken by a tail spike
+   *   boxy   the widest and lowest: a flat squared crown
+   *   domed  tall and narrow, a high egg
+   *   crest  circle split by a blade
+   *
+   * The family scale goes on the head GROUP, not the shell, so the chin bar,
+   * goggles, lens and visor travel with it instead of floating at stock size.
+   * Costs nothing — it is one scale on a node that already exists.
+   */
+  const LID: Record<RiderBuild['lid'], {
+    w: number; h: number; l: number; shell: [number, number, number];
+  }> = {
+    round: { w: 1.00, h: 1.02, l: 1.00, shell: [1.00, 0.98, 1.06] },
+    aero:  { w: 0.87, h: 0.93, l: 1.18, shell: [0.95, 0.93, 1.24] },
+    boxy:  { w: 1.24, h: 0.93, l: 1.00, shell: [1.06, 0.94, 1.04] },
+    domed: { w: 0.93, h: 1.24, l: 0.97, shell: [1.02, 1.13, 1.02] },
+    crest: { w: 0.97, h: 1.05, l: 1.06, shell: [1.00, 1.04, 1.08] },
+  };
+  const lid = LID[B.lid] ?? LID.round;
+  head.scale.set(lid.w, lid.h, lid.l);
+
   const helm = new THREE.Mesh(new THREE.SphereGeometry(H, 16, 14), mHelmet);
-  switch (B.lid) {
-    case 'aero':  helm.scale.set(0.92, 0.92, 1.24); break;
-    case 'boxy':  helm.scale.set(1.08, 0.96, 1.06); break;
-    case 'domed': helm.scale.set(1.05, 1.10, 1.05); break;
-    case 'crest': helm.scale.set(1.0, 1.03, 1.10); break;
-    default:      helm.scale.set(1.0, 0.96, 1.08);
-  }
+  helm.scale.set(lid.shell[0], lid.shell[1], lid.shell[2]);
   head.add(helm);
   addOutlineShell(helm, 1.08);
 
@@ -1187,7 +1344,8 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
   // visor peak — soft pad, not a brick
   const visor = softPad(H * 1.5, H * 0.16, H * 0.7, RIDER_MAT.helmet(c.accent), 6);
   visor.position.set(0, H * 0.4, H * 0.45);
-  visor.rotation.x = -0.35;
+  // aero tucks the peak flat, crest kicks it up — same mesh, different attitude
+  visor.rotation.x = B.lid === 'aero' ? -0.06 : B.lid === 'crest' ? -0.62 : -0.35;
   head.add(visor);
   // goggle strap wraps the shell + tinted lens
   const goggles = new THREE.Mesh(
@@ -1202,20 +1360,30 @@ export function createRider(c: RiderColors, build: RiderBuild = BUILD_DEFAULT): 
   head.add(lens);
 
   if (B.lid === 'aero') {
-    const tail = new THREE.Mesh(new THREE.ConeGeometry(H * 0.45, H * 1.1, 7), mHelmet);
-    tail.position.set(0, 0, -H * 0.95);
+    // Long tail spike: the only thing that breaks an otherwise slim outline.
+    const tail = new THREE.Mesh(new THREE.ConeGeometry(H * 0.40, H * 1.45, 7), mHelmet);
+    tail.position.set(0, H * 0.10, -H * 1.38);
     tail.rotation.x = -Math.PI / 2;
     head.add(tail);
   }
   if (B.lid === 'crest') {
-    const fin = softPad(H * 0.1, H * 0.5, H * 1.15, RIDER_MAT.helmet(c.accent), 5);
-    fin.position.set(0, H * 0.68, -H * 0.04);
+    // Mohawk blade cutting the round outline. Depth and height are set so the
+    // root stays buried in the shell across its whole length — a longer or
+    // higher fin detaches at the back and reads as a hat balanced on the lid.
+    const fin = softPad(H * 0.13, H * 0.85, H * 1.15, RIDER_MAT.helmet(c.accent), 5);
+    fin.position.set(0, H * 0.92, -H * 0.20);
+    fin.rotation.x = 0.10;
     head.add(fin);
   }
   if (B.lid === 'boxy') {
+    // Flat squared crown over a heavy jaw — the widest, lowest of the five.
+    // This is the one added mesh in the helmet set (+1, boxy only).
+    const crownCap = softPad(H * 1.9, H * 0.62, H * 1.85, mHelmet, 5);
+    crownCap.position.set(0, H * 0.52, -H * 0.04);
+    head.add(crownCap);
     const jaw = new THREE.Mesh(
       new THREE.SphereGeometry(H * 0.7, 10, 8), mHelmet);
-    jaw.scale.set(1.2, 0.55, 1.05);
+    jaw.scale.set(1.24, 0.55, 1.05);
     jaw.position.set(0, -H * 0.32, H * 0.1);
     head.add(jaw);
   }

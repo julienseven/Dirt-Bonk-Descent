@@ -7,7 +7,8 @@ import {
 } from './core';
 import { Track, Obstacle, ZONES } from './track';
 import {
-  createRider, RiderRig, RIDER_PALETTES, getBuild, solveRiderIK, applyRiderStance,
+  createRider, RiderRig, RIDER_PALETTES, getBuild, shapeForBike,
+  solveRiderIK, applyRiderStance,
   CHEST_ATTACK, BB_POS, SHOCK_UPPER, SHOCK_LOWER, SHOCK_BASE_LEN, FORK_AXIS,
   WHEEL_R, FRONT_AXLE_POS, REAR_AXLE_POS,
 } from './models';
@@ -717,7 +718,13 @@ export class Game {
     // gets a clean neutral build until the garage overrides it
     const buildId = isPlayer ? 'allround'
       : ['bonker', 'speedfreak', 'showoff', 'coward', 'chaos', 'allround'][(i - 1) % 6];
-    const rig = createRider(pal, getBuild(buildId));
+    // …and the frame class their personality would actually buy, so the pack
+    // is four different machines rather than six paint jobs. The player's is
+    // replaced by applyLoadout the moment the garage has an opinion.
+    const bikeId = isPlayer ? 'hornet'
+      : ['slab', 'bolt', 'wisp', 'hornet', 'wisp', 'hornet'][(i - 1) % 6];
+    const rb = getBike(bikeId);
+    const rig = createRider(pal, getBuild(buildId), shapeForBike(rb.id, rb.tubeScale));
     this.scene.add(rig.root);
     this.scene.add(rig.shadow, rig.contactF, rig.contactR);
     return {
@@ -3910,18 +3917,20 @@ export class Game {
       if (m.geometry) m.geometry.dispose();
     });
 
-    // rider choice drives the silhouette, not just the palette
-    const rig = createRider(loadoutColors(l), getBuild(RIDER_BUILD_OF[l.rider] ?? 'allround'));
+    // rider choice drives the silhouette, bike choice drives the frame shape
+    const rig = createRider(
+      loadoutColors(l),
+      getBuild(RIDER_BUILD_OF[l.rider] ?? 'allround'),
+      shapeForBike(bike.id, bike.tubeScale));
     // Wheel size is capped tight: the physics ground plane assumes WHEEL_R
     // radius, so a large deviation floats the bike or sinks it into the
     // dirt. Keep the visual difference subtle enough to stay grounded.
     const ws = clamp(bike.wheelScale, 0.96, 1.06);
     rig.frontWheel.scale.setScalar(ws);
     rig.rearWheel.scale.setScalar(ws);
-    // NOTE: only the frame tubes scale, NOT rig.bike — scaling that group
-    // would move the wheels, cranks and bar positions away from where the
-    // rider's hands and feet are placed, desyncing body from bike.
-    void bike.tubeScale;
+    // NOTE: the frame shape is built into the geometry, NOT applied as a
+    // scale on rig.bike — scaling that group would move the wheels, cranks
+    // and bar away from where the rider's hands and feet are placed.
     this.scene.add(rig.root, rig.shadow, rig.contactF, rig.contactR);
     p.rig = rig;
     // new bike, clean — and the handle belongs to the new rig
