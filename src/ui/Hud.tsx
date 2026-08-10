@@ -124,7 +124,9 @@ export default function Hud({ game }: { game: Game }) {
       }
 
       const racing = h.phase === 'race' || h.phase === 'countdown' || h.phase === 'paused';
-      if (root.current) root.current.style.opacity = racing || h.phase === 'finish' ? '1' : '0';
+      // F10 hides the HUD entirely for clean screenshots
+      const show = (racing || h.phase === 'finish') && !game.hudHidden;
+      if (root.current) root.current.style.opacity = show ? '1' : '0';
       if (!racing && h.phase !== 'finish') return;
 
       const kph = Math.max(0, h.speed);

@@ -19,6 +19,9 @@ import {
 } from './garage';
 import { getMountain } from './mountains';
 import { SHALEBACK_SECTIONS, SHALEBACK_SETPIECES } from './shaleback';
+import { CINDER_SECTIONS, CINDER_SETPIECES } from './cinderChute';
+import { THORNWOOD_SECTIONS, THORNWOOD_SETPIECES } from './thornwoodDeep';
+import { LASTLIGHT_SECTIONS, LASTLIGHT_SETPIECES } from './lastlightSpine';
 import {
   PROPS, PROP_SCORE, PROP_BOOST, PROP_CALL, patchSurface,
   type PropDef, type PropKind,
@@ -227,6 +230,12 @@ interface Racer {
   place: number;
   finished: boolean;
   finishTime: number;
+  /** seconds since crossing the line */
+  finishRoll: number;
+  /** which way they carve as they scrub off speed */
+  finishCarve: number;
+  /** 0..1 blend into the victory pose */
+  finishPose: number;
   // ai
   skill: number;
   aiOffset: number;
@@ -381,6 +390,8 @@ export class Game {
   private countTimer = 0;
   private countStep = -1;
   private finishHold = 0;
+  /** one-shot guard for the dust blast at the line */
+  private finishBlast = false;
   private roostAccum = 0;
   private moteAccum = 0;
   private nearMissCd = 0;
@@ -389,6 +400,8 @@ export class Game {
   mobile = false;
   /** pause the render loop entirely while the garage owns the screen */
   suspended = false;
+  /** F10: hide the HUD for clean captures */
+  hudHidden = false;
   mountainId = 'shaleback';
   shortcutsHit = 0;
   nearMisses = 0;
@@ -663,6 +676,7 @@ export class Game {
       // the player rides "neutral"; rivals get personality below
       stCadence: 1, stLean: 1, stWeight: 0, stHead: 1, stTwitch: 1,
       place: i + 1, finished: false, finishTime: 0,
+      finishRoll: 0, finishCarve: 0, finishPose: 0,
       skill: 0, aiOffset: 0, aiSeed: this.rng.range(0, 100), aiHopCd: 0, aiCap: 30,
       thinkCd: 0, aiSteer: 0, aiPedal: true, aiBrake: false, aiTuck: false,
       corner: 1, aggression: 0,
@@ -742,6 +756,7 @@ export class Game {
       r.dirtTint.setHex(0x6b5942);
       r.rig.dirt.set(0, r.dirtTint);
       r.finished = false; r.finishTime = 0; r.place = i + 1;
+      r.finishRoll = 0; r.finishCarve = 0; r.finishPose = 0;
       r.aiOffset = this.rng.range(-0.3, 0.3);
     });
     this.track.obstacles.forEach(o => {
@@ -761,6 +776,8 @@ export class Game {
     this.hud.crashed = 0;
     this.hud.finalStretch = false;
     this.hud.photoFinish = false;
+    this.finishBlast = false;
+    this.finishHold = 0;
     this.hud.splitShow = 0;
     this.hud.splitDelta = 0;
     // dense, not sparse: JSON.stringify turns array holes into `null`, which
@@ -870,6 +887,10 @@ export class Game {
     if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'Tab'].includes(k)) e.preventDefault();
     if (!this.keys[k]) this.pressed[k] = true;
     this.keys[k] = true;
+    // F9 grabs a 2x PNG of the current frame, for docs and bug reports
+    if (k === 'F9') { e.preventDefault(); this.screenshot(); return; }
+    // F10 hides the HUD first, for clean captures
+    if (k === 'F10') { e.preventDefault(); this.hudHidden = !this.hudHidden; return; }
     // during the cold open Escape means "skip", not "pause"
     if (k === 'Escape') {
       if (this.hud.phase === 'intro') this.skipIntro();
@@ -877,6 +898,38 @@ export class Game {
     }
   };
   private onKeyUp = (e: KeyboardEvent) => { this.keys[e.code] = false; };
+
+  /**
+   * Capture the current frame to a PNG download.
+   *
+   * Renders immediately before reading the buffer: without that the canvas
+   * is typically already cleared by the time toDataURL runs, and you get a
+   * transparent image. This avoids needing `preserveDrawingBuffer`, which
+   * costs performance on every frame for a feature used occasionally.
+   */
+  screenshot(scale = 2) {
+    const canvas = this.renderer.domElement;
+    const w = canvas.width, h = canvas.height;
+    const prevRatio = this.renderer.getPixelRatio();
+    try {
+      // temporarily render at higher resolution for a crisp capture
+      this.renderer.setPixelRatio(Math.min(prevRatio * scale, 4));
+      this.onResize();
+      this.renderer.render(this.scene, this.camera);
+      const url = this.renderer.domElement.toDataURL('image/png');
+      const a = document.createElement('a');
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      a.href = url;
+      a.download = `dirt-bonk-descent-${stamp}.png`;
+      a.click();
+    } catch (err) {
+      console.error('[DirtBonkDescent] screenshot failed:', err);
+    } finally {
+      this.renderer.setPixelRatio(prevRatio);
+      this.onResize();
+    }
+    void w; void h;
+  }
 
   /** Losing focus with a key held would otherwise leave it stuck down. */
   private onBlur = () => { this.keys = {}; this.pressed = {}; };
@@ -982,8 +1035,9 @@ export class Game {
       this.simulate(sdt, true);
       if (!this.player.finished) this.recordGhost(sdt);
       if (this.player.finished) {
+        // let the roll-out, carve and pose play before the results card
         this.finishHold += dt;
-        if (this.finishHold > 2.2) this.enterFinish();
+        if (this.finishHold > 4.4) this.enterFinish();
       }
     } else if (phase === 'finish') {
       if (this.replayData) this.updateReplay(dt);
@@ -1203,11 +1257,40 @@ export class Game {
     this.applyState(r, dt, inp);
 
     if (r.finished) {
-      // roll out
-      r.v = damp(r.v, 3, 0.8, dt);
+      // ---- ROLL-OUT ---------------------------------------------------
+      // Momentum carries you well past the line before anything slows you,
+      // then the rider brakes and carves to a stop. Never an instant freeze.
+      const t = r.finishRoll;
+      r.finishRoll += dt;
+      // phase 1 (0-0.9s): coast, barely losing speed — you're still flying
+      // phase 2 (0.9s+):  brake progressively into a carve
+      const braking = t > 0.9;
+      const decel = braking ? lerp(0.9, 3.4, clamp01((t - 0.9) / 1.6)) : 0.22;
+      r.v = damp(r.v, braking ? 0 : r.v * 0.995, decel, dt);
+
+      // carve: lean the bike across the track as they scrub off speed
+      if (braking && r.isPlayer) {
+        const carve = Math.sin(clamp01((t - 0.9) / 2.2) * Math.PI) * r.finishCarve;
+        r.vx = damp(r.vx, carve * 5.5, 2.2, dt);
+      } else {
+        r.vx = damp(r.vx, 0, 1.5, dt);
+      }
+      r.x += r.vx * dt;
       r.s += r.v * dt;
-      r.y = trk.heightAt(r.s, r.x);
-      this.poseRacer(r, dt, 0);
+
+      // stay on the ground properly — the old roll-out ignored terrain, so
+      // riders sank into or floated over the run-off
+      const gh = trk.heightAt(r.s, r.x);
+      r.vy -= GRAV * dt;
+      r.y += r.vy * dt;
+      if (r.y <= gh) { r.y = gh; r.vy = 0; }
+
+      r.wheelSpin += r.v * dt / 0.36;
+      // hands off the bars, one arm up, once they're nearly stopped
+      if (r.isPlayer && r.v < 6) r.finishPose = Math.min(1, r.finishPose + dt * 2.2);
+
+      this.poseRacer(r, dt, braking ? r.finishCarve * 0.5 : 0);
+      if (r.isPlayer) this.playerFinishFx(r, dt, t);
       return;
     }
 
@@ -1446,8 +1529,17 @@ export class Game {
     if (r.s >= this.track.length - 20 && !r.finished) {
       r.finished = true;
       r.finishTime = this.raceTime;
+      r.finishRoll = 0;
+      r.finishPose = 0;
+      // carve toward the middle of the track if we're off to one side,
+      // otherwise pick the side we were already drifting
+      const hwF = trk.halfWidth(r.s);
+      r.finishCarve = Math.abs(r.x) > hwF * 0.3
+        ? -Math.sign(r.x)
+        : (Math.sign(r.vx) || (Math.random() < 0.5 ? -1 : 1));
       if (r.isPlayer) {
         this.finishHold = 0;
+        this.finishBlast = false;
         audio.cheer(1.2);
         this.slowmo = Math.max(this.slowmo, 1.1);
         // if someone just beat us across, call it immediately; the winning
@@ -2836,12 +2928,13 @@ export class Game {
       rig.rider.position.y = damp(rig.rider.position.y,
         -clamp01(-r.weight) * 0.07, 10, dt);
     }
-    // hips drop and the chest comes up as the rider gets behind the saddle
-    if (r.crash <= 0) {
-      rig.torso.rotation.x = damp(rig.torso.rotation.x,
-        clamp01(-r.weight) * 0.26 - clamp01(r.weight) * 0.20
-        + (r.isPlayer ? clamp01(this.airPose * 3) * 0.5 : 0), 7, dt);
-    }
+    // Torso pitch: weight shift + superman pose. The victory contribution
+    // is added later, once the arm pipeline has computed it — resolving
+    // here alone is what used to make the finish pose vanish.
+    _poseTorsoBase = r.crash <= 0
+      ? clamp01(-r.weight) * 0.26 - clamp01(r.weight) * 0.20
+        + (r.isPlayer ? clamp01(this.airPose * 3) * 0.5 : 0)
+      : rig.torso.rotation.x;
 
     // crash tumble
     if (r.crash > 0) {
@@ -2913,45 +3006,130 @@ export class Game {
       }
     }
 
+    // A ragdoll owns every limb outright — no steering, absorption or pose
+    // layering should touch them mid-tumble. Returning here rather than
+    // falling through is what keeps a crash from twitching back toward the
+    // riding pose while the body is still cartwheeling.
+    if (r.crash > 0 && r.ragdoll) {
+      r.steerVis = damp(r.steerVis, 0, 6, dt);
+      rig.fork.rotation.y = r.steerVis;
+      // the shadow block below is skipped, so place it here — a tumbling
+      // rider still needs a ground contact or they read as weightless
+      const cgh = trk.heightAt(r.s, r.x);
+      rig.shadow.position.copy(trk.worldPos(r.s, r.x, cgh + 0.05, _v2));
+      rig.shadow.quaternion.setFromRotationMatrix(_m1.makeBasis(right, up, fwd));
+      rig.shadow.rotateX(-Math.PI / 2);
+      const cAir = clamp01((r.y - cgh) / 8);
+      const csc = 1 + cAir * 1.7;
+      rig.shadow.scale.set(csc, csc, 1);
+      (rig.shadow.material as THREE.MeshBasicMaterial).opacity = 0.7 * (1 - cAir * 0.7);
+      rig.contactF.visible = false;
+      rig.contactR.visible = false;
+      return;
+    }
+
     // bonk swing animation
     if (r.bonkSwing > 0) {
       r.bonkSwing -= dt * 4.2;
       const t = clamp01(r.bonkSwing);
       const swing = Math.sin(t * Math.PI) * 1.55 * r.bonkDir;
-      const arm = r.bonkDir < 0 ? rig.armL : rig.armR;
-      arm.rotation.z = -swing;
-      arm.rotation.y = swing * 0.6;
+      const st2 = r.steerVis;
+      // BONK is a layer too: the swinging arm takes over, but the OTHER arm
+      // keeps steering. Previously the non-swinging arm was left wherever
+      // the last frame put it, which read as a dead limb mid-punch.
+      const swingA = r.bonkDir < 0 ? rig.armL : rig.armR;
+      const holdA = r.bonkDir < 0 ? rig.armR : rig.armL;
+      swingA.rotation.z = -swing;
+      swingA.rotation.y = swing * 0.6;
+      swingA.rotation.x = damp(swingA.rotation.x, -0.2, 10, dt);
+      holdA.rotation.y = damp(holdA.rotation.y, -st2 * 0.34, 12, dt);
+      holdA.rotation.z = damp(holdA.rotation.z, st2 * 0.20, 12, dt);
+      holdA.rotation.x = damp(holdA.rotation.x, 0, 12, dt);
       rig.torso.rotation.y = swing * 0.32;
       // BONK step 2: the whole bike yaws and heels over against the swing —
       // Newton's third, and it stops the rider looking like a torso on rails
       rig.bike.rotation.y = -swing * 0.22;
       rig.bike.rotation.z = swing * 0.14;
-      rig.fork.rotation.y = r.steerVis - swing * 0.3;
+      rig.fork.rotation.y = st2 - swing * 0.3;
+      _poseTorsoX = 0;
+      _poseHeadX = 0;
     } else {
       // Hands stay on the grips: as the fork turns, the inside arm pulls back
       // and the outside arm pushes out. Without this the bars rotate away
       // from the hands and the whole rig reads as detached.
       const st = r.steerVis;
-      // IMPACT REACTION: elbows fold under compression exactly as the knees
-      // do, so a landing is absorbed by all four limbs rather than two.
+      // ================================================================
+      // ADDITIVE POSE PIPELINE
+      //
+      // Previously five separate blocks each wrote armR.rotation directly,
+      // so whichever ran last won and the others silently did nothing —
+      // that is exactly what makes a rider read as a model bolted to a
+      // physics object rather than a person riding a bike.
+      //
+      // Now every layer CONTRIBUTES to a target, weighted by how much
+      // authority it should have this frame, and one damp per joint at the
+      // end drives the rig. Layers blend instead of fighting.
+      //
+      //   base      hands on the bars, steering
+      //   absorb    suspension load folding the elbows
+      //   style     trick poses (no-hander etc.)
+      //   bonk      the swing
+      //   victory   arm up at the line
+      // ================================================================
+      const P = _pose;
+      P.reset();
+
+      // ---- LAYER: base — hands on the grips, tracking the fork
+      P.armLY = -st * 0.34;
+      P.armRY = -st * 0.34;
+      P.armLZ = st * 0.20;
+      P.armRZ = st * 0.20;
+      P.torsoY = -st * 0.16;
+
+      // ---- LAYER: impact absorption. Elbows fold with the same signal
+      // that compresses the fork, so limbs and suspension act together.
       const absorbA = clamp(-r.suspension * 1.4, -0.15, 0.65);
-      // A style trick already owns the arms this frame (no-hander throws
-      // them wide). Writing steering on top would overwrite the pose and
-      // the trick would never be visible.
-      const armsFree = !(r.isPlayer && this.styleActive.size > 0);
-      if (armsFree) {
-        rig.armL.rotation.y = damp(rig.armL.rotation.y, -st * 0.34, 12, dt);
-        rig.armR.rotation.y = damp(rig.armR.rotation.y, -st * 0.34, 12, dt);
-        rig.armL.rotation.z = damp(rig.armL.rotation.z, st * 0.20 + absorbA * 0.5, 12, dt);
-        rig.armR.rotation.z = damp(rig.armR.rotation.z, st * 0.20 - absorbA * 0.5, 12, dt);
-        rig.armL.rotation.x = damp(rig.armL.rotation.x, -absorbA, 14, dt);
-        rig.armR.rotation.x = damp(rig.armR.rotation.x, -absorbA, 14, dt);
+      P.armLZ += absorbA * 0.5;
+      P.armRZ -= absorbA * 0.5;
+      P.armLX -= absorbA;
+      P.armRX -= absorbA;
+
+      // ---- LAYER: style tricks. Weighted so a partial pose still shows
+      // some steering influence rather than snapping between the two.
+      if (r.isPlayer && this.styleActive.size > 0) {
+        const noHand = this.styleActive.has(StyleTrick.NO_HANDER) ? 1 : 0;
+        if (noHand) {
+          const w = 0.85;
+          P.armLZ = lerp(P.armLZ, 1.25, w);
+          P.armRZ = lerp(P.armRZ, -1.25, w);
+          P.armLX = lerp(P.armLX, -0.5, w);
+          P.armRX = lerp(P.armRX, -0.5, w);
+        }
       }
+
+      // ---- LAYER: victory pose, blended by its own 0..1 weight
+      const vp = r.finishPose;
+      if (vp > 0.01) {
+        P.armRZ = lerp(P.armRZ, -2.15, vp);
+        P.armRX = lerp(P.armRX, -0.5, vp);
+        P.torsoX += -0.3 * vp;
+        P.headX += -0.35 * vp;
+      }
+
+      // ---- resolve: one damp per joint
+      rig.armL.rotation.y = damp(rig.armL.rotation.y, P.armLY, 12, dt);
+      rig.armR.rotation.y = damp(rig.armR.rotation.y, P.armRY, 12, dt);
+      rig.armL.rotation.z = damp(rig.armL.rotation.z, P.armLZ, 12, dt);
+      rig.armR.rotation.z = damp(rig.armR.rotation.z, P.armRZ, 12, dt);
+      rig.armL.rotation.x = damp(rig.armL.rotation.x, P.armLX, 14, dt);
+      rig.armR.rotation.x = damp(rig.armR.rotation.x, P.armRX, 14, dt);
+      rig.torso.rotation.y = damp(rig.torso.rotation.y, P.torsoY, 9, dt);
+      _poseTorsoX = P.torsoX;
+      _poseHeadX = P.headX;
+
       // unwind the bonk's bike yaw once the swing is done
       rig.bike.rotation.y = damp(rig.bike.rotation.y, 0, 10, dt);
       if (r.grounded) rig.bike.rotation.z = damp(rig.bike.rotation.z, 0, 10, dt);
-      // shoulders counter-rotate slightly into the turn
-      rig.torso.rotation.y = damp(rig.torso.rotation.y, -st * 0.16, 9, dt);
     }
 
     // ---- head: look where you're going, not where the bike points -----
@@ -2961,9 +3139,17 @@ export class Game {
         -0.75, 0.75);
     r.headYaw = damp(r.headYaw, lookTarget, 5 * r.stTwitch, dt);
     rig.head.rotation.y = r.headYaw;
-    // and tip the chin up over jumps
-    rig.head.rotation.x = damp(rig.head.rotation.x,
-      r.grounded ? 0 : clamp(-r.vy * 0.012, -0.22, 0.22), 6, dt);
+    // Chin lift SUMS with the victory-pose contribution rather than
+    // replacing it — this line used to clobber the finish pose entirely.
+    const chinAir = r.grounded ? 0 : clamp(-r.vy * 0.012, -0.22, 0.22);
+    rig.head.rotation.x = damp(rig.head.rotation.x, chinAir + _poseHeadX, 6, dt);
+
+    // torso resolves last, summing the weight-shift base with the victory
+    // contribution the arm pipeline produced above
+    if (r.crash <= 0) {
+      rig.torso.rotation.x = damp(rig.torso.rotation.x,
+        _poseTorsoBase + _poseTorsoX, 7, dt);
+    }
 
     // shadow
     const gh = trk.heightAt(r.s, r.x);
@@ -3173,6 +3359,83 @@ export class Game {
     }
   }
 
+  /**
+   * Finish-line FX. A hard dust blast the moment the wheel crosses, then a
+   * continuous scrub plume off the rear tyre while the rider carves down.
+   */
+  private playerFinishFx(r: Racer, dt: number, t: number) {
+    const trk = this.track;
+    const zone = trk.zoneAt(r.s);
+    trk.frameAt(r.s, _f1, _f2, _f3);
+    const pk = Math.max(0.5, this.perfGov.particleScale);
+
+    // ---- the crossing blast, fired once
+    if (!this.finishBlast) {
+      this.finishBlast = true;
+      const base = trk.worldPos(r.s, r.x, r.y + 0.2, _v1);
+      const n = Math.floor(70 * pk);
+      for (let i = 0; i < n; i++) {
+        const a = this.rng.range(0, TAU);
+        const sp = this.rng.range(4, 16);
+        this.dirtPool.spawn({
+          pos: base.clone(),
+          vel: _f2.clone().multiplyScalar(Math.cos(a) * sp)
+            .addScaledVector(_f1, Math.sin(a) * sp * 0.8 - r.v * 0.2)
+            .addScaledVector(_f3, this.rng.range(2, 11)),
+          life: this.rng.range(0.7, 1.7),
+          size: this.rng.range(0.14, 0.44), endSize: 0.06,
+          color: _c1.setHex(zone.dirt).multiplyScalar(this.rng.range(0.7, 1.25)),
+          alpha: 1, gravity: 22, drag: 0.75,
+          spin: this.rng.range(-12, 12), bounce: 0.25,
+        });
+      }
+      // billowing cloud on top of the grit
+      for (let i = 0; i < Math.floor(34 * pk); i++) {
+        const a = this.rng.range(0, TAU);
+        this.smokePool.spawn({
+          pos: base.clone().addScaledVector(_f2, Math.cos(a) * this.rng.range(0, 2.5)),
+          vel: _f2.clone().multiplyScalar(Math.cos(a) * this.rng.range(2, 8))
+            .addScaledVector(_f1, Math.sin(a) * 3 - r.v * 0.12)
+            .addScaledVector(_f3, this.rng.range(0.5, 3.5)),
+          life: this.rng.range(1.0, 2.2),
+          size: this.rng.range(1.2, 2.4), endSize: this.rng.range(5, 9),
+          color: _c1.setHex(zone.dirt).lerp(_c2.setRGB(1, 0.97, 0.9), 0.55),
+          endColor: _c2.setRGB(1, 1, 1),
+          alpha: 0.45, gravity: -1.2, drag: 1.4,
+        });
+      }
+      audio.land(1);
+      audio.cheer(1.4);
+      this.shakeAdd(0.7);
+    }
+
+    // ---- scrub plume while braking and carving
+    if (t > 0.9 && r.v > 4 && Math.random() < dt * 55 * pk) {
+      const rear = trk.worldPos(r.s - 0.7, r.x, r.y + 0.12, _v1);
+      for (let i = 0; i < 2; i++) {
+        this.dirtPool.spawn({
+          pos: rear.clone().addScaledVector(_f2, this.rng.range(-0.4, 0.4)),
+          vel: _f2.clone().multiplyScalar(-r.finishCarve * this.rng.range(3, 9))
+            .addScaledVector(_f1, -r.v * this.rng.range(0.15, 0.4))
+            .addScaledVector(_f3, this.rng.range(1.5, 5)),
+          life: this.rng.range(0.5, 1.1),
+          size: this.rng.range(0.12, 0.34), endSize: 0.05,
+          color: _c1.setHex(zone.dirt).multiplyScalar(this.rng.range(0.65, 1.15)),
+          alpha: 1, gravity: 23, drag: 0.85, spin: this.rng.range(-9, 9),
+        });
+      }
+      this.smokePool.spawn({
+        pos: rear.clone(),
+        vel: _f3.clone().multiplyScalar(this.rng.range(0.6, 2.2))
+          .addScaledVector(_f2, -r.finishCarve * 2),
+        life: this.rng.range(0.7, 1.4),
+        size: this.rng.range(0.9, 1.7), endSize: this.rng.range(3.5, 6),
+        color: _c1.setHex(zone.dirt).lerp(_c2.setRGB(1, 0.97, 0.88), 0.5),
+        alpha: 0.34, gravity: -1, drag: 1.5,
+      });
+    }
+  }
+
   private spawnCrashDebris(r: Racer, count = 34) {
     const trk = this.track;
     const base = trk.worldPos(r.s, r.x, r.y + 0.5, _v1);
@@ -3215,7 +3478,13 @@ export class Game {
     });
     this.track.dispose();
 
-    this.track = m.authored
+    this.track = m.id === 'cinder'
+      ? new Track(m.seed, m.length, CINDER_SECTIONS, CINDER_SETPIECES)
+      : m.id === 'thornwood'
+      ? new Track(m.seed, m.length, THORNWOOD_SECTIONS, THORNWOOD_SETPIECES)
+      : m.id === 'lastlight'
+      ? new Track(m.seed, m.length, LASTLIGHT_SECTIONS, LASTLIGHT_SETPIECES)
+      : m.authored
       ? new Track(m.seed, m.length, SHALEBACK_SECTIONS, SHALEBACK_SETPIECES)
       : new Track(m.seed, m.length);
     this.scene.add(this.track.build());
@@ -3484,9 +3753,63 @@ export class Game {
     this.camera.updateProjectionMatrix();
   }
 
+  /**
+   * FINISH CAMERA. Pulls back and rises as the rider crosses, then swings
+   * around to the side so the carve and the victory pose are both in frame.
+   * Deliberately slow rates — the whole point is that it feels like the
+   * camera is savouring the moment rather than tracking a race.
+   */
+  private finishCamera(dt: number) {
+    const trk = this.track;
+    const p = this.player;
+    const t = p.finishRoll;
+
+    // 0-1.0s: drop back and up, still behind
+    // 1.0s+ : arc around to the carve side, framing the rider three-quarter
+    const arc = smootherstep(clamp01((t - 1.0) / 2.4));
+    const back = lerp(8.5, 13.5, clamp01(t / 2.5));
+    const height = lerp(3.0, 6.2, clamp01(t / 3.0));
+    const side = arc * 9 * -p.finishCarve;
+
+    const cs = p.s - back;
+    const cx = p.x + side;
+    const want = trk.worldPos(cs, cx, trk.heightAt(cs, cx) + height, _v1);
+    const rate = 2.6;
+    this.camPos.x = damp(this.camPos.x, want.x, rate, dt);
+    this.camPos.y = damp(this.camPos.y, want.y, rate, dt);
+    this.camPos.z = damp(this.camPos.z, want.z, rate, dt);
+
+    // look slightly ahead of the rider early, then settle onto them
+    const lookS = p.s + lerp(6, 0.5, arc);
+    const look = trk.worldPos(lookS, p.x, trk.heightAt(lookS, p.x) + 1.6, _v2);
+    this.camLook.x = damp(this.camLook.x, look.x, 3.2, dt);
+    this.camLook.y = damp(this.camLook.y, look.y, 3.2, dt);
+    this.camLook.z = damp(this.camLook.z, look.z, 3.2, dt);
+
+    this.camera.position.copy(this.camPos);
+    if (this.shake > 0) {
+      this.shake = Math.max(0, this.shake - dt * 2.6);
+      const m = this.shake * this.shake * 0.7;
+      this.camera.position.x += (Math.random() * 2 - 1) * m;
+      this.camera.position.y += (Math.random() * 2 - 1) * m;
+    }
+    this.camera.lookAt(this.camLook);
+    this.camRoll = damp(this.camRoll, arc * 0.05 * p.finishCarve, 2, dt);
+    this.camera.rotateZ(this.camRoll);
+    // widen slightly as we pull out, so the mountain comes back into frame
+    this.fov = damp(this.fov, lerp(70, 58, clamp01(t / 2.5)), 2.2, dt);
+    this.camera.fov = this.fov;
+    this.camera.updateProjectionMatrix();
+  }
+
   private updateCamera(dt: number, snap: boolean) {
     if (this.hud.phase === 'menu') { this.cinematicCamera(dt); return; }
     if (this.hud.phase === 'intro') return;   // the cold open drives it
+    // the finish sequence owns the camera from the moment of crossing
+    if (this.player.finished && this.hud.phase === 'race') {
+      this.finishCamera(dt);
+      return;
+    }
     if (this.replayData && this.hud.phase === 'finish') return;  // replay drives it
     const trk = this.track;
     const p = this.player;
@@ -4027,6 +4350,27 @@ const _m1 = new THREE.Matrix4();
 const _c1 = new THREE.Color();
 const _c2 = new THREE.Color();
 const _yAxis = new THREE.Vector3(0, 1, 0);
+
+/**
+ * Scratch accumulator for the additive pose pipeline. Reused every frame so
+ * the layering costs no allocation.
+ */
+const _pose = {
+  armLX: 0, armLY: 0, armLZ: 0,
+  armRX: 0, armRY: 0, armRZ: 0,
+  torsoX: 0, torsoY: 0,
+  headX: 0,
+  reset() {
+    this.armLX = this.armLY = this.armLZ = 0;
+    this.armRX = this.armRY = this.armRZ = 0;
+    this.torsoX = this.torsoY = 0;
+    this.headX = 0;
+  },
+};
+/** carried out of the arm block so the head/torso resolves can sum them */
+let _poseTorsoX = 0;
+let _poseHeadX = 0;
+let _poseTorsoBase = 0;
 const _xAxis = new THREE.Vector3(1, 0, 0);
 const IDENTITY_PERF: Perf = {
   topCap: 0, accel: 1, grip: 1, airRate: 1, landTol: 0, bonk: 1,

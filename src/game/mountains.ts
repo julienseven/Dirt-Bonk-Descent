@@ -40,13 +40,15 @@ export const MOUNTAINS: MountainDef[] = [
   },
   {
     id: 'cinder', name: 'CINDER CHUTE', sub: 'SHORT & VICIOUS',
-    blurb: 'A sprint straight down a scree slope. No time to think, only to react.',
+    blurb: 'A sprint straight down a volcanic scree slope. No time to think, only to react.',
     seed: 771453, length: 2800, rating: 3, reqLevel: 2, estSpeed: 29.5, tint: '#ff6a00',
+    authored: true,
   },
   {
     id: 'thornwood', name: 'THORNWOOD DEEP', sub: 'TIGHT & DARK',
-    blurb: 'Trees close in, ruts run deep, and the crowd is close enough to grab.',
+    blurb: 'Dense vegetation, zero visibility, roots everywhere. This is a technical course, not a speed run.',
     seed: 33911, length: 4900, rating: 4, reqLevel: 5, estSpeed: 28.5, tint: '#7ef7c8',
+    authored: true,
   },
   {
     id: 'ironjaw', name: 'IRONJAW PASS', sub: 'ENDURANCE',
@@ -54,9 +56,10 @@ export const MOUNTAINS: MountainDef[] = [
     seed: 505017, length: 6200, rating: 4, reqLevel: 8, estSpeed: 30.5, tint: '#ffd400',
   },
   {
-    id: 'lastlight', name: 'LASTLIGHT SPINE', sub: 'THE BIG ONE',
-    blurb: 'The ridge nobody finishes clean. Every hazard this mountain owns, in order.',
-    seed: 8829, length: 5600, rating: 5, reqLevel: 12, estSpeed: 29, tint: '#ff2e88',
+    id: 'lastlight', name: 'LASTLIGHT SPINE', sub: 'THE SHOWCASE',
+    blurb: 'A knife-edge ridge in golden-hour light. The course you\'d put in a trailer.',
+    seed: 8829, length: 5600, rating: 5, reqLevel: 0, estSpeed: 29, tint: '#ff2e88',
+    authored: true,
   },
 ];
 

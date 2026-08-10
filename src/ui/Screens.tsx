@@ -59,8 +59,12 @@ export function Menu({
           <div className="title-skew compact-hide inline-block bg-[#ffd400] px-5 py-1">
             <span className="hud-label !text-[12px] !tracking-[.5em] !text-black">ARCADE DOWNHILL MAYHEM</span>
           </div>
-          <h1 className="wobble hud-big compact-title mt-2 text-[clamp(46px,10vw,132px)] leading-[0.82] text-white"
-            style={{ textShadow: '0 8px 0 #ff2e88, 0 16px 0 #00000088, 0 0 70px #ff2e8855' }}>
+          <h1 className="wobble hud-big compact-title mt-2 text-white"
+            style={{
+              fontSize: 'clamp(34px, min(10vw, 6.5vh), 132px)',
+              lineHeight: 0.82,
+              textShadow: '0 8px 0 #ff2e88, 0 16px 0 #00000088, 0 0 70px #ff2e8855',
+            }}>
             DIRT<span className="text-[#ffd400]"> BONK </span>DESCENT
           </h1>
           <p className="compact-hide mt-3 max-w-xl text-[15px] leading-snug text-white/70">
@@ -79,6 +83,16 @@ export function Menu({
               <span className="title-skew block bg-[#ff2e88] px-10 py-4 transition-transform duration-150 group-hover:translate-x-1 group-hover:-translate-y-1"
                 style={{ boxShadow: '8px 8px 0 #000, 0 0 40px #ff2e8877' }}>
                 <span className="hud-big block text-[40px] leading-none text-white">DROP IN</span>
+              </span>
+            </button>
+            <button
+              disabled
+              className="group mt-2 block w-full cursor-not-allowed opacity-60"
+              title="Multiplayer is coming in a future update"
+            >
+              <span className="title-skew block border-2 border-[#2fe6c8] px-6 py-2">
+                <span className="hud-big text-[24px] leading-none text-[#2fe6c8]">ONLINE</span>
+                <span className="hud-label ml-2 !text-[9px] text-[#2fe6c8]">SOON</span>
               </span>
             </button>
             <button onClick={() => { audio.resume(); audio.uiClick(); onMountains(); }}
@@ -406,10 +420,20 @@ export function Results({
 export function Loading({ pct }: { pct: number }) {
   return (
     <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-[#06070a]">
-      <div className="hud-big text-[42px] text-[#ffd400]" style={{ textShadow: '0 5px 0 #000' }}>CARVING THE MOUNTAIN…</div>
-      <div className="mt-4 h-[8px] w-[320px] border border-white/25 bg-black">
-        <div className="h-full bg-gradient-to-r from-[#2fe6c8] to-[#ff2e88] transition-[width] duration-200" style={{ width: `${pct}%` }} />
+      <div className="text-center">
+        <div className="title-skew inline-block bg-[#ffd400] px-4 py-1 mb-4">
+          <span className="hud-label !text-[10px] !tracking-[.4em] !text-black">LOADING</span>
+        </div>
+        <div className="hud-big text-[clamp(36px,8vw,64px)] text-[#ff2e88]"
+          style={{ textShadow: '0 6px 0 #000, 0 0 40px #ff2e8855' }}>
+          DIRT<span className="text-[#ffd400]"> BONK </span>DESCENT
+        </div>
       </div>
+      <div className="mt-8 h-[6px] w-[280px] border border-white/20 bg-black/60 rounded-sm overflow-hidden">
+        <div className="h-full bg-gradient-to-r from-[#2fe6c8] via-[#ffd400] to-[#ff2e88] transition-[width] duration-150"
+          style={{ width: `${pct}%` }} />
+      </div>
+      <div className="mt-2 hud-label !text-[9px]">CARVING THE MOUNTAIN</div>
     </div>
   );
 }
