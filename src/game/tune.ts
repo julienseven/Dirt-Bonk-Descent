@@ -166,6 +166,6 @@ export function profileDifficulty(
 }
 
 export function fullReport(trk: Track) {
-  const diffs: Difficulty[] = ['chill', 'pro', 'savage'];
+  const diffs: Difficulty[] = ['chill', 'rider', 'pro', 'savage'];
   return diffs.map(d => ({ diff: d, rows: profileDifficulty(trk, d) }));
 }

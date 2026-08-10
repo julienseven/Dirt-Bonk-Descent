@@ -4,10 +4,11 @@
 
 import { type Loadout, DEFAULT_LOADOUT, BIKES } from './garage';
 
-export type Difficulty = 'chill' | 'pro' | 'savage';
+export type Difficulty = 'chill' | 'rider' | 'pro' | 'savage';
 
 export const DIFFICULTIES: { id: Difficulty; label: string; blurb: string; color: string }[] = [
   { id: 'chill', label: 'ROOKIE', blurb: 'Wide lines, early brakes, slow to recover', color: '#7ef7c8' },
+  { id: 'rider', label: 'RIDER', blurb: 'Knows the lines and takes the obvious shortcuts', color: '#ffd400' },
   { id: 'pro', label: 'PRO', blurb: 'Hits every apex and punishes mistakes', color: '#ff9500' },
   { id: 'savage', label: 'ABSURD', blurb: 'Perfect lines, every shortcut, perfect timing', color: '#ff2e88' },
 ];
@@ -19,8 +20,13 @@ export const DIFFICULTIES: { id: Difficulty; label: string; blurb: string; color
  * of the drag model puts a competent player at ~38-42 m/s tucked and ~33
  * un-tucked, so the top rival's cap is set relative to that:
  *   chill  top ~33 m/s  (a good line beats them comfortably)
+ *   rider  top ~35 m/s  (loses to a clean run, punishes a sloppy one)
  *   pro    top ~37 m/s  (a real fight)
  *   savage top ~41 m/s  (needs near-perfect tucking and corner exits)
+ *
+ * The hard speed ceiling now comes from AI_TIERS[].cap; `skill` here drives
+ * execution quality and the per-grid-slot spread. The four rows line up
+ * one-to-one with the four AI tiers via tierFromLegacy().
  *
  * `bandK` scales the rubber band. At 1.0 the band moves skill by up to +/-0.15
  * = 2.25 m/s, which was large enough to erase the gap between difficulties —
@@ -30,6 +36,7 @@ export const DIFF_TUNING: Record<
   Difficulty, { skill: number; step: number; aggro: number; bandK: number }
 > = {
   chill:  { skill: 0.427, step: 0.028, aggro: 0.45, bandK: 0.35 },
+  rider:  { skill: 0.545, step: 0.035, aggro: 0.60, bandK: 0.80 },
   pro:    { skill: 0.657, step: 0.042, aggro: 0.75, bandK: 1.00 },
   savage: { skill: 0.893, step: 0.048, aggro: 1.15, bandK: 1.35 },
 };
@@ -131,6 +138,10 @@ export function loadSave(): SaveData {
     return {
       ...DEFAULTS,
       ...p,
+      // an unknown id would index DIFF_TUNING as undefined and take the
+      // whole race setup down, so pin it to the table
+      difficulty: DIFFICULTIES.some(d => d.id === p.difficulty)
+        ? p.difficulty! : DEFAULTS.difficulty,
       best: p.best ?? {},
       bestScore: p.bestScore ?? {},
       ghost: p.ghost ?? {},

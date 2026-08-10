@@ -271,7 +271,15 @@ export function chaosRoll(rng: RNG): { line: number; swing: number; send: number
   return { line: 0.9, swing: 1.4, send: 1.6 };                    // unhinged
 }
 
+/**
+ * Save-file difficulty id -> AI tier. Named "legacy" because the save format
+ * predates the four-tier table and still stores the old ids. Unknown values
+ * fall back to 'pro', which is what saves written before RIDER existed hold.
+ */
 export const tierFromLegacy = (d: string): AiTier =>
-  d === 'chill' ? 'rookie' : d === 'savage' ? 'absurd' : 'pro';
+  d === 'chill' ? 'rookie'
+  : d === 'rider' ? 'rider'
+  : d === 'savage' ? 'absurd'
+  : 'pro';
 
 void clamp;

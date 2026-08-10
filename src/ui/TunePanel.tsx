@@ -18,6 +18,12 @@ function verdict(d: string, skill: number, win: number): { txt: string; ok: bool
     if (skill >= 0.65 && win < 0.5) return { txt: 'TOO HARD', ok: false };
     if (skill <= 0.45 && win > 0.9) return { txt: 'TOO EASY', ok: false };
   }
+  if (d === 'rider') {
+    // Sits between chill and pro: a DECENT player should be winning more
+    // often than not, an EXPERT should be clearing it comfortably.
+    if (skill >= 0.85 && win < 0.45) return { txt: 'TOO HARD', ok: false };
+    if (skill <= 0.45 && win > 0.75) return { txt: 'TOO EASY', ok: false };
+  }
   if (d === 'pro') {
     if (skill >= 0.85 && win < 0.35) return { txt: 'TOO HARD', ok: false };
     if (skill <= 0.45 && win > 0.6) return { txt: 'TOO EASY', ok: false };
