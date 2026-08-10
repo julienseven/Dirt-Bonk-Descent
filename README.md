@@ -51,6 +51,19 @@ Then open the local URL. `npm run build` produces a single-file `dist/index.html
 | Crashed? Mash to recover | `W` / `Space` |
 | Pause | `Esc` |
 
+A connected gamepad is picked up automatically — no setup, no remap UI yet. Keyboard
+stays authoritative; controller intent is OR'd in on top of it.
+
+| Action | Controller |
+|---|---|
+| Steer | Left stick / D-pad |
+| Pedal / Brake | `RT` / `LT` |
+| Tuck | `Y` / `LB` |
+| Hop | `A` |
+| Bonk left / right | `X` / `B` |
+| Boost | `RB` |
+| Pause | `Start` |
+
 Touch devices get an on-screen layout: a slide-anywhere steering strip, automatic
 throttle, and contextual action buttons that switch from **BONK** to **WHIP** in the air.
 
@@ -105,6 +118,7 @@ multiplies the score; holding a big pose costs rotation control.
 Five personalities — **SPEED FREAK**, **BONKER**, **SHOWOFF**, **COWARD**, **CHAOS AGENT** —
 each defined by ten behavioural weights, crossed with four difficulty tiers.
 
+Four tiers — **ROOKIE**, **RIDER**, **PRO**, **ABSURD**.
 Difficulty deliberately **does not** scale raw speed much (ROOKIE → ABSURD is only ~18%).
 It scales decision quality: line selection, cornering commitment, shortcut nerve,
 overtaking, combat timing, risk management, recovery and trick usage. The honest lever is
