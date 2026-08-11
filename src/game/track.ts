@@ -1989,15 +1989,24 @@ export class Track {
     // meant dozens of one-off geometries uploaded at load for no visual gain
     const rockPool = [rockGeo(3), rockGeo(17), rockGeo(41), rockGeo(63)];
 
-    /** Place a mesh at track coords, aligned to the surface. */
+    /**
+     * Place a mesh at track coords, aligned to the surface.
+     * Preserves any local rotation already authored on the mesh (e.g. a
+     * cylinder laid on its side) by composing it after the track basis —
+     * previously setFromRotationMatrix wiped those and left "standing"
+     * trunks ghosted on the racing line with no collision.
+     */
     const put = (mesh: THREE.Object3D, s: number, x: number, lift = 0, yaw = 0) => {
       const h = this.heightAt(s, x) + lift;
       this.worldPos(s, x, h, _p);
       this.frameAt(s, _fwd2, _right2, _up2);
       mesh.position.copy(_p);
+      // Capture author intent (fallen log tilt, branch lean, …) before basis.
+      const local = mesh.quaternion.clone();
       mesh.quaternion.setFromRotationMatrix(
         new THREE.Matrix4().makeBasis(_right2, _up2, _fwd2));
-      mesh.rotateY(yaw);
+      if (yaw) mesh.rotateY(yaw);
+      mesh.quaternion.multiply(local);
       grp.add(mesh);
       return mesh;
     };
@@ -2026,17 +2035,20 @@ export class Track {
 
       switch (theme) {
         case 'PINE PLUNGE': {
-          // fallen giants arching over the trail
+          // Verge-only forest debris. Mid-track fallen "arches" used to lose
+          // their horizontal rotation in put() and become pass-through poles.
           for (let s = s0 + 40; s < s1; s += rng.range(95, 150)) {
             const hw = this.halfWidth(s);
+            const side = rng.sign();
+            // snapped stump off the racing line
+            const stump = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.8, 1.05, 2.4, 7), darkWood);
+            put(stump, s + 3, side * (hw + 3.2), 1.2);
+            // short fallen section on the verge — never spans the trail
             const trunk = new THREE.Mesh(
-              new THREE.CylinderGeometry(0.55, 0.75, hw * 2.9, 7), wood);
+              new THREE.CylinderGeometry(0.4, 0.55, rng.range(4.5, 7.5), 7), wood);
             trunk.rotation.z = Math.PI / 2;
-            // high enough that even a stomped kicker won't clip through it
-            put(trunk, s, 0, rng.range(6.4, 8.0), rng.range(-0.3, 0.3));
-            // snapped stump at the verge
-            const stump = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 1.05, 2.4, 7), darkWood);
-            put(stump, s + 3, -(hw + 3), 1.2);
+            put(trunk, s + 1.5, side * (hw + 4.8), 0.45, rng.range(-0.4, 0.4));
           }
           break;
         }
@@ -2309,13 +2321,14 @@ export class Track {
           break;
         }
         case 'fallen_giant': {
-          const trunk = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.7 * sc, 0.95 * sc, hw * 3.2, 8), wood);
-          trunk.rotation.z = Math.PI / 2;
-          put(trunk, s, 0, 7.2 * sc, rng.range(-0.2, 0.2));
+          // Verge-only: no mid-track span (was a pass-through standing pole).
           const stump = new THREE.Mesh(
             new THREE.CylinderGeometry(1.0 * sc, 1.3 * sc, 2.8 * sc, 8), darkWood);
-          put(stump, s + 4, -(hw + 4), 1.4 * sc);
+          put(stump, s + 4, side * (hw + 4), 1.4 * sc);
+          const trunk = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.55 * sc, 0.75 * sc, 6.5 * sc, 8), wood);
+          trunk.rotation.z = Math.PI / 2;
+          put(trunk, s + 2, side * (hw + 5.5), 0.5 * sc, rng.range(-0.3, 0.3));
           break;
         }
         case 'shale_formation': {
@@ -2394,11 +2407,20 @@ export class Track {
           break;
         }
         case 'root_tunnel': {
+          // Roots claw in from both verges — never plant poles on the centerline.
           for (let k = 0; k < 4; k++) {
-            const root = new THREE.Mesh(
-              new THREE.CylinderGeometry(0.35, 0.5, hw * 2.4, 6), darkWood);
-            root.rotation.z = Math.PI / 2;
-            put(root, s + k * 6, 0, 4.5 + (k % 2) * 1.2, rng.range(-0.15, 0.15));
+            for (const sd of [-1, 1] as const) {
+              const root = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.28, 0.42, hw * 0.85, 6), darkWood);
+              root.rotation.z = Math.PI / 2;
+              put(
+                root,
+                s + k * 6,
+                sd * (hw * 0.55),
+                3.8 + (k % 2) * 0.9,
+                rng.range(-0.2, 0.2),
+              );
+            }
           }
           break;
         }
