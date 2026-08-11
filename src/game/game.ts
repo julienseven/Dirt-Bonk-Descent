@@ -37,7 +37,7 @@ import {
   type TrickTally,
 } from './tricks';
 import { getMode, type ModeId } from './modes';
-import { PerfGovernor, FixedStep, aiThinkInterval, LOD_BANDS, mobilePerfFloor } from './perf';
+import { PerfGovernor, FixedStep, aiThinkInterval, LOD_BANDS, mobilePerfFloor, modePerfFloor } from './perf';
 import {
   AI_TIERS, buildField, tierFromLegacy, themeAiFeel,
   planRivalThink, planRivalHop, planRivalCombat,
@@ -963,6 +963,7 @@ export class Game {
     this.hud.ghostGap = 0;
     this.hud.ghostActive = false;
     this.lastZone = -1;
+    this.applyModeFieldStyle();
     this.updateCamera(0.016, true);
   }
 
@@ -980,9 +981,37 @@ export class Game {
     this.modeClock = m.timeLimit(this.difficulty, est);
     this.elimTimer = 0;
     this.elimIn = m.elimination && m.elimInterval > 0 ? m.elimInterval : Infinity;
+    // Retarget quality floor for Mayhem / dense modes without waiting for hitch
+    const def = getTrackDefinition(this.mountainId);
+    this.perfGov.setThemeFloor(
+      modePerfFloor(def.theme, def.length, this.mobile, m.id, m.hazardScale),
+    );
+    // Soft-ghost opacity for time attack field
+    this.applyModeFieldStyle();
     // hazardScale is baked into Track at build time — rebuild when it drifts
     if (this.track && Math.abs(this.track.densityScale - m.hazardScale) > 0.02) {
       this.loadMountain(this.mountainId, true);
+    }
+  }
+
+  /**
+   * Time Attack: field is soft drama. RIDER_MAT materials are shared caches,
+   * so we never touch opacity — scale + shadow sell the ghost read instead.
+   */
+  private applyModeFieldStyle() {
+    const ghost = getMode(this.mode).aggressionScale <= 0;
+    for (const r of this.racers) {
+      if (r.isPlayer) continue;
+      r.rig.root.scale.setScalar(ghost ? 0.92 : 1);
+      if (r.rig.shadow) {
+        r.rig.shadow.scale.setScalar(ghost ? 0.7 : 1);
+        const mat = r.rig.shadow.material as THREE.MeshBasicMaterial | undefined;
+        // contact shadow is a per-rig plane (not RIDER_MAT cache) — safe to fade
+        if (mat && 'opacity' in mat) {
+          mat.transparent = true;
+          mat.opacity = ghost ? 0.22 : 0.72;
+        }
+      }
     }
   }
 
@@ -2318,6 +2347,13 @@ export class Game {
   // -------------------------------------------------------------------------
   private stepAI(r: Racer, dt: number, live: boolean) {
     const trk = this.track;
+    // Cut riders park — no plan, no combat, no obstacle dance
+    if (r.eliminated) {
+      this.stepRacer(r, dt, {
+        steer: 0, pedal: false, brake: true, tuck: false, hop: false, boost: false, live: false,
+      });
+      return;
+    }
     if (!live && this.hud.phase !== 'countdown') { this.poseRacer(r, dt, 0); return; }
     if (this.hud.phase === 'countdown') { this.poseRacer(r, dt, 0); return; }
 
@@ -2341,6 +2377,7 @@ export class Game {
     for (let i = 0; i < this.racers.length; i++) {
       if (i === selfIdx) continue;
       const o = this.racers[i];
+      if (o.eliminated) continue;
       neighbours.push({
         s: o.s, x: o.x, y: o.y, grounded: o.grounded, vx: o.vx,
         isPlayer: o.isPlayer, finished: o.finished, crash: o.crash, index: i,
@@ -2699,9 +2736,14 @@ export class Game {
    * FRONT BONK whether or not you pressed a button.
    */
   private collideRacers(dt: number) {
+    // Time Attack field is soft drama — never shove or bonk the player
+    const softGhosts = getMode(this.mode).aggressionScale <= 0;
     for (let i = 0; i < this.racers.length; i++) {
       for (let j = i + 1; j < this.racers.length; j++) {
         const a = this.racers[i], b = this.racers[j];
+        if (a.eliminated || b.eliminated) continue;
+        if (a.finished || b.finished) continue;
+        if (softGhosts && (a.isPlayer || b.isPlayer)) continue;
         if (!canBeBonked(a.state) || !canBeBonked(b.state)) continue;
         if (a.bonkCooldownPair > 0 || b.bonkCooldownPair > 0) continue;
         const ds = Math.abs(a.s - b.s), dx = a.x - b.x;
@@ -4222,8 +4264,11 @@ export class Game {
     const def = getTrackDefinition(m.id);
     this.applyAtmosphere(mountainAtmosphere(m.id));
     audio.setTheme(def.theme);
-    // soft quality floor so dense/long mountains don't thrash first frames
-    this.perfGov.setThemeFloor(mobilePerfFloor(def.theme, def.length, this.mobile));
+    // soft quality floor so dense/long mountains / mayhem don't thrash first frames
+    const rules = getMode(this.mode);
+    this.perfGov.setThemeFloor(
+      modePerfFloor(def.theme, def.length, this.mobile, rules.id, rules.hazardScale),
+    );
     this.ambience.setBudget(this.perfGov.particleScale);
     this.lastZone = -1;
     this.rig.resetMenuClock();
@@ -4399,24 +4444,41 @@ export class Game {
   }
 
   /**
-   * Gate drop juice: dirt under every tyre, whoosh, pack-bump thumps, and a
+   * Gate drop juice: dirt under every tyre, dedicated gate audio, pack bumps,
    * camera kick. Called once when countdown / intro hands off to race.
+   * Particle budget respects perf governor so mobile/Ironjaw don't spike.
    */
   private launchPack() {
-    audio.whoosh(1.35);
+    audio.gateDrop(1.2);
     audio.cheer(0.55);
     this.shakeAdd(0.55);
-    const pk = Math.max(0.45, this.perfGov.particleScale);
-    for (const r of this.racers) {
-      if (r.eliminated) continue;
-      this.spawnLandingBurst(r, 0.55 * pk);
-      // staggered shoulder-bump hits so the pack launch has contact texture
+    const pk = Math.max(0.28, this.perfGov.particleScale);
+    // Cap simultaneous bursts — 6 full landing bursts nukes the particle pool
+    // on phone-class floors (Ironjaw + Mayhem especially).
+    const maxBursts = Math.max(2, Math.round(6 * pk));
+    let bursts = 0;
+    const pack = this.racers.filter(r => !r.eliminated);
+    // Prefer player + nearest lanes so the shot still sells the holeshot
+    pack.sort((a, b) => {
+      if (a.isPlayer !== b.isPlayer) return a.isPlayer ? -1 : 1;
+      return Math.abs(a.x) - Math.abs(b.x);
+    });
+    for (const r of pack) {
+      if (bursts < maxBursts) {
+        this.spawnLandingBurst(r, 0.42 * pk);
+        bursts++;
+      }
       if (!r.isPlayer && Math.abs(r.x) < 4.5) {
-        audio.whoosh(0.35 + Math.abs(r.x) * 0.05);
+        // stagger so the pack contact reads as a sequence, not one hit
+        const delay = Math.abs(r.x) * 28;
+        const vol = 0.55 + Math.abs(r.x) * 0.06;
+        if (delay < 8) audio.packBump(vol);
+        else setTimeout(() => audio.packBump(vol), delay);
       }
     }
     if (this.hud.holeshot) {
-      this.spawnLandingBurst(this.player, 1.1);
+      this.spawnLandingBurst(this.player, 0.85 * pk);
+      audio.gateDrop(0.55);
       this.shakeAdd(0.35);
     }
   }
@@ -4741,7 +4803,7 @@ export class Game {
     for (const [r, el] of this.rivalTags) {
       const ds = r.s - p.s;
       const near = Math.abs(ds) < 62;
-      if (!racing || !near || r.finished) { el.style.opacity = '0'; continue; }
+      if (!racing || !near || r.finished || r.eliminated) { el.style.opacity = '0'; continue; }
       _v1.copy(r.rig.root.position);
       _v1.y += 2.35;
       _v1.project(this.camera);
@@ -4775,7 +4837,10 @@ export class Game {
     const h = this.hud;
     h.speed = p.v * 3.6;
     h.place = p.place;
-    h.total = this.racers.length;
+    // Knockout: show remaining field size so P3 / 4 LEFT never fights P3 / 6
+    h.total = getMode(this.mode).elimination
+      ? this.racers.filter(r => !r.eliminated).length
+      : this.racers.length;
     h.progress = clamp01(p.s / this.track.length);
     h.time = this.raceTime;
     h.boost = this.boost;

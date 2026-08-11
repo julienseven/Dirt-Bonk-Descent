@@ -618,6 +618,27 @@ export class GameAudio {
     this.tone({ freq: 180, freq2: 700, dur: 0.35, peak: 0.14, type: 'sawtooth' });
   }
   whoosh(v = 1) { this.burst({ dur: 0.30, peak: 0.16 * v, f0: 2400, f1: 500, q: 1.1, rate: 1.5 }); }
+
+  /** Full pack leaves the gate — low thump + air rush (not a generic whoosh). */
+  gateDrop(v = 1) {
+    this.burst({
+      dur: 0.42, peak: 0.30 * v, f0: 160, f1: 55, q: 0.75, type: 'lowpass', rate: 0.65,
+    });
+    this.burst({
+      dur: 0.32, peak: 0.17 * v, f0: 2100, f1: 380, q: 1.05, rate: 1.35,
+    });
+    this.tone({ freq: 68, freq2: 36, dur: 0.38, peak: 0.24 * v, type: 'sine' });
+  }
+
+  /** Shoulder-check jersey scrape at the start line. */
+  packBump(v = 1) {
+    this.burst({
+      dur: 0.11, peak: 0.15 * v, f0: 950, f1: 220, q: 1.3, rate: 1.15,
+    });
+    this.tone({ freq: 190, freq2: 95, dur: 0.07, peak: 0.09 * v, type: 'triangle' });
+    this.scrape(0.45 * v);
+  }
+
   trick(step: number) {
     const scale = [0, 3, 5, 7, 10, 12, 15, 19, 24];
     const f = 523.25 * Math.pow(2, scale[Math.min(step, scale.length - 1)] / 12);
