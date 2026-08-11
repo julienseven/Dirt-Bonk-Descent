@@ -63,12 +63,12 @@ export interface Zone {
 
 export const ZONES: Zone[] = [
   { name: 'START GATE', sub: 'GATE OPEN', t0: 0.000, t1: 0.055, dirt: 0x9a7550, verge: 0x6f9440, far: 0x5c7a38, width: 19, rough: 0.35, steep: -0.02, surface: 'dirt', treeDensity: 0.20, treeType: 'pine', rockDensity: 0.10, crowd: 2.6, fog: 0.9, features: ['roller', 'berm'], props: ['cone', 'bale'] },
-  { name: 'PINE PLUNGE', sub: 'ROOTS & RUTS', t0: 0.055, t1: 0.195, dirt: 0x6d5236, verge: 0x39662c, far: 0x27461f, width: 13.5, rough: 1.25, steep: 0.055, surface: 'dirt', treeDensity: 1.00, treeType: 'pine', rockDensity: 0.55, crowd: 0.55, fog: 1.25, features: ['whoops', 'roller', 'berm', 'kicker'], props: ['log', 'rock'] },
+  { name: 'PINE PLUNGE', sub: 'ROOTS & RUTS', t0: 0.055, t1: 0.195, dirt: 0x6d5236, verge: 0x39662c, far: 0x27461f, width: 13.5, rough: 1.25, steep: 0.055, surface: 'dirt', treeDensity: 1.00, treeType: 'pine', rockDensity: 0.55, crowd: 0.55, fog: 1.25, features: ['whoops', 'roller', 'berm', 'kicker'], props: ['rock', 'bale'] },
   { name: 'KICKER RIDGE', sub: 'SEND IT', t0: 0.195, t1: 0.335, dirt: 0xa8814f, verge: 0x7d9440, far: 0x6a7f38, width: 17, rough: 0.55, steep: 0.01, surface: 'dirt', treeDensity: 0.22, treeType: 'mixed', rockDensity: 0.30, crowd: 1.5, fog: 0.75, features: ['table', 'kicker', 'double', 'berm'], props: ['cone', 'bale', 'barrel'] },
   { name: 'HAYSTACK HOLLOW', sub: 'FARM CHAOS', t0: 0.335, t1: 0.470, dirt: 0x9d7c4d, verge: 0x93b04c, far: 0x7c9640, width: 14.5, rough: 0.7, steep: -0.015, surface: 'grass', treeDensity: 0.30, treeType: 'broad', rockDensity: 0.12, crowd: 2.2, fog: 0.8, features: ['roller', 'berm', 'kicker', 'chicane'], props: ['bale', 'bale', 'cone', 'barrel'] },
   { name: 'CANYON CUT', sub: 'NO BRAKES', t0: 0.470, t1: 0.605, dirt: 0xb2653c, verge: 0x8d5636, far: 0x6f432b, width: 11.5, rough: 1.35, steep: 0.065, surface: 'rock', treeDensity: 0.08, treeType: 'none', rockDensity: 1.30, crowd: 0.5, fog: 1.0, features: ['whoops', 'kicker', 'roller', 'berm'], props: ['rock', 'rock', 'barrel'] },
   { name: 'THE BONKYARD', sub: 'BIG AIR', t0: 0.605, t1: 0.740, dirt: 0x7d746a, verge: 0x616356, far: 0x4c4d44, width: 16.5, rough: 0.8, steep: 0.02, surface: 'gravel', treeDensity: 0.10, treeType: 'none', rockDensity: 0.35, crowd: 1.8, fog: 0.85, features: ['gap', 'table', 'kicker', 'double'], props: ['barrel', 'cone', 'bale'] },
-  { name: 'MUDPIT MIRE', sub: 'SLIP CITY', t0: 0.740, t1: 0.860, dirt: 0x4e4132, verge: 0x4a5b33, far: 0x39471f, width: 13, rough: 1.1, steep: -0.045, surface: 'mud', treeDensity: 0.75, treeType: 'broad', rockDensity: 0.25, crowd: 0.9, fog: 1.35, features: ['whoops', 'roller', 'berm'], props: ['log', 'bale', 'rock'] },
+  { name: 'MUDPIT MIRE', sub: 'SLIP CITY', t0: 0.740, t1: 0.860, dirt: 0x4e4132, verge: 0x4a5b33, far: 0x39471f, width: 13, rough: 1.1, steep: -0.045, surface: 'mud', treeDensity: 0.75, treeType: 'broad', rockDensity: 0.25, crowd: 0.9, fog: 1.35, features: ['whoops', 'roller', 'berm'], props: ['bale', 'bale', 'rock'] },
   { name: 'FINISH FURY', sub: 'CROWD RUSH', t0: 0.860, t1: 1.001, dirt: 0x9d7c4f, verge: 0x78993f, far: 0x5f7a34, width: 18, rough: 0.4, steep: 0.0, surface: 'dirt', treeDensity: 0.18, treeType: 'mixed', rockDensity: 0.10, crowd: 3.0, fog: 0.7, features: ['kicker', 'table', 'roller', 'berm'], props: ['cone', 'bale'] },
 ];
 
@@ -740,7 +740,10 @@ export class Track {
       const pool: PropKind[] = rng.chance(0.45) && themed.length
         ? themed
         : (Z.props as PropKind[]);
-      const type = rng.pick(pool);
+      // Standing logs were removed from the course (read wrong / blocked lines).
+      // Filter here so any leftover pool entry never spawns.
+      let type = rng.pick(pool);
+      if (type === 'log') type = 'rock';
       // avoid landing zones of big features
       let blocked = false;
       const bl = this.buckets[Math.floor(s / this.bucketSize)];

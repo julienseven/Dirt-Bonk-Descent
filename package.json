@@ -12,7 +12,9 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test:physics": "npx vite-node scripts/run-physics-scenarios.ts",
-    "verify": "npm run typecheck && npm run test:physics && npm run build:fast"
+    "test:race": "npx vite-node scripts/run-race-scenarios.ts",
+    "audit:tracks": "npx vite-node scripts/audit-tracks.ts",
+    "verify": "npm run typecheck && npm run test:physics && npm run test:race && npm run build:fast"
   },
   "dependencies": {
     "@types/three": "^0.185.4",

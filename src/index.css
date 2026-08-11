@@ -175,6 +175,16 @@
   .hud-mode .hud-big { font-size: 22px !important; }
 }
 
+/* Touch controls: shrink the slide strip + bonk cluster on narrow phones */
+@media (max-width: 420px) {
+  .touch-steer { width: 52% !important; height: 118px !important; }
+  .touch-actions { transform: scale(0.92); transform-origin: bottom right; }
+}
+@media (max-height: 480px) and (orientation: landscape) {
+  .touch-steer { height: 96px !important; width: 40% !important; }
+  .touch-actions { transform: scale(0.82); transform-origin: bottom right; gap: 4px !important; }
+}
+
 /* Ultra-short landscape (phone notch + browser chrome) */
 @media (max-height: 400px) {
   .compact-title { font-size: clamp(24px, 5.5vw, 40px) !important; }

@@ -144,6 +144,16 @@ export function themePerfFloor(theme: string, length: number): number {
 }
 
 /**
+ * Mobile (coarse pointer / touch-first) bumps the floor so dense mountains
+ * start leaner. Caps at 2 so ABSURD/limestone doesn't collapse to mush.
+ */
+export function mobilePerfFloor(theme: string, length: number, mobile: boolean): number {
+  const base = themePerfFloor(theme, length);
+  if (!mobile) return base;
+  return Math.min(2, base + 1);
+}
+
+/**
  * Fixed-timestep accumulator. Keeps physics deterministic regardless of
  * frame rate, which matters because the ghost, the balance harness and the
  * live race must all agree.

@@ -18,10 +18,21 @@ import {
   loadSave, writeSave, commitRun, type SaveData, type Difficulty, type RecordResult,
 } from './game/save';
 
-const isTouch = () =>
-  typeof window !== 'undefined' &&
-  (('ontouchstart' in window) || navigator.maxTouchPoints > 0) &&
-  window.matchMedia('(pointer: coarse)').matches;
+/**
+ * Touch-first devices. Coarse pointer covers phones; maxTouchPoints alone
+ * catches iPadOS (often reports fine pointer + pencil). Avoid false positives
+ * on desktop with a touch monitor by requiring either coarse OR a narrow viewport.
+ */
+const isTouch = () => {
+  if (typeof window === 'undefined') return false;
+  const touchPoints = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+  if (!touchPoints) return false;
+  const coarse = typeof window.matchMedia === 'function'
+    && window.matchMedia('(pointer: coarse)').matches;
+  if (coarse) return true;
+  // tablet / hybrid: touch + short viewport → show on-screen controls
+  return Math.min(window.innerWidth, window.innerHeight) <= 920;
+};
 
 export default function App() {
   // ?tune opens the headless balance harness instead of the game

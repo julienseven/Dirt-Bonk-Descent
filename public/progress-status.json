@@ -1,18 +1,21 @@
 {
-  "updated": "2026-08-11T23:30:00Z",
-  "stage": 13,
-  "stageName": "Audio theme + perf stream + ship branch",
+  "updated": "2026-08-11T16:00:00Z",
+  "stage": 15,
+  "stageName": "Start pack + MTB identity + content freeze",
   "percent": 100,
   "log": [
-    "Audio: per-theme beds (rumble/forest/wind/birds) + BPM/finale",
-    "Perf: surface chunk streaming, theme LOD mul, governor floor",
-    "Ambience particle budget under load",
-    "Balance + identity polish (prior)",
-    "verify: 21/21 physics + typecheck + build"
+    "Shoulder-to-shoulder start (KO staggered, TA solo gate)",
+    "Launch pack FX: dirt, whoosh, holeshot kick",
+    "MTB frame silhouette + per-class bike shapes (Slab/Wisp/Bolt)",
+    "Standing logs removed from all prop lists",
+    "Garage clean product studio (no landscape backdrop)",
+    "verify: physics + race + typecheck + build"
   ],
   "items": [
-    { "id": "audio", "title": "Audio theming", "note": "setTheme per mountain", "status": "done" },
-    { "id": "perf", "title": "Perf streaming", "note": "chunks + theme LOD", "status": "done" },
-    { "id": "branch", "title": "Ship hygiene branch", "note": "feat/mountains-track-system", "status": "done" }
+    { "id": "start-grid", "title": "Mode-aware start grid", "note": "pack / KO / solo", "status": "done" },
+    { "id": "start-juice", "title": "Start-line launch polish", "note": "launchPack()", "status": "done" },
+    { "id": "bike-class", "title": "Bike class silhouettes", "note": "shape + badge + dual crown", "status": "done" },
+    { "id": "no-logs", "title": "Remove standing logs", "note": "env + zones", "status": "done" },
+    { "id": "freeze", "title": "Content freeze docs", "note": "progress + README", "status": "done" }
   ]
 }

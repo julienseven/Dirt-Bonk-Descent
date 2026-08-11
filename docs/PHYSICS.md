@@ -19,8 +19,9 @@ TERRAIN → WHEELS → SUSPENSION → FRAME → RIDER → CAMERA
 | `crash.ts` | Ragdoll separation |
 | `camera.ts` | Chase FOV / land compress / shake |
 | `raceManager.ts` | Pure placings + knockout victim pick |
-| `ai.ts` | Personalities, tiers, pure `planRivalThink` / combat / hop |
-| `physicsScenarios.ts` | Automated playtest harness (geometry + AI plan included) |
+| `ai.ts` | Personalities, tiers, pure `planRivalThink` / combat / hop, `themeAiFeel` |
+| `physicsScenarios.ts` | Automated playtest harness (geometry + AI plan + theme) |
+| `raceScenarios.ts` | Full-pack race sim on real tracks + balance / mobile gates |
 
 ## Geometry constants (single source)
 
@@ -75,8 +76,14 @@ Gizmos: bike CoM, rider CoM, contact patches, susp bars, steer axis, grips/pedal
 ## Automated playtest
 
 ```bash
-npm run test:physics
+npm run test:physics   # chassis / bonk / AI plan (21 scenarios)
+npm run test:race      # full descent sim per mountain + balance audit
+npm run audit:tracks   # soft playtest dump with hard gates
+npm run verify         # typecheck + physics + race + build
 ```
+
+Race harness uses real `Track` geometry and pure AI planning with a simplified
+longitudinal model (not the full two-wheel step — that stays in physics scenarios).
 
 Runs the acceptance scenarios (flat, steep, brake, turns, bumps, drop, jumps, landing, tricks, bonks, crash, recovery, DH seat identity, pure AI plan) against pure sim — no browser required.
 

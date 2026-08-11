@@ -804,6 +804,7 @@ export const BIKE_SHAPE_DEFAULT: BikeShape = {
 
 /**
  * Per-class character, keyed by garage bike id.
+ * Magnitudes are pushed hard so silhouettes read at chase + garage distance.
  *
  *   HORNET  the reference frame — the other three are read against it
  *   SLAB    scaffolding: fat slabbed beams, a truss, wide stays, high bars
@@ -812,9 +813,9 @@ export const BIKE_SHAPE_DEFAULT: BikeShape = {
  */
 const BIKE_SHAPES: Record<string, Omit<BikeShape, 'tube'>> = {
   hornet: { sectionX: 1.00, sectionZ: 1.00, truss: false, gusset: true,  drop:  0.000, reach:  0.00, rise:  0.000, barW: 1.00, spread: 1.00 },
-  slab:   { sectionX: 1.45, sectionZ: 1.02, truss: true,  gusset: true,  drop: -0.030, reach: -0.02, rise:  0.036, barW: 1.14, spread: 1.28 },
-  wisp:   { sectionX: 0.70, sectionZ: 1.15, truss: false, gusset: false, drop:  0.020, reach: -0.05, rise:  0.012, barW: 0.94, spread: 0.80 },
-  bolt:   { sectionX: 1.06, sectionZ: 1.20, truss: false, gusset: true,  drop:  0.085, reach:  0.06, rise: -0.032, barW: 1.06, spread: 1.06 },
+  slab:   { sectionX: 1.72, sectionZ: 1.10, truss: true,  gusset: true,  drop: -0.048, reach: -0.05, rise:  0.062, barW: 1.26, spread: 1.48 },
+  wisp:   { sectionX: 0.52, sectionZ: 1.30, truss: false, gusset: false, drop:  0.042, reach: -0.09, rise:  0.022, barW: 0.86, spread: 0.62 },
+  bolt:   { sectionX: 1.14, sectionZ: 1.38, truss: false, gusset: true,  drop:  0.125, reach:  0.12, rise: -0.055, barW: 1.14, spread: 1.16 },
 };
 
 /**
@@ -825,8 +826,9 @@ const BIKE_SHAPES: Record<string, Omit<BikeShape, 'tube'>> = {
  */
 export function shapeForBike(id: string, tubeScale = 1): BikeShape {
   const s = BIKE_SHAPES[id] ?? BIKE_SHAPES.hornet;
-  const t = 1 + (tubeScale - 1) * 2.0;
-  return { ...s, tube: Math.max(0.5, Math.min(1.7, t)) };
+  // 2.6× deviation so Wisp/Slab/Bolt tubes diverge hard in 3/4 + chase cam
+  const t = 1 + (tubeScale - 1) * 2.6;
+  return { ...s, tube: Math.max(0.42, Math.min(1.85, t)) };
 }
 
 export function createRider(
@@ -891,39 +893,59 @@ export function createRider(
     return t;
   };
 
-  // ---- FRAME (static) -------------------------------------------------
+  // ---- FRAME (static) — modern MTB / enduro silhouette -----------------
+  // Fat downtube chassis, sloping top tube, dropped seat, clear head tube.
+  // Physics mounts (BB / HEAD_B / axles) stay fixed; only visual tubes move.
   const frame = new THREE.Group();
   frame.name = 'frame';
   bike.add(frame);
 
-  // Main triangle: fat downtube (DH chassis), steep-drop top tube, seat + head
-  const downTube = ftube(BB, HB, 0.052, mFrame, 8);
-  const topTube = ftube(ST, HT, 0.038, mFrame, 8);
-  const seatTube = ftube(BB, ST, 0.040, mFrame, 8);
-  const headTube = ftube(HB, HT, 0.058, mDark, 8);
-  frame.add(downTube, topTube, seatTube, headTube);
-  addOutlineShell(downTube, 1.05);
-  addOutlineShell(topTube, 1.05);
+  // Main triangle: oversized downtube (the MTB "spine"), steep-drop top tube
+  const downTube = ftube(BB, HB, 0.062, mFrame, 9);
+  // Top tube: slight belly so the silhouette reads as a real MTB, not a stick
+  const topMid = V(
+    0,
+    (ST.y + HT.y) * 0.5 - 0.04,
+    (ST.z + HT.z) * 0.5 + 0.02,
+  );
+  const topTubeA = ftube(ST, topMid, 0.036, mFrame, 7);
+  const topTubeB = ftube(topMid, HT, 0.034, mFrame, 7);
+  const seatTube = ftube(BB, ST, 0.042, mFrame, 8);
+  // Head tube: taller / darker — dual-crown MTB read
+  const headTube = ftube(HB, HT, 0.062, mDark, 8);
+  frame.add(downTube, topTubeA, topTubeB, seatTube, headTube);
+  addOutlineShell(downTube, 1.06);
+  addOutlineShell(topTubeA, 1.05);
+  addOutlineShell(topTubeB, 1.05);
   addOutlineShell(seatTube, 1.05);
 
-  // BB shell — the visual hub of the drivetrain
+  // BB shell — wide MTB shell cups (lateral scale reads in 3/4 garage view)
   const bbShell = new THREE.Mesh(
-    new THREE.SphereGeometry(0.055, 10, 8), mDark);
-  bbShell.scale.set(1.35 * sh.sectionX, 1.0, 1.15 * sh.sectionZ);
+    new THREE.CylinderGeometry(0.048, 0.048, 0.12 * sh.sectionX, 12), mDark);
+  bbShell.rotation.z = Math.PI / 2;
   bbShell.position.copy(BB);
   frame.add(bbShell);
+  // Drive-side cup flare
+  const bbCup = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.055, 0.05, 0.03, 10), mHub);
+  bbCup.rotation.z = Math.PI / 2;
+  bbCup.position.set(0.055 * sh.sectionX, BB.y, BB.z);
+  frame.add(bbCup);
 
-  // Short head-tube gusset so the triangle reads continuous at the crown.
-  // Sparse frames go without it — the gap under the head tube is the tell.
+  // Head-tube / downtube gusset — continuous chassis at the crown
   if (sh.gusset) {
     frame.add(ftube(
-      V(BB.x, BB.y + 0.12, BB.z + 0.18),
-      V(HB.x, HB.y - 0.04, HB.z - 0.02),
-      0.028, mFrame, 6));
+      V(BB.x, BB.y + 0.14, BB.z + 0.20),
+      V(HB.x, HB.y - 0.02, HB.z - 0.01),
+      0.032, mFrame, 6));
+    // Small secondary brace under the head tube (cable guide plate feel)
+    frame.add(ftube(
+      V(0, HB.y - 0.08, HB.z + 0.02),
+      V(0, BB.y + 0.28, BB.z + 0.12),
+      0.018, mDark, 5, 0.4));
   }
 
-  // Brawler bracing: a diagonal through the main triangle plus a second top
-  // tube under the first. Only frames with truss carry these (+2 meshes).
+  // Brawler truss: diagonal + underslung top tube (slab / heavy bikes only)
   if (sh.truss) {
     frame.add(ftube(
       V(0, BB.y + 0.22, BB.z + 0.16), V(0, ST.y - 0.06, ST.z + 0.02),
@@ -933,23 +955,71 @@ export function createRider(
       0.026, mFrame, 6));
   }
 
-  // Fully dropped DH seat: short stub post + clamp + narrow saddle parked
-  // aft of the BB and BELOW standing hips. Rider stands; seat is reference only.
-  const seatPostTop = V(ST.x, ST.y + 0.05, ST.z - 0.015);
-  frame.add(tube(ST, seatPostTop, 0.016, mDark, 6));
-  // Collar clamp so the drop reads intentional (not a missing post)
+  // Cable stops along the downtube (tiny nubs → "real bike" at garage distance)
+  // Wisp skips most hardware — sparseness is the freeride tell.
+  const cableTs = sh.tube < 0.85 ? [0.5] : [0.28, 0.52, 0.74];
+  for (const t of cableTs) {
+    const p = V(
+      0.03 * sh.sectionX,
+      BB.y + (HB.y - BB.y) * t,
+      BB.z + (HB.z - BB.z) * t,
+    );
+    const stop = new THREE.Mesh(new THREE.SphereGeometry(0.012, 5, 4), mDark);
+    stop.position.copy(p);
+    frame.add(stop);
+  }
+
+  // Class badge on the downtube — colour + plate size sell identity at a glance
+  {
+    const plateW = 0.06 + sh.sectionX * 0.04;
+    const plateH = 0.028 + sh.tube * 0.01;
+    const plate = new THREE.Mesh(
+      new THREE.BoxGeometry(plateW, plateH, 0.08),
+      mHub,
+    );
+    plate.position.set(
+      0.045 * sh.sectionX,
+      BB.y + (HB.y - BB.y) * 0.42,
+      BB.z + (HB.z - BB.z) * 0.42,
+    );
+    // Align roughly with downtube pitch
+    plate.rotation.x = Math.atan2(HB.z - BB.z, HB.y - BB.y);
+    frame.add(plate);
+  }
+
+  // Slab / heavy: extra downtube armour plate (reads as scaffolding mass)
+  if (sh.truss) {
+    const armour = new THREE.Mesh(
+      new THREE.BoxGeometry(0.04 * sh.sectionX, 0.055, 0.22),
+      mDark,
+    );
+    armour.position.set(0, BB.y + 0.18, BB.z + 0.14);
+    armour.rotation.x = 0.55;
+    frame.add(armour);
+  }
+
+  // Fully dropped MTB seat: short post + clamp + narrow saddle aft of BB
+  const seatPostTop = V(ST.x, ST.y + 0.055, ST.z - 0.015);
+  frame.add(tube(ST, seatPostTop, 0.017, mDark, 6));
   const seatClamp = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.026, 0.026, 0.028, 8), mHub);
+    new THREE.CylinderGeometry(0.028, 0.028, 0.03, 8), mHub);
   seatClamp.position.copy(ST);
-  seatClamp.position.y += 0.01;
+  seatClamp.position.y += 0.012;
   frame.add(seatClamp);
-  // Narrow DH saddle — short nose, slight nose-down for race drop
-  const saddle = softPad(0.095, 0.032, 0.20, RIDER_MAT.seat(0x1c1c22), 7);
+  // Dropper-style collar ring
+  const dropperRing = new THREE.Mesh(
+    new THREE.TorusGeometry(0.022, 0.005, 4, 10), mRim);
+  dropperRing.rotation.x = Math.PI / 2;
+  dropperRing.position.copy(ST);
+  dropperRing.position.y += 0.028;
+  frame.add(dropperRing);
+  // Narrow trail saddle — short nose, slight nose-down
+  const saddle = softPad(0.10, 0.034, 0.22, RIDER_MAT.seat(0x1c1c22), 7);
   saddle.name = 'saddle';
   saddle.position.copy(seatPostTop);
-  saddle.position.y += 0.02;
-  saddle.position.z -= 0.005;
-  saddle.rotation.x = -0.18;
+  saddle.position.y += 0.022;
+  saddle.position.z -= 0.008;
+  saddle.rotation.x = -0.16;
   frame.add(saddle);
 
   // ---- REAR ASSEMBLY (swingarm) ---------------------------------------
@@ -958,41 +1028,65 @@ export function createRider(
   swingarm.position.copy(BB);
   bike.add(swingarm);
 
-  // Dual chainstays (left / right) — main load path BB → rear axle
+  // Dual chainstays + yoke (classic MTB rear triangle)
   const stayY = 0.0;
   const spread = sh.spread;
   [-1, 1].forEach(s => {
-    const cs = ftube(
-      V(s * 0.045 * spread, stayY, 0.02),
-      V(s * 0.055 * spread, RA.y, RA.z),
-      0.032, mFrame, 7, 0.5);
-    swingarm.add(cs);
+    // Slight arch so stays clear the tyre and read as chainstays, not sticks
+    const mid = V(s * 0.05 * spread, stayY + 0.03, RA.z * 0.45);
+    swingarm.add(ftube(
+      V(s * 0.05 * spread, stayY, 0.02),
+      mid,
+      0.034, mFrame, 6, 0.55));
+    swingarm.add(ftube(
+      mid,
+      V(s * 0.058 * spread, RA.y, RA.z),
+      0.030, mFrame, 6, 0.55));
   });
-  // Bridge plate near the axle
+  // Yoke / bridge just aft of the BB (MTB linkage plate feel)
+  const yoke = new THREE.Mesh(
+    new THREE.BoxGeometry(0.11 * spread, 0.028, 0.07), mDark);
+  yoke.position.set(0, stayY + 0.01, -0.06);
+  swingarm.add(yoke);
+  // Dropout bridge at the rear axle
   const dropout = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.04, 0.10, 3, 6), mDark);
+    new THREE.CapsuleGeometry(0.042, 0.11, 3, 6), mDark);
   dropout.rotation.z = Math.PI / 2;
   dropout.position.copy(RA);
   swingarm.add(dropout);
 
-  // Seatstays: rear axle → rocker / shock lower (forms the rear triangle)
+  // Seatstays: rear axle → rocker (forms the upper rear triangle)
   const rockerPos = SHOCK_LOWER.clone();
   [-1, 1].forEach(s => {
-    const ss = ftube(
-      V(s * 0.05 * spread, RA.y + 0.02, RA.z + 0.02),
+    const midS = V(
+      s * 0.045 * spread,
+      (RA.y + rockerPos.y) * 0.5 + 0.04,
+      (RA.z + rockerPos.z) * 0.5,
+    );
+    swingarm.add(ftube(
+      V(s * 0.052 * spread, RA.y + 0.02, RA.z + 0.02),
+      midS,
+      0.024, mFrame, 5, 0.5));
+    swingarm.add(ftube(
+      midS,
       V(s * 0.04 * spread, rockerPos.y + 0.02, rockerPos.z),
-      0.026, mFrame, 6, 0.5);
-    swingarm.add(ss);
+      0.024, mFrame, 5, 0.5));
   });
+  // Seatstay bridge (classic MTB brace above the tyre)
+  const ssBridge = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.016, 0.08 * spread, 3, 6), mDark);
+  ssBridge.rotation.z = Math.PI / 2;
+  ssBridge.position.set(0, RA.y + 0.08, RA.z * 0.55);
+  swingarm.add(ssBridge);
   // Rocker link (shock lower mount)
   const rocker = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.035, 0.08, 3, 6), mHub);
+    new THREE.CapsuleGeometry(0.038, 0.09, 3, 6), mHub);
   rocker.rotation.z = Math.PI / 2;
-  rocker.scale.set(1, 1, 1.2);
+  rocker.scale.set(1, 1, 1.25);
   rocker.position.copy(rockerPos);
   swingarm.add(rocker);
-  // Small brace from pivot toward rocker
-  swingarm.add(ftube(V(0, 0.01, -0.08), rockerPos.clone(), 0.022, mDark, 5, 0.5));
+  // Brace from pivot toward rocker
+  swingarm.add(ftube(V(0, 0.01, -0.08), rockerPos.clone(), 0.024, mDark, 5, 0.5));
 
   // Rear wheel — parented to swingarm at local axle
   const mRotor = RIDER_MAT.brake(0xb8bcc4);
@@ -1037,6 +1131,15 @@ export function createRider(
   crown.scale.set(1, 1, 1.2);
   crown.position.set(0, 0.01, 0.01);
   fork.add(crown);
+
+  // Dual-crown tell for long/low or heavy frames (Bolt + Slab)
+  if (sh.drop > 0.05 || sh.truss) {
+    const lowerCrown = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.032 * sh.tube, 0.20 * sh.spread, 3, 8), mDark);
+    lowerCrown.rotation.z = Math.PI / 2;
+    lowerCrown.position.set(0, -0.08, 0.02);
+    fork.add(lowerCrown);
+  }
 
   // Steerer stub up into the head tube / stem
   fork.add(tube(V(0, 0.0, 0), V(0, 0.22, -0.04), 0.028 * sh.tube, mDark, 6));

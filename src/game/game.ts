@@ -37,9 +37,9 @@ import {
   type TrickTally,
 } from './tricks';
 import { getMode, type ModeId } from './modes';
-import { PerfGovernor, FixedStep, aiThinkInterval, LOD_BANDS, themePerfFloor } from './perf';
+import { PerfGovernor, FixedStep, aiThinkInterval, LOD_BANDS, mobilePerfFloor } from './perf';
 import {
-  AI_TIERS, buildField, tierFromLegacy,
+  AI_TIERS, buildField, tierFromLegacy, themeAiFeel,
   planRivalThink, planRivalHop, planRivalCombat,
   type AiBrain, type AiTier,
 } from './ai';
@@ -678,7 +678,7 @@ export class Game {
     // lock Shaleback alpine look as the starting world
     this.applyAtmosphere(mountainAtmosphere('shaleback'));
     audio.setTheme('alpine');
-    this.perfGov.setThemeFloor(themePerfFloor('alpine', 4600));
+    this.perfGov.setThemeFloor(mobilePerfFloor('alpine', 4600, this.mobile));
 
     // BONK impact rings — small pool, expand + fade, no per-hit alloc
     const ringGeo = new THREE.RingGeometry(0.72, 1.0, 40);
@@ -861,10 +861,34 @@ export class Game {
 
   resetRace() {
     this.stopReplay();
-    const grid = [0, -1, 1, -2, 2, -3];
+    // Mode-aware start grid:
+    //   descent / trickjam / mayhem — shoulder pack (holeshot fight)
+    //   knockout — staggered depth so cuts stay readable
+    //   time attack — player owns the gate; field sits back as soft ghosts
+    const lanes = [0, -1, 1, -2, 2, -3];
+    const rules = getMode(this.mode);
+    const knockoutStart = rules.elimination;
+    const soloStart = rules.id === 'timeattack';
+    const packTight = rules.id === 'mayhem' ? 1.42 : 1.65;
     this.racers.forEach((r, i) => {
-      r.s = 10 - Math.abs(grid[i]) * 3.4;
-      r.x = grid[i] * 2.5;
+      const lane = lanes[i] ?? (i - 2.5);
+      if (soloStart) {
+        if (r.isPlayer) {
+          r.s = 10;
+          r.x = 0;
+        } else {
+          // Farther back + wider so the gate reads as a solo drop
+          r.s = 10 - 9 - Math.abs(lane) * 1.1;
+          r.x = lane * 3.1;
+        }
+      } else if (knockoutStart) {
+        r.s = 10 - Math.abs(lane) * 3.4;
+        r.x = lane * 2.5;
+      } else {
+        // Shoulder-to-shoulder on the start line — tight pack = first-corner chaos.
+        r.s = 10;
+        r.x = lane * packTight;
+      }
       r.y = this.track.heightAt(r.s, r.x);
       r.v = 0; r.vx = 0; r.vy = 0; r.grounded = true; r.airTime = 0;
       r.lean = 0; r.leanV = 0; r.yaw = 0; r.crash = 0; r.stun = 0;
@@ -1228,6 +1252,7 @@ export class Game {
       if (this.countTimer >= 3) {
         this.frozen = false;
         this.goFlash = 0.9;
+        this.launchPack();
         this.setPhase('race');
       }
       this.stepPhysics(sdt, false);
@@ -1656,13 +1681,15 @@ export class Game {
     }
 
     if (this.frozen) {
-      // gate hold: riders sit on the line, twitching, ready to send it
+      // gate hold: pack fidgets on the line — weight shifts, ready to send
       r.v = 0; r.vx = 0; r.vy = 0;
       r.y = trk.heightAt(r.s, r.x);
       r.grounded = true;
-      r.suspension = Math.sin(this.time * 9 * r.stTwitch + r.aiSeed) * 0.02;
+      const tw = r.stTwitch;
+      r.suspension = Math.sin(this.time * 11 * tw + r.aiSeed) * 0.028;
+      // lean pulse sells shoulder-to-shoulder pressure without drifting lanes
       this.poseRacer(r, dt,
-        Math.sin(this.time * 2.2 * r.stTwitch + r.aiSeed) * 0.3 * r.stTwitch);
+        Math.sin(this.time * 2.6 * tw + r.aiSeed) * 0.48 * tw);
       return;
     }
 
@@ -2343,6 +2370,7 @@ export class Game {
       neighbours,
       dt,
       rng: () => Math.random(),
+      theme: trk.theme,
     };
 
     const planState = {
@@ -2356,9 +2384,10 @@ export class Game {
     };
     const intent = planRivalThink(planState, world);
 
-    // Lip hop — terrain sample stays engine-side
+    // Lip hop — terrain sample stays engine-side; theme sendMul from feel
     const B = r.brain;
-    const send = B ? B.p.sendiness * (0.5 + B.tier.trickSkill * 0.7) : 0.5;
+    const feel = themeAiFeel(trk.theme);
+    const send = (B ? B.p.sendiness * (0.5 + B.tier.trickSkill * 0.7) : 0.5) * feel.sendMul;
     const deltaH = trk.heightAt(r.s + 6, r.x) - trk.heightAt(r.s, r.x);
     const hopPlan = planRivalHop(r.grounded, intent.aiHopCd, send, deltaH, world.rng);
 
@@ -4194,7 +4223,7 @@ export class Game {
     this.applyAtmosphere(mountainAtmosphere(m.id));
     audio.setTheme(def.theme);
     // soft quality floor so dense/long mountains don't thrash first frames
-    this.perfGov.setThemeFloor(themePerfFloor(def.theme, def.length));
+    this.perfGov.setThemeFloor(mobilePerfFloor(def.theme, def.length, this.mobile));
     this.ambience.setBudget(this.perfGov.particleScale);
     this.lastZone = -1;
     this.rig.resetMenuClock();
@@ -4364,7 +4393,31 @@ export class Game {
       h.introLine = ''; h.introSub = ''; h.reactWindow = 0;
       this.frozen = false;
       this.goFlash = 0.5;
+      this.launchPack();
       this.setPhase('race');
+    }
+  }
+
+  /**
+   * Gate drop juice: dirt under every tyre, whoosh, pack-bump thumps, and a
+   * camera kick. Called once when countdown / intro hands off to race.
+   */
+  private launchPack() {
+    audio.whoosh(1.35);
+    audio.cheer(0.55);
+    this.shakeAdd(0.55);
+    const pk = Math.max(0.45, this.perfGov.particleScale);
+    for (const r of this.racers) {
+      if (r.eliminated) continue;
+      this.spawnLandingBurst(r, 0.55 * pk);
+      // staggered shoulder-bump hits so the pack launch has contact texture
+      if (!r.isPlayer && Math.abs(r.x) < 4.5) {
+        audio.whoosh(0.35 + Math.abs(r.x) * 0.05);
+      }
+    }
+    if (this.hud.holeshot) {
+      this.spawnLandingBurst(this.player, 1.1);
+      this.shakeAdd(0.35);
     }
   }
 

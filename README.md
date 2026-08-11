@@ -33,8 +33,8 @@ No models, no textures, no audio files.
 |---|---|
 | **Menu** | All five modes live · difficulty · pad binds |
 | **Race** | Chase cam · pack · SIDE BONK callouts · speedo |
-| **Drop** | START gate line-up on Shaleback |
-| **Garage** | Rider roster · bike preview · performance bars |
+| **Drop** | Shoulder-to-shoulder start pack (holeshot fight) |
+| **Garage** | Product turntable · class silhouettes · upgrades |
 | **Mountains** | Shaleback · Cinder · Thornwood · Ironjaw · Lastlight |
 
 ---
@@ -107,6 +107,17 @@ A run takes roughly **1:35 – 3:30** depending on the mountain.
 
 ## Systems
 
+### Start line
+Mode-aware gate: **Descent / Trick Jam / Mayhem** pack shoulder-to-shoulder for a
+chaos holeshot; **Knockout** keeps a staggered depth grid so cuts stay readable;
+**Time Attack** gives the player the solo gate with the field sat back as soft ghosts.
+Gate drop fires dirt under every tyre plus a whoosh / cheer kick (`launchPack`).
+
+### Bikes
+Four readable silhouettes — **Hornet** (reference), **Slab** (truss + armour + dual crown),
+**Wisp** (knife tubes, bare hardware), **Bolt** (long/low, dual crown). Frame tubes,
+bars, and stays all scale with class so garage and chase cam agree.
+
 ### Physics
 Two-wheel contact model: the bike samples ground height at both axles (1.22 m wheelbase),
 so it pitches over rocks, gets bucked by lips, and unweights the front over crests.
@@ -146,6 +157,9 @@ Four tiers — **ROOKIE**, **RIDER**, **PRO**, **ABSURD**.
 Difficulty scales decision quality first (line, combat, reaction 0.42 s → 0.06 s), with
 speed ceilings close enough that a tucked player still has to race: ROOKIE ~39 m/s →
 ABSURD ~45 m/s against a player soft-cap of 47. Pure speed is no longer a free win.
+
+Mountains also reshape the field via **theme feel** (volcanic send-it, forest caution,
+sunset tricks) without rewriting personalities — see [`docs/TRACKS.md`](docs/TRACKS.md).
 
 ### Crashes
 Six causes, each with its own ragdoll profile so you can identify what went wrong from the
