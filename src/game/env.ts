@@ -114,7 +114,7 @@ export const THEME_PROPS: Record<string, PropKind[]> = {
   dirt: ['cone', 'bale', 'fence', 'sign'],
   grass: ['bale', 'fence', 'sign', 'cone'],
   rock: ['rock', 'boulder', 'barrier'],
-  mud: ['log', 'puddle', 'water', 'bale'],
+  mud: ['bale', 'puddle', 'water', 'rock'],
   gravel: ['barrel', 'barrier', 'cone', 'rock'],
 };
 

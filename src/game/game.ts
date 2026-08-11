@@ -861,10 +861,21 @@ export class Game {
 
   resetRace() {
     this.stopReplay();
-    const grid = [0, -1, 1, -2, 2, -3];
+    // Lateral slots across the gate. Default: everyone shares the same s so the
+    // holeshot is a contact fight. Knockout keeps a staggered depth grid so
+    // last-place cuts stay readable from the opening seconds.
+    const lanes = [0, -1, 1, -2, 2, -3];
+    const knockoutStart = getMode(this.mode).elimination;
     this.racers.forEach((r, i) => {
-      r.s = 10 - Math.abs(grid[i]) * 3.4;
-      r.x = grid[i] * 2.5;
+      const lane = lanes[i] ?? (i - 2.5);
+      if (knockoutStart) {
+        r.s = 10 - Math.abs(lane) * 3.4;
+        r.x = lane * 2.5;
+      } else {
+        // Shoulder-to-shoulder on the start line — tight pack = first-corner chaos.
+        r.s = 10;
+        r.x = lane * 1.65;
+      }
       r.y = this.track.heightAt(r.s, r.x);
       r.v = 0; r.vx = 0; r.vy = 0; r.grounded = true; r.airTime = 0;
       r.lean = 0; r.leanV = 0; r.yaw = 0; r.crash = 0; r.stun = 0;

@@ -95,7 +95,7 @@ export const LASTLIGHT_SECTIONS: Zone[] = [
     treeDensity: 0.25, treeType: 'pine', rockDensity: 0.30,
     crowd: 0.2, fog: 0.85,
     features: ['berm', 'kicker', 'roller'],
-    props: ['log', 'rock'],
+    props: ['rock', 'barrel'],
     secret: true, twist: 1.30,
     setpiece: 'PINE PLUNGE',
   },
