@@ -1,7 +1,7 @@
 {
   "name": "dirt-bonk-descent",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "Arcade downhill mayhem in the browser. Every asset generated at runtime.",
   "license": "MIT",
@@ -15,7 +15,8 @@
     "test:race": "npx vite-node scripts/run-race-scenarios.ts",
     "audit:tracks": "npx vite-node scripts/audit-tracks.ts",
     "capture": "node scripts/capture-screens.mjs",
-    "verify": "npm run typecheck && npm run test:physics && npm run test:race && npm run build:fast"
+    "verify": "npm run typecheck && npm run test:physics && npm run test:race && npm run build:fast",
+    "package": "npm run verify && npm run capture && node -e \"const fs=require('fs');const s=fs.statSync('dist/index.html');console.log('dist/index.html', (s.size/1024/1024).toFixed(2)+' MB');\""
   },
   "dependencies": {
     "@types/three": "^0.185.4",

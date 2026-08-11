@@ -1239,8 +1239,16 @@ export class Game {
     if (Math.abs(this.renderer.getPixelRatio() - wantPR) > 0.05) {
       this.renderer.setPixelRatio(wantPR);
     }
-    // the garage owns the screen (and its own GL context) while open
-    if (this.suspended) return;
+    // the garage owns the screen (and its own GL context) while open —
+    // still tick the soft menu bed so music doesn't die mid-browse
+    if (this.suspended) {
+      audio.update(dt, {
+        speed01: 0, grounded: true, offTrack: false, airborne: false,
+        braking: false, crowdNear: 0, intensity: 0.15, paused: true,
+        homeStretch: 0, calm: 0.6, forest: 0.3, water: 0, gale: 0,
+      });
+      return;
+    }
     const phase = this.hud.phase;
 
     // time scaling
@@ -1385,8 +1393,24 @@ export class Game {
     };
     this.setPhase('finish');
     this.startReplay();
-    audio.cheer(1.3);
-    for (let i = 0; i < 6; i++) setTimeout(() => audio.chime(i * 2), i * 130);
+    // Place-aware finish fanfare (cut / photo / podium / mid-pack)
+    const place = this.player.place;
+    const cut = this.player.eliminated;
+    const photo = !cut && isFinite(this.finishGap) && this.finishGap < 0.75;
+    if (cut) {
+      audio.hitTaken(0.7);
+      audio.cheer(0.35);
+      audio.fanfare('cut');
+    } else if (place === 1) {
+      audio.cheer(1.45);
+      audio.fanfare('win');
+    } else if (place <= 3) {
+      audio.cheer(1.15);
+      audio.fanfare(photo ? 'photo' : 'podium');
+    } else {
+      audio.cheer(0.85);
+      audio.fanfare(photo ? 'photo' : 'finish');
+    }
   }
 
   /** Rank the field: score modes by style, else by track position / finish time. */
@@ -4505,7 +4529,39 @@ export class Game {
       return;
     }
     if (this.replayData && phase === 'finish') return;      // replay drives it
+    // Countdown: elevated pack shot so the shoulder grid is the hero.
+    if (phase === 'countdown') {
+      const span = Math.max(
+        3.5,
+        ...this.racers.map(r => Math.abs(r.x - this.player.x)),
+      );
+      this.rig.packShot(this.track, this.player, span + 1.2, snap || this.player.v < 0.5);
+      this.track.updateSceneryLod(this.player.s, this.perfGov.lodScale);
+      return;
+    }
     this.rig.chase(this.track, this.player, dt, this.boosting, phase === 'race', snap);
+  }
+
+  /**
+   * Docs / Playwright: freeze a pack-visible start-grid frame with countdown HUD.
+   * Public so capture scripts don't poke private fields.
+   */
+  frameStartPackShot() {
+    this.setMode('descent');
+    this.resetRace();
+    this.frozen = true;
+    this.setPhase('countdown');
+    this.countTimer = 1.15;
+    this.countStep = 1;
+    this.hud.countdown = 2;
+    this.hud.countLabel = '2';
+    this.hudHidden = false;
+    this.goFlash = 0;
+    for (const r of this.racers) this.poseRacer(r, 0.016, 0);
+    const span = Math.max(3.5, ...this.racers.map(r => Math.abs(r.x - this.player.x)));
+    this.rig.packShot(this.track, this.player, span + 1.2, true);
+    this.track.updateSceneryLod(this.player.s, this.perfGov.lodScale);
+    this.track.refreshProps();
   }
 
   private shakeAdd(v: number) {

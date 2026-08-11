@@ -102,6 +102,8 @@ export interface SaveData {
   mountain: string;
   /** best time per mountain id */
   mountainBest: Record<string, number>;
+  /** first-run how-to dismissed */
+  onboardingDone: boolean;
 }
 
 const KEY = 'dirt-bonk-descent.v1';
@@ -124,6 +126,7 @@ const DEFAULTS: SaveData = {
   xp: 0,
   mountain: 'shaleback',
   mountainBest: {},
+  onboardingDone: false,
 };
 
 export function loadSave(): SaveData {
@@ -147,6 +150,7 @@ export function loadSave(): SaveData {
       // old saves referenced the pre-authored id
       mountain: (p.mountain === 'shalebeck' ? 'shaleback' : p.mountain) ?? 'shaleback',
       mountainBest: p.mountainBest ?? {},
+      onboardingDone: p.onboardingDone ?? false,
       // merge so loadouts saved before a field existed still load
       loadout: {
         ...DEFAULT_LOADOUT,

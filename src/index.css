@@ -116,8 +116,41 @@
   animation: barFlash 1.8s ease-in-out infinite;
 }
 
+@keyframes placeSlam {
+  0%   { opacity: 0; transform: scale(1.4) translateY(18px); }
+  60%  { opacity: 1; transform: scale(0.96) translateY(0); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes confettiFall {
+  0%   { transform: translateY(-12vh) rotate(0deg); opacity: 0; }
+  12%  { opacity: 1; }
+  100% { transform: translateY(110vh) rotate(420deg); opacity: 0; }
+}
+.results-confetti {
+  position: absolute;
+  top: -4%;
+  width: 8px;
+  height: 14px;
+  border-radius: 1px;
+  animation-name: confettiFall;
+  animation-timing-function: linear;
+  animation-iteration-count: 1;
+  animation-fill-mode: both;
+}
+
+@keyframes photoFlash {
+  0%   { background: rgba(255,255,255,.55); }
+  35%  { background: rgba(126,247,255,.12); }
+  100% { background: transparent; }
+}
+.results-photo-flash {
+  animation: photoFlash .55s ease-out both;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .wobble, .scan, .slam-in, .pulse-glow, .tick-pop, .drop-pulse, .speedlines {
+  .wobble, .scan, .slam-in, .pulse-glow, .tick-pop, .drop-pulse, .speedlines,
+  .results-confetti, .results-photo-flash {
     animation: none !important;
   }
   .slide-up { animation: none; opacity: 1; }

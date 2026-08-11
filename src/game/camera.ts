@@ -260,6 +260,36 @@ export class CameraRig {
     this.commit(fov, 4, dt, false);
   }
 
+  /**
+   * Start-grid money shot: elevated rear three-quarter so the whole
+   * shoulder pack (or staggered KO field) reads in one frame.
+   * Used during countdown and by the docs capture harness.
+   */
+  packShot(trk: Track, p: CamRider, packHalfWidth = 5, snap = true) {
+    const back = 12.5;
+    const side = Math.max(4.2, packHalfWidth * 0.85);
+    const height = 4.6;
+    const camS = p.s - back;
+    const camX = p.x - side;
+    const camH = trk.heightAt(camS, camX) + height;
+    const want = trk.worldPos(camS, camX, camH, _v1);
+    // look at pack center a touch ahead of the gate
+    const lookS = p.s + 4;
+    const lookX = p.x * 0.35;
+    const lookH = trk.heightAt(lookS, lookX) + 1.7;
+    const lookWant = trk.worldPos(lookS, lookX, lookH, _v2);
+    if (snap) {
+      this.pos.copy(want);
+      this.look.copy(lookWant);
+    } else {
+      this.dampPos(want, 8, 8, 0.05);
+      this.dampLook(lookWant, 9, 0.05);
+    }
+    this.camera.position.copy(this.pos);
+    this.roll = 0.03;
+    this.commit(58, 99, 0.05, false);
+  }
+
   /** The race camera. */
   chase(trk: Track, p: CamRider, dt: number, boosting: boolean, tight: boolean, snap: boolean) {
     const speed01 = clamp01(p.v / 42);
@@ -273,13 +303,15 @@ export class CameraRig {
     const crashK = p.crash > 0 ? clamp01(p.crash / Math.max(0.4, p.crashMax)) : 0;
     // Slightly closer/higher so helmet → bars → wheels stay readable.
     // Hard landing compresses height; big air widens framing.
+    // Stationary gate (countdown): pull wider so the pack fills the frame.
+    const gateWide = !tight && p.v < 2 ? 1 : 0;
     const back = 6.8 + speed01 * 3.2 + air * 2.8 + (boosting ? -0.7 : 0)
-      + crashK * 3.4;
+      + crashK * 3.4 + gateWide * 4.2;
     const height = 2.95 - speed01 * 0.45 + air * 1.65 + aboveGround * 0.55
       + crashK * 2.2
-      - landK * 0.52;
+      - landK * 0.52 + gateWide * 1.5;
     const camS = p.s - back;
-    const camX = p.x * 0.62;
+    const camX = p.x * 0.62 - gateWide * 3.6;
     const camH = trk.heightAt(camS, camX) + height;
 
     const want = trk.worldPos(camS, camX, camH, _v1);

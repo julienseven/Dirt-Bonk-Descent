@@ -96,26 +96,46 @@ async function main() {
   }
   ok('Returned to menu from garage');
 
-  // ---- DROP / START GRID ----
+  // ---- DROP / START GRID (pack-visible elevated three-quarter) ----
   await page.evaluate(() => {
     const g = window.__dbd;
-    g.setMode('descent');
-    g.resetRace();
-    g.quickRestart();
+    // Public capture helper: shoulder pack + packShot camera + countdown HUD
+    if (typeof g.frameStartPackShot === 'function') {
+      g.frameStartPackShot();
+    } else {
+      g.setMode('descent');
+      g.resetRace();
+      g.frozen = true;
+      g.setPhase('countdown');
+      g.hud.countdown = 2;
+      g.hud.countLabel = '2';
+      g.hudHidden = false;
+    }
   });
-  await page.waitForTimeout(200);
-  await page.evaluate(() => {
+  // let render loop settle pack poses + scenery LOD
+  await page.waitForTimeout(1100);
+  // verify pack is framed (camera not still on menu flyby far from gate)
+  const packFrame = await page.evaluate(() => {
     const g = window.__dbd;
-    g.countTimer = 1.15;
-    g.countStep = 1;
-    g.frozen = true;
-    g.setPhase('countdown');
-    g.hud.countdown = 2;
-    g.hud.countLabel = '2';
-    g.hudHidden = false;
+    const p = g.player;
+    const cam = g.camera || g.rig?.camera;
+    const packXs = g.racers.map(r => r.x);
+    const span = Math.max(...packXs) - Math.min(...packXs);
+    return {
+      playerS: +p.s.toFixed(1),
+      span: +span.toFixed(2),
+      phase: g.hud.phase,
+      count: g.hud.countLabel,
+      racerCount: g.racers.length,
+      camNear: cam ? Math.hypot(
+        cam.position.x - (g.player.rig?.root?.position?.x ?? 0),
+        cam.position.z - (g.player.rig?.root?.position?.z ?? 0),
+      ) : null,
+    };
   });
-  // let render loop pose pack
-  await page.waitForTimeout(900);
+  if (packFrame.phase === 'countdown' && packFrame.racerCount >= 6 && packFrame.span > 2)
+    ok(`Pack frame ready (span=${packFrame.span}, count=${packFrame.count})`);
+  else fail(`Pack frame weak: ${JSON.stringify(packFrame)}`);
   await shot(page, 'drop');
   ok('Countdown / start pack frame captured');
 
