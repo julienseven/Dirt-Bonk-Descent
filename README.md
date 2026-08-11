@@ -33,7 +33,7 @@ No models, no textures, no audio files.
 |---|---|
 | **Menu** | All five modes live · difficulty · pad binds |
 | **Race** | Chase cam · pack · SIDE BONK callouts · speedo |
-| **Drop** | Shoulder-to-shoulder start pack (holeshot fight) |
+| **Drop** | Elevated pack shot — full shoulder grid at the gate |
 | **Garage** | Product turntable · class silhouettes · upgrades |
 | **Mountains** | Shaleback · Cinder · Thornwood · Ironjaw · Lastlight |
 
@@ -57,7 +57,18 @@ npm install
 npm run dev
 ```
 
-Then open the local URL. `npm run build` produces a single-file `dist/index.html`.
+Then open the local URL. First **DROP IN** shows a short three-step primer (skip any time).
+
+### Ship / release package
+
+```bash
+npm run verify          # typecheck + physics + race harness + single-file build
+npm run build           # → dist/index.html (self-contained, relative base)
+npm run preview         # serve dist locally
+npm run capture         # Playwright docs screenshots (needs dev server)
+```
+
+`dist/index.html` is the whole game — drop it on any static host, GitHub Pages, or open via `file://`. No asset CDN. Version **1.0.0** is the ship candidate (stage 17 in `public/progress-status.json`).
 
 ### Controls
 
@@ -300,4 +311,4 @@ src/ui/            HUD, menus, garage, mountain select
 
 ## Licence
 
-MIT.
+MIT — see [`LICENSE`](LICENSE).

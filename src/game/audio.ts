@@ -61,6 +61,10 @@ export class GameAudio {
   private theme: TrackTheme = 'alpine';
   /** Theme multipliers applied every update. */
   private themeProf = themeProfile('alpine');
+  /** Soft menu / idle bed when not racing. */
+  private menuBed = false;
+  private menuTimer = 0;
+  private menuStep = 0;
 
   init() {
     if (this.ctx) return;
@@ -167,6 +171,18 @@ export class GameAudio {
   setSfxEnabled(v: boolean) { this.sfxOn = v; if (this.sfxBus) this.sfxBus.gain.value = v ? 1 : 0; }
   get musicEnabled() { return this.musicOn; }
   get sfxEnabled() { return this.sfxOn; }
+
+  /**
+   * Soft ambient bed for menu / garage / results. Lighter than the race
+   * sequencer so it doesn't fight UI clicks.
+   */
+  setMenuBed(on: boolean) {
+    this.menuBed = on;
+    if (!on) {
+      this.menuTimer = 0;
+      this.menuStep = 0;
+    }
+  }
 
   /**
    * Retarget continuous beds + music character for a mountain.
@@ -305,7 +321,11 @@ export class GameAudio {
     this.intensity = clamp01(o.intensity * (1 - home * 0.45) + home);
     this.homeStretch = home;
     this.bpm = this.baseBpm + this.intensity * P.bpmLift;
-    if (this.musicOn && !o.paused) this.tickMusic(dt);
+    if (this.musicOn) {
+      // Menu / results soft bed runs even while sim is "paused"
+      if (this.menuBed) this.tickMenuBed(dt);
+      else if (!o.paused) this.tickMusic(dt);
+    }
   }
 
   // -- music sequencer ------------------------------------------------------
@@ -321,53 +341,108 @@ export class GameAudio {
     }
   }
 
+  /** Sparse menu / idle bed — theme-tinted pad + soft pulse. */
+  private tickMenuBed(dt: number) {
+    const bpm = this.baseBpm * 0.55;
+    const stepDur = (60 / bpm) / 2;
+    this.menuTimer += dt;
+    let guard = 0;
+    while (this.menuTimer >= stepDur && guard++ < 4) {
+      this.menuTimer -= stepDur;
+      const s = this.menuStep % 16;
+      this.menuStep++;
+      const t = this.ctx!.currentTime;
+      const root = this.themeProf.rootHz;
+      // soft kick every other bar
+      if (s % 8 === 0) this.kick(t, 0.28);
+      // airy pad stab
+      if (s % 4 === 0) {
+        const n = this.themeProf.padNotes[(s / 4) % this.themeProf.padNotes.length];
+        this.tone({
+          freq: root * Math.pow(2, n / 12),
+          dur: 0.55,
+          peak: 0.045,
+          type: 'sine',
+        });
+        this.tone({
+          freq: root * Math.pow(2, (n + 7) / 12),
+          dur: 0.45,
+          peak: 0.025,
+          type: 'triangle',
+        });
+      }
+      // sparse hat — denser on volcanic / canyon
+      if (this.themeProf.combatBias > 0.55 && s % 2 === 1) this.hat(t, 0.03);
+    }
+  }
+
   private playStep(s: number) {
     const ctx = this.ctx!;
     const t = ctx.currentTime;
     const I = this.intensity;
+    const P = this.themeProf;
+    const H = this.homeStretch;
 
-    // kick
-    if (s % 4 === 0 || s === 14 || s === 30) this.kick(t, 0.9);
-    // snare
-    if (s % 8 === 4) this.snare(t, 0.55 + I * 0.2);
-    // hats
-    if (s % 2 === 1) this.hat(t, 0.10 + I * 0.10);
-    if (I > 0.45 && s % 2 === 0) this.hat(t, 0.045);
+    // ---- QUIET FOREST / CALM: sparse kit until intensity rises
+    const quiet = P.quietBias * (1 - I) * (1 - H);
+    const combat = clamp01(I * P.combatBias);
 
-    // surfy bass line (minor pentatonic, driving)
-    const BASS = [0, 0, 7, 0, 3, 0, 5, 7];
-    if (s % 2 === 0) {
-      const n = BASS[(s / 2) % 8];
-      this.bass(t, 55 * Math.pow(2, n / 12), 0.20 + I * 0.10, s % 8 === 0 ? 0.24 : 0.14);
+    // kick — forest thins kicks; volcanic keeps four-on-floor bias
+    if (quiet < 0.55) {
+      if (s % 4 === 0 || s === 14 || s === 30) this.kick(t, 0.9 * (1 - quiet * 0.35));
+      if (combat > 0.55 && s % 8 === 6) this.kick(t, 0.35 * combat);
+    } else if (s % 8 === 0) {
+      this.kick(t, 0.55);
     }
-    // lead stabs kick in with intensity
+    // snare
+    if (s % 8 === 4) this.snare(t, (0.55 + I * 0.2) * (1 - quiet * 0.4));
+    // hats — combat densifies, quiet opens space
+    if (s % 2 === 1) this.hat(t, (0.10 + I * 0.10) * (1 - quiet * 0.5));
+    if (I > 0.45 && s % 2 === 0) this.hat(t, 0.045);
+    if (combat > 0.6 && s % 4 === 1) this.hat(t, 0.06 * combat);
+
+    // theme-rooted bass (minor pent / phrygian-ish per world)
+    const BASS = P.bassNotes;
+    if (s % 2 === 0 && quiet < 0.7) {
+      const n = BASS[(s / 2) % BASS.length];
+      this.bass(
+        t,
+        P.rootHz * Math.pow(2, n / 12),
+        (0.20 + I * 0.10) * (1 - quiet * 0.3),
+        s % 8 === 0 ? 0.24 : 0.14,
+      );
+    }
+    // lead stabs — delayed until intensity, shifted by theme scale
     if (I > 0.3) {
-      const LEAD = [12, 15, 19, 15, 17, 15, 12, 10];
+      const LEAD = P.leadNotes;
       if (s % 4 === 2) {
-        const n = LEAD[Math.floor(s / 4) % 8];
-        this.stab(t, 110 * Math.pow(2, n / 12), (0.055 + I * 0.075));
+        const n = LEAD[Math.floor(s / 4) % LEAD.length];
+        this.stab(t, P.rootHz * 2 * Math.pow(2, n / 12), (0.055 + I * 0.075));
       }
     }
 
     // ---- FINALE LAYERS: only on the run to the line.
-    const H = this.homeStretch;
     if (H > 0.15) {
       // driving eighth-note ride
       if (s % 2 === 0) this.hat(t, 0.05 * H);
       // tom fill rolling into each bar
       if (s % 16 === 14 || s % 16 === 15) {
-        this.tom(t, 150 - (s % 16 - 14) * 30, 0.20 * H);
+        this.tom(t, 150 - (s % 16 - 14) * 30, 0.20 * H * P.finaleMul);
       }
       // octave-up lead doubling, so the melody lifts
       if (H > 0.45 && s % 4 === 0) {
-        const OCT = [24, 27, 31, 27];
-        this.stab(t, 110 * Math.pow(2, OCT[(s / 4) % 4] / 12), 0.05 * H);
+        const OCT = P.finaleNotes;
+        this.stab(t, P.rootHz * 2 * Math.pow(2, OCT[(s / 4) % OCT.length] / 12), 0.05 * H);
       }
       // four-on-the-floor kick under the last stretch
       if (H > 0.6 && s % 2 === 0 && s % 4 !== 0) this.kick(t, 0.35 * H);
       // Lastlight / epic themes: extra octave sparkle near the line
-      if (H > 0.7 && this.themeProf.finaleMul > 1.15 && s % 8 === 4) {
-        this.stab(t, 220 * Math.pow(2, 12 / 12), 0.04 * H);
+      if (H > 0.7 && P.finaleMul > 1.15 && s % 8 === 4) {
+        this.stab(t, P.rootHz * 4, 0.04 * H);
+      }
+      // volcanic grit: low growl under finale
+      if (H > 0.5 && P.combatBias > 0.9 && s % 8 === 0) {
+        this.tone({ freq: 55, freq2: 40, dur: 0.2, peak: 0.06 * H, type: 'sawtooth' });
       }
     }
   }
@@ -650,6 +725,40 @@ export class GameAudio {
     this.tone({ freq: f, dur: 0.35, peak: 0.14, type: 'sine' });
     this.tone({ freq: f * 1.5, dur: 0.28, peak: 0.07, type: 'triangle' });
   }
+
+  /**
+   * Finish-screen fanfare. Place-aware so a cut, a photo-finish and a win
+   * each get a distinct musical hit without sample assets.
+   */
+  fanfare(kind: 'win' | 'podium' | 'photo' | 'finish' | 'cut' = 'finish') {
+    if (!this.ready || !this.ctx || !this.sfxOn) return;
+    if (kind === 'cut') {
+      this.tone({ freq: 220, freq2: 90, dur: 0.45, peak: 0.16, type: 'sawtooth' });
+      this.tone({ freq: 165, freq2: 70, dur: 0.55, peak: 0.10, type: 'triangle' });
+      return;
+    }
+    if (kind === 'photo') {
+      // tight double-hit — race decided by inches
+      this.tone({ freq: 880, dur: 0.08, peak: 0.14, type: 'square' });
+      setTimeout(() => this.tone({ freq: 1175, dur: 0.18, peak: 0.16, type: 'square' }), 90);
+      setTimeout(() => this.chime(7), 160);
+      return;
+    }
+    // ascending brass-ish stack
+    const steps = kind === 'win' ? [0, 4, 7, 12, 16, 19] : kind === 'podium' ? [0, 4, 7, 12] : [0, 5, 7];
+    const base = kind === 'win' ? 392 : 330;
+    steps.forEach((n, i) => {
+      setTimeout(() => {
+        const f = base * Math.pow(2, n / 12);
+        this.tone({ freq: f, dur: 0.28 + i * 0.02, peak: 0.12 - i * 0.008, type: 'triangle' });
+        this.tone({ freq: f * 1.5, dur: 0.22, peak: 0.05, type: 'sine' });
+      }, i * (kind === 'win' ? 95 : 110));
+    });
+    if (kind === 'win') {
+      setTimeout(() => this.cheer(0.55), 420);
+    }
+  }
+
   cheer(power = 1) {
     if (!this.ready || !this.ctx || !this.sfxOn) return;
     const ctx = this.ctx, t = ctx.currentTime;
@@ -681,12 +790,22 @@ interface ThemeAudioProfile {
   rollMul: number; rollTone: number;
   crowdMul: number;
   bpm: number; bpmLift: number; finaleMul: number;
+  /** Root pitch (Hz) for bass/lead so each mountain has a different key. */
+  rootHz: number;
+  /** Sparse kit when calm (forest quiet). 0 = always driving. */
+  quietBias: number;
+  /** Extra percussion when intensity high (combat). */
+  combatBias: number;
+  bassNotes: number[];
+  leadNotes: number[];
+  finaleNotes: number[];
+  padNotes: number[];
 }
 
 function themeProfile(theme: TrackTheme): ThemeAudioProfile {
   switch (theme) {
     case 'volcanic':
-      // ash, low rumble, no birds, dry grit under the tyres
+      // ash, low rumble, no birds, dry grit under the tyres — aggressive kit
       return {
         forestMul: 0, forestHz: 1800,
         waterMul: 0.35, waterHz: 700,
@@ -696,9 +815,14 @@ function themeProfile(theme: TrackTheme): ThemeAudioProfile {
         rollMul: 1.15, rollTone: 0.85,
         crowdMul: 0.4,
         bpm: 168, bpmLift: 22, finaleMul: 1.1,
+        rootHz: 49, quietBias: 0.05, combatBias: 1.0,
+        bassNotes: [0, 0, 1, 0, 3, 0, 5, 7],
+        leadNotes: [12, 13, 15, 12, 17, 15, 12, 10],
+        finaleNotes: [24, 25, 27, 24],
+        padNotes: [0, 3, 7, 10],
       };
     case 'forest':
-      // wet canopy, close wind, lots of birds in calm stretches
+      // wet canopy, close wind, lots of birds — quiet stretches open up
       return {
         forestMul: 1.45, forestHz: 2100,
         waterMul: 1.25, waterHz: 850,
@@ -708,9 +832,14 @@ function themeProfile(theme: TrackTheme): ThemeAudioProfile {
         rollMul: 0.95, rollTone: 0.9,
         crowdMul: 0.7,
         bpm: 148, bpmLift: 14, finaleMul: 1.0,
+        rootHz: 58, quietBias: 0.85, combatBias: 0.45,
+        bassNotes: [0, 0, 7, 0, 5, 0, 3, 7],
+        leadNotes: [12, 14, 17, 14, 19, 17, 12, 10],
+        finaleNotes: [24, 26, 29, 26],
+        padNotes: [0, 5, 7, 12],
       };
     case 'limestone':
-      // thin high air, sparse birds, long wind
+      // thin high air, sparse birds, long wind — open intervals
       return {
         forestMul: 0.45, forestHz: 2600,
         waterMul: 0.4, waterHz: 950,
@@ -720,6 +849,11 @@ function themeProfile(theme: TrackTheme): ThemeAudioProfile {
         rollMul: 1.05, rollTone: 1.1,
         crowdMul: 0.85,
         bpm: 152, bpmLift: 18, finaleMul: 1.2,
+        rootHz: 62, quietBias: 0.4, combatBias: 0.55,
+        bassNotes: [0, 0, 5, 0, 7, 0, 5, 9],
+        leadNotes: [12, 16, 19, 16, 21, 19, 12, 11],
+        finaleNotes: [24, 28, 31, 28],
+        padNotes: [0, 4, 7, 11],
       };
     case 'sunset':
       // warmer bed, bigger finale — trailer mountain
@@ -732,9 +866,14 @@ function themeProfile(theme: TrackTheme): ThemeAudioProfile {
         rollMul: 1.0, rollTone: 1.0,
         crowdMul: 1.1,
         bpm: 156, bpmLift: 24, finaleMul: 1.45,
+        rootHz: 55, quietBias: 0.25, combatBias: 0.7,
+        bassNotes: [0, 0, 7, 0, 3, 0, 5, 7],
+        leadNotes: [12, 15, 19, 15, 17, 15, 12, 10],
+        finaleNotes: [24, 27, 31, 27],
+        padNotes: [0, 3, 7, 10],
       };
     case 'canyon':
-      // dry heat, light wind, grit
+      // dry heat, light wind, grit — driving, slightly raw
       return {
         forestMul: 0.15, forestHz: 2000,
         waterMul: 0.15, waterHz: 750,
@@ -744,6 +883,11 @@ function themeProfile(theme: TrackTheme): ThemeAudioProfile {
         rollMul: 1.1, rollTone: 0.95,
         crowdMul: 0.9,
         bpm: 162, bpmLift: 18, finaleMul: 1.05,
+        rootHz: 52, quietBias: 0.15, combatBias: 0.85,
+        bassNotes: [0, 0, 5, 0, 3, 0, 6, 5],
+        leadNotes: [12, 15, 17, 15, 18, 15, 12, 10],
+        finaleNotes: [24, 27, 29, 27],
+        padNotes: [0, 5, 7, 10],
       };
     default: // alpine — classic Shaleback
       return {
@@ -755,6 +899,11 @@ function themeProfile(theme: TrackTheme): ThemeAudioProfile {
         rollMul: 1.0, rollTone: 1.0,
         crowdMul: 1.0,
         bpm: 158, bpmLift: 18, finaleMul: 1.0,
+        rootHz: 55, quietBias: 0.2, combatBias: 0.65,
+        bassNotes: [0, 0, 7, 0, 3, 0, 5, 7],
+        leadNotes: [12, 15, 19, 15, 17, 15, 12, 10],
+        finaleNotes: [24, 27, 31, 27],
+        padNotes: [0, 4, 7, 12],
       };
   }
 }

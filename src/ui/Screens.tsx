@@ -324,6 +324,26 @@ export function Pause({ onResume, onRestart, onQuit }: { onResume: () => void; o
   );
 }
 
+/** Count-up display for results juice. */
+function useCountUp(target: number, ms = 900, enabled = true) {
+  const [v, setV] = useState(0);
+  useEffect(() => {
+    if (!enabled) { setV(target); return; }
+    let raf = 0;
+    const t0 = performance.now();
+    const tick = (now: number) => {
+      const u = Math.min(1, (now - t0) / ms);
+      // ease-out cubic
+      const e = 1 - Math.pow(1 - u, 3);
+      setV(target * e);
+      if (u < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, ms, enabled]);
+  return v;
+}
+
 export function Results({
   game, save, result, payout, xpGain, levelUp, xpLines, onRestart, onMenu, onGarage,
 }: {
@@ -333,13 +353,31 @@ export function Results({
 }) {
   const d = game.hud.finishData;
   if (!d) return null;
+  const reduce = save.reducedMotion;
   const prevSplits = result?.timeRecord ? [] : (save.best[save.difficulty]?.splits ?? []);
   const rivals = [...game.hud.rivals].sort((a, b) => a.place - b.place);
   const win = d.place === 1 && !d.eliminated;
   const cut = !!d.eliminated;
+  const photo = !cut && isFinite(d.gap) && d.gap < 0.75;
+  const podium = !cut && d.place <= 3;
+  const mtn = getMountain(save.mountain);
+  const banner = cut
+    ? 'CUT FROM THE FIELD'
+    : photo ? 'DECIDED BY INCHES'
+    : win ? mtn.finishHook
+    : podium ? 'ON THE BOX'
+    : 'RUN COMPLETE';
+  const accent = cut ? '#ff6a00' : win ? mtn.tint : photo ? '#7ef7ff' : '#ff2e88';
+  const modeName = MODES.find(m => m.id === d.modeId)?.name ?? 'DESCENT';
+
+  const scoreAnim = useCountUp(d.score, 1100, !reduce);
+  const scrapAnim = useCountUp(payout, 950, !reduce && payout > 0);
+  const xpAnim = useCountUp(xpGain, 950, !reduce && xpGain > 0);
+  const timeAnim = useCountUp(d.time, 1000, !reduce);
+
   const rows: [string, string][] = [
-    ['FINISH TIME', formatTime(d.time)],
-    ['STYLE POINTS', Math.round(d.score).toLocaleString()],
+    ['FINISH TIME', formatTime(timeAnim)],
+    ['STYLE POINTS', Math.round(scoreAnim).toLocaleString()],
     ['BONKS LANDED', String(d.bonks)],
     ['TRICKS STOMPED', String(d.tricks)],
     ['TOP SPEED', `${Math.round(d.topSpeed)} km/h`],
@@ -349,15 +387,7 @@ export function Results({
   if (isFinite(d.gap) && !cut) {
     rows.splice(1, 0, ['MARGIN', `${d.gap < 0.01 ? '<0.01' : d.gap.toFixed(2)}s`]);
   }
-  const photo = !cut && isFinite(d.gap) && d.gap < 0.75;
-  const mtn = getMountain(save.mountain);
-  const banner = cut
-    ? 'CUT FROM THE FIELD'
-    : photo ? 'DECIDED BY INCHES'
-    : win ? mtn.finishHook
-    : 'RUN COMPLETE';
-  const accent = cut ? '#ff6a00' : win ? mtn.tint : '#ff2e88';
-  const modeName = MODES.find(m => m.id === d.modeId)?.name ?? 'DESCENT';
+
   return (
     <div className="screen-pad absolute inset-0 z-20 flex items-center justify-center"
       style={{
@@ -366,6 +396,23 @@ export function Results({
           'linear-gradient(100deg, rgba(4,5,8,.94) 0%, rgba(4,5,8,.90) 46%, rgba(4,5,8,.55) 68%, rgba(4,5,8,.30) 100%)',
       }}>
       <div className="scan pointer-events-none absolute inset-0 opacity-30" />
+      {/* Win confetti / photo flash — CSS only, no assets */}
+      {win && !reduce && (
+        <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
+          {Array.from({ length: 18 }, (_, i) => (
+            <span key={i} className="results-confetti"
+              style={{
+                left: `${6 + (i * 5.2) % 90}%`,
+                background: i % 3 === 0 ? '#ffd400' : i % 3 === 1 ? '#ff2e88' : '#2fe6c8',
+                animationDelay: `${(i % 9) * 0.07}s`,
+                animationDuration: `${1.6 + (i % 5) * 0.15}s`,
+              }} />
+          ))}
+        </div>
+      )}
+      {photo && !win && (
+        <div className="pointer-events-none absolute inset-0 results-photo-flash" aria-hidden />
+      )}
       <div className="pointer-events-none absolute right-5 top-4 flex items-center gap-2 safe-tr">
         <span className="h-[9px] w-[9px] rounded-full bg-[#ff2e88]"
           style={{ animation: 'wobble 1.2s ease-in-out infinite' }} />
@@ -376,15 +423,23 @@ export function Results({
        <div className="mx-auto w-full max-w-4xl xl:mx-0 xl:ml-[4vw]">
         <div className="slide-up">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="title-skew inline-block px-5 py-1" style={{ background: accent }}>
+            <div className="title-skew slam-in inline-block px-5 py-1" style={{ background: accent }}>
               <span className="hud-label !text-[12px] !tracking-[.4em] !text-black">
                 {banner}
               </span>
             </div>
             <span className="hud-label !text-[9px] text-white/40">{modeName}</span>
+            {podium && !cut && (
+              <span className="title-skew border border-[#ffd400]/70 bg-[#ffd400]/15 px-2 py-[2px]">
+                <span className="hud-label !text-[8px] text-[#ffd400]">PODIUM</span>
+              </span>
+            )}
           </div>
           <h2 className="hud-big mt-1 text-[clamp(40px,9vw,116px)] leading-[0.85] text-white"
-            style={{ textShadow: `0 8px 0 ${accent}, 0 0 60px #00000099` }}>
+            style={{
+              textShadow: `0 8px 0 ${accent}, 0 0 60px #00000099`,
+              animation: reduce ? undefined : 'placeSlam .55s cubic-bezier(.15,1.2,.25,1) both',
+            }}>
             {cut ? 'OUT' : `${PLACE[d.place]} PLACE`}
           </h2>
           {(payout > 0 || xpGain > 0) && (() => {
@@ -392,11 +447,15 @@ export function Results({
             return (
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <div className="inline-flex items-baseline gap-2 border-l-4 border-[#ffd400] bg-black/55 px-3 py-1">
-                  <span className="hud-big text-[26px] leading-none text-[#ffd400]">+{payout.toLocaleString()}</span>
+                  <span className="hud-big text-[26px] leading-none text-[#ffd400]">
+                    +{Math.round(scrapAnim).toLocaleString()}
+                  </span>
                   <span className="hud-label !text-[9px]">SCRAP</span>
                 </div>
                 <div className="inline-flex items-baseline gap-2 border-l-4 border-[#2fe6c8] bg-black/55 px-3 py-1">
-                  <span className="hud-big text-[26px] leading-none text-[#2fe6c8]">+{xpGain}</span>
+                  <span className="hud-big text-[26px] leading-none text-[#2fe6c8]">
+                    +{Math.round(xpAnim)}
+                  </span>
                   <span className="hud-label !text-[9px]">XP</span>
                 </div>
                 <div className="min-w-[150px]">
@@ -410,7 +469,7 @@ export function Results({
                   </div>
                 </div>
                 {levelUp && (
-                  <span className="title-skew bg-[#2fe6c8] px-3 py-[3px]">
+                  <span className="title-skew tick-pop bg-[#2fe6c8] px-3 py-[3px]">
                     <span className="hud-big text-[15px] text-black">LEVEL UP!</span>
                   </span>
                 )}
@@ -420,14 +479,14 @@ export function Results({
           {(result?.timeRecord || result?.scoreRecord) && (
             <div className="mt-2 flex gap-2">
               {result.timeRecord && (
-                <span className="title-skew bg-[#7ef7ff] px-3 py-[3px]">
+                <span className="title-skew slam-in bg-[#7ef7ff] px-3 py-[3px]" style={{ animationDelay: '.2s' }}>
                   <span className="hud-big text-[15px] text-black">
                     NEW BEST TIME{result.prevTime != null && ` · ${formatDelta(d.time - result.prevTime)}s`}
                   </span>
                 </span>
               )}
               {result.scoreRecord && (
-                <span className="title-skew bg-[#ffd400] px-3 py-[3px]">
+                <span className="title-skew slam-in bg-[#ffd400] px-3 py-[3px]" style={{ animationDelay: '.32s' }}>
                   <span className="hud-big text-[15px] text-black">NEW BEST STYLE</span>
                 </span>
               )}
@@ -439,7 +498,7 @@ export function Results({
           <div className="slide-up rounded-sm border-l-4 border-[#ffd400] bg-black/60 p-4 backdrop-blur" style={{ animationDelay: '.08s' }}>
             {rows.map(([k, v], i) => (
               <div key={k} className="flex items-baseline justify-between border-b border-white/10 py-[7px] last:border-0"
-                style={{ animation: `slideUp .4s ${0.1 + i * 0.05}s both` }}>
+                style={{ animation: `slideUp .4s ${0.12 + i * 0.07}s both` }}>
                 <span className="hud-label">{k}</span>
                 <span className="hud-big text-[22px] text-white">{v}</span>
               </div>
@@ -453,7 +512,7 @@ export function Results({
                   {xpLines.map((l, i) => (
                     <div key={l.source + i}
                       className="flex items-baseline justify-between gap-2 py-[2px]"
-                      style={{ animation: `slideUp .35s ${0.05 + i * 0.06}s both` }}>
+                      style={{ animation: `slideUp .35s ${0.18 + i * 0.06}s both` }}>
                       <span className="hud-label !tracking-[.08em] !text-[9px]"
                         style={{ color: l.source === 'challenge' ? '#c0f000' : undefined }}>
                         {l.label}
@@ -498,20 +557,28 @@ export function Results({
               </>
             )}
             <div className="hud-label mb-2">FINAL ORDER</div>
-            {rivals.map(r => (
-              <div key={r.name} className="mb-[6px] flex items-center gap-2">
-                <span className="hud-big w-[34px] text-[18px] text-white/70">{PLACE[r.place]}</span>
+            {rivals.map((r, i) => (
+              <div key={r.name} className="mb-[6px] flex items-center gap-2"
+                style={{ animation: `slideUp .35s ${0.2 + i * 0.05}s both` }}>
+                <span className={`hud-big w-[34px] text-[18px] ${r.place <= 3 ? 'text-[#ffd400]' : 'text-white/70'}`}>
+                  {PLACE[r.place]}
+                </span>
                 <span className="h-[10px] w-[10px] rounded-[2px]" style={{ background: r.color }} />
                 <span className={`hud-big text-[18px] ${r.name === 'YOU' ? 'text-[#ffd400]' : 'text-white/80'}`}>{r.name}</span>
                 <span className="ml-auto h-[6px] w-[90px] bg-white/10">
-                  <span className="block h-full" style={{ width: `${r.progress * 100}%`, background: r.color }} />
+                  <span className="block h-full transition-[width] duration-700"
+                    style={{
+                      width: `${r.progress * 100}%`,
+                      background: r.color,
+                      transitionDelay: `${0.25 + i * 0.05}s`,
+                    }} />
                 </span>
               </div>
             ))}
           </div>
         </div>
 
-        <div className="slide-up mt-6 flex flex-wrap gap-3" style={{ animationDelay: '.24s' }}>
+        <div className="slide-up mt-6 flex flex-wrap gap-3" style={{ animationDelay: '.36s' }}>
           <button onClick={() => { audio.uiClick(); onRestart(); }}
             className="title-skew bg-[#ffd400] px-8 py-3" style={{ boxShadow: '6px 6px 0 #000' }}>
             <span className="hud-big text-[26px] text-black">RUN IT BACK</span>
@@ -526,6 +593,74 @@ export function Results({
           </button>
         </div>
        </div>
+      </div>
+    </div>
+  );
+}
+
+/** First-run primer — three moves, then DROP IN. */
+export function Onboarding({
+  onDone, onSkip,
+}: {
+  onDone: () => void;
+  onSkip: () => void;
+}) {
+  const steps: { title: string; body: string; keys: React.ReactNode }[] = [
+    {
+      title: 'STEER THE FALL LINE',
+      body: 'Point the bike with A/D. Hold SHIFT to tuck and keep speed on the straights.',
+      keys: <><Key>A</Key> <Key>D</Key> <Key>SHIFT</Key></>,
+    },
+    {
+      title: 'BONK TO MAKE SPACE',
+      body: 'Shoulder-check rivals off your line. Bonks chain into boost — fight for the holeshot.',
+      keys: <><Key>Q</Key> <Key>E</Key></>,
+    },
+    {
+      title: 'AIR IS SCORE',
+      body: 'Hop, spin, flip and style. Land rear-wheel first. Stack tricks for the big multiplier.',
+      keys: <><Key>J</Key> <Key>1</Key>–<Key>5</Key> <Key>SPACE</Key></>,
+    },
+  ];
+  const [i, setI] = useState(0);
+  const last = i >= steps.length - 1;
+  const s = steps[i];
+  return (
+    <div className="screen-pad absolute inset-0 z-30 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+      <div className="scan pointer-events-none absolute inset-0 opacity-40" />
+      <div className="relative mx-4 w-full max-w-lg slide-up">
+        <div className="title-skew inline-block bg-[#ffd400] px-4 py-1">
+          <span className="hud-label !text-[10px] !tracking-[.35em] !text-black">
+            FIRST DROP · {i + 1}/{steps.length}
+          </span>
+        </div>
+        <h2 className="hud-big mt-3 text-[clamp(28px,6vw,48px)] leading-none text-white"
+          style={{ textShadow: '0 5px 0 #ff2e88' }}>
+          {s.title}
+        </h2>
+        <p className="mt-3 text-[15px] leading-snug text-white/75">{s.body}</p>
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <span className="hud-label !text-[9px]">KEYS</span>
+          <span className="flex items-center gap-1">{s.keys}</span>
+        </div>
+        <div className="mt-6 flex flex-wrap gap-3">
+          <button
+            onClick={() => {
+              audio.uiClick();
+              if (last) onDone();
+              else setI(i + 1);
+            }}
+            className="title-skew bg-[#ff2e88] px-7 py-2.5" style={{ boxShadow: '5px 5px 0 #000' }}>
+            <span className="hud-big text-[22px] text-white">{last ? 'GOT IT — DROP IN' : 'NEXT'}</span>
+          </button>
+          <button onClick={() => { audio.uiMove(); onSkip(); }}
+            className="title-skew border-2 border-white/35 px-5 py-2.5">
+            <span className="hud-big text-[18px] text-white/60">SKIP</span>
+          </button>
+        </div>
+        <p className="mt-4 text-[11px] text-white/35">
+          Full control list stays on the menu. You can re-open tips anytime from the pause screen… after you survive the pack.
+        </p>
       </div>
     </div>
   );

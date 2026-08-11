@@ -1,19 +1,22 @@
 {
-  "updated": "2026-08-11T17:00:00Z",
-  "stage": 16,
-  "stageName": "Modes + gate audio + perf floors",
+  "updated": "2026-08-11T18:00:00Z",
+  "stage": 17,
+  "stageName": "Ship candidate — results, onboarding, audio beds",
   "percent": 100,
+  "ship": true,
   "log": [
-    "Knockout HUD: CUT Ns, LAST CHANCE duel, active field total",
-    "Time Attack soft ghosts: no player contact, smaller field",
-    "Mayhem density tuned (hazard×2, aggression 1.75)",
-    "gateDrop + packBump one-shots on launch",
-    "Launch dust particle cap + modePerfFloor (Ironjaw/Mayhem/mobile)",
-    "verify: physics + race 17/17 + typecheck"
+    "Pack-visible drop camera (elevated three-quarter countdown)",
+    "Results juice: count-up, confetti, photo flash, place fanfare",
+    "First-run onboarding primer (3 beats → DROP IN)",
+    "Release packaging: v1.0.0, LICENSE, relative base, package script",
+    "Theme audio beds: quiet/combat/finale + menu pad per mountain",
+    "verify: typecheck + physics + race + build"
   ],
   "items": [
-    { "id": "modes", "title": "Knockout / TA / Mayhem pass", "note": "HUD + soft ghosts + density", "status": "done" },
-    { "id": "gate-audio", "title": "Gate audio polish", "note": "gateDrop / packBump", "status": "done" },
-    { "id": "perf-mobile", "title": "Perf / mobile floors", "note": "modePerfFloor + launch cap", "status": "done" }
+    { "id": "drop-shot", "title": "Pack-visible drop.jpg", "note": "frameStartPackShot + packShot cam", "status": "done" },
+    { "id": "results-juice", "title": "Results screen juice", "note": "count-up / confetti / fanfare", "status": "done" },
+    { "id": "onboarding", "title": "First-run onboarding", "note": "save.onboardingDone", "status": "done" },
+    { "id": "release", "title": "Release packaging", "note": "v1.0.0 ship candidate", "status": "done" },
+    { "id": "audio-beds", "title": "Theme music beds", "note": "quiet / combat / finale / menu", "status": "done" }
   ]
 }

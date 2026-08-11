@@ -9,11 +9,19 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // https://vite.dev/config/
+// Relative base so dist/index.html works from file://, GitHub Pages subpaths,
+// and any static host without rewriting.
 export default defineConfig({
+  base: './',
   plugins: [react(), tailwindcss(), viteSingleFile()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),
     },
+  },
+  build: {
+    target: 'es2020',
+    cssCodeSplit: false,
+    assetsInlineLimit: 100000000,
   },
 });

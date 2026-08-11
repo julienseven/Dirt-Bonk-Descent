@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Game, type Phase } from './game/game';
 import Hud from './ui/Hud';
 import TouchControls from './ui/TouchControls';
-import { Menu, Pause, Results, Loading } from './ui/Screens';
+import { Menu, Pause, Results, Loading, Onboarding } from './ui/Screens';
 import TunePanel from './ui/TunePanel';
 import Garage from './ui/Garage';
 import { type Loadout } from './game/garage';
@@ -57,6 +57,7 @@ function GameApp() {
   const [xpLines, setXpLines] = useState<XpLine[]>([]);
   const [levelUp, setLevelUp] = useState(false);
   const [mode, setMode] = useState<ModeId>('descent');
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const touch = useRef(isTouch());
   const saveRef = useRef(save);
   saveRef.current = save;
@@ -161,6 +162,12 @@ function GameApp() {
   // stop the race renderer while the garage's own GL context is on screen
   useEffect(() => { if (game) game.suspended = garage; }, [game, garage]);
 
+  // Soft ambient bed on menu / finish / garage (not during live race)
+  useEffect(() => {
+    const soft = phase === 'menu' || phase === 'finish' || garage || picker;
+    audio.setMenuBed(soft);
+  }, [phase, garage, picker]);
+
   const patch = useCallback((p: Partial<SaveData>) => {
     setSave(prev => {
       const next = { ...prev, ...p };
@@ -205,6 +212,11 @@ function GameApp() {
 
   const startRace = useCallback(() => {
     if (!game) return;
+    // First run: short how-to before the cold open
+    if (!saveRef.current.onboardingDone) {
+      setShowOnboarding(true);
+      return;
+    }
     setLastResult(null);
     setPayout(0);
     setXpGain(0);
@@ -213,6 +225,20 @@ function GameApp() {
     game.pbSplits = saveRef.current.best[saveRef.current.difficulty]?.splits ?? [];
     game.startRace();
   }, [game, mode]);
+
+  const finishOnboarding = useCallback((start: boolean) => {
+    patch({ onboardingDone: true });
+    setShowOnboarding(false);
+    if (start && game) {
+      setLastResult(null);
+      setPayout(0);
+      setXpGain(0);
+      setLevelUp(false);
+      game.setMode(mode);
+      game.pbSplits = saveRef.current.best[saveRef.current.difficulty]?.splits ?? [];
+      game.startRace();
+    }
+  }, [game, mode, patch]);
 
   /** Re-run without replaying the cold open. */
   const rerun = useCallback(() => {
@@ -293,6 +319,12 @@ function GameApp() {
           onToggleSfx={v => { patch({ sfx: v }); audio.setSfxEnabled(v); }}
           onToggleMotion={v => { patch({ reducedMotion: v }); game.reducedMotion = v; }}
           onToggleGhost={v => { patch({ showGhost: v }); game.showGhost = v; }}
+        />
+      )}
+      {game && showOnboarding && (
+        <Onboarding
+          onDone={() => finishOnboarding(true)}
+          onSkip={() => finishOnboarding(true)}
         />
       )}
       {game && phase === 'paused' && (
