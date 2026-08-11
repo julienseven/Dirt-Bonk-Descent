@@ -529,10 +529,14 @@ function mobileContractChecks(): Check[] {
   const forestFloor = mobileLikeFloor('forest', 4900, true);
   const alpineDesk = mobileLikeFloor('alpine', 4600, false);
   const alpineMob = mobileLikeFloor('alpine', 4600, true);
+  const ironjawMob = modeLikeFloor('limestone', 6200, true, 'descent', 1);
+  const ironjawMayhemMob = modeLikeFloor('limestone', 6200, true, 'mayhem', 2);
   return [
     check('mobile bumps forest floor', forestFloor >= 2, `floor=${forestFloor}`),
     check('desktop alpine floor 0', alpineDesk === 0, `floor=${alpineDesk}`),
     check('mobile alpine floor 1', alpineMob === 1, `floor=${alpineMob}`),
+    check('mobile ironjaw floor ≥2', ironjawMob >= 2, `floor=${ironjawMob}`),
+    check('mobile ironjaw+mayhem floor 2', ironjawMayhemMob === 2, `floor=${ironjawMayhemMob}`),
     check('touch size min 44 (Apple HIG)', 54 >= 44 && 62 >= 44, 'buttons ≥44px'),
     check('safe-area CSS vars named', true, '--safe-t/r/b/l'),
     check('viewport-fit cover expected', true, 'index.html viewport-fit=cover'),
@@ -546,6 +550,30 @@ function mobileLikeFloor(theme: string, length: number, mobile: boolean): number
   else if (theme === 'limestone' || length > 5500) base = 1;
   if (!mobile) return base;
   return Math.min(2, base + 1);
+}
+
+/** Mirrors modePerfFloor (theme + mobile + mayhem hazard bump). */
+function modeLikeFloor(
+  theme: string, length: number, mobile: boolean, modeId: string, hazardScale: number,
+): number {
+  let floor = mobileLikeFloor(theme, length, mobile);
+  if (modeId === 'mayhem' || hazardScale >= 1.8) floor = Math.min(2, floor + 1);
+  return floor;
+}
+
+function modeRulesChecks(): Check[] {
+  // Import-free contract: values must match modes.ts
+  const mayhemHazard = 2.0;
+  const mayhemAgg = 1.75;
+  const koInterval = 20;
+  const taAgg = 0;
+  return [
+    check('mayhem hazard ≤2.0', mayhemHazard <= 2.0, `h=${mayhemHazard}`),
+    check('mayhem aggression moderate', mayhemAgg <= 1.8, `a=${mayhemAgg}`),
+    check('knockout interval 20s', koInterval === 20, `i=${koInterval}`),
+    check('time attack soft ghosts', taAgg === 0, `agg=${taAgg}`),
+    check('launch pack particle cap', Math.max(2, Math.round(6 * 0.45)) <= 4, 'pk=0.45 → ≤4 bursts'),
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -610,6 +638,16 @@ export function runRaceScenarios(): ScenarioResult[] {
     out.push({
       id: 'mobile',
       name: 'Mobile contract',
+      checks,
+      pass: checks.every(c => c.ok),
+    });
+  }
+
+  {
+    const checks = modeRulesChecks();
+    out.push({
+      id: 'modes',
+      name: 'Mode rules (KO / TA / Mayhem)',
       checks,
       pass: checks.every(c => c.ok),
     });

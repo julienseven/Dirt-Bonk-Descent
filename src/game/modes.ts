@@ -200,17 +200,26 @@ export const KNOCKOUT: ModeRules = {
   trickScale: 1,
   winBy: 'position',
   hud: c => {
-    const active = c.activeField ?? c.fieldSize;
-    const last = c.place >= active;
+    const active = Math.max(1, c.activeField ?? c.fieldSize);
+    // place is 1-based among the full field (eliminated sunk); last live = place === active
+    const last = !c.eliminated && c.place >= active;
     const t = c.elimIn ?? Infinity;
     const interval = 20;
+    const duel = active <= 2;
     return {
-      objective: last ? 'DANGER' : `P${c.place} · ${active} LEFT`,
-      detail: Number.isFinite(t) ? `CUT ${fmt(t)}` : 'LAST STANDING',
+      objective: c.eliminated
+        ? 'ELIMINATED'
+        : last
+          ? (duel ? 'LAST CHANCE' : 'DANGER')
+          : `P${c.place} · ${active} LEFT`,
+      detail: Number.isFinite(t)
+        ? (t < 5 ? `CUT IN ${fmtSec(t)}` : `CUT ${fmt(t)}`)
+        : 'LAST STANDING',
       meter: Number.isFinite(t)
         ? 1 - clamp01((c.elimIn ?? 0) / interval)
         : -1,
-      urgent: last || (Number.isFinite(t) && t < 5),
+      // pulse harder in the final 5s and whenever you're last
+      urgent: last || (Number.isFinite(t) && t < 5) || duel,
     };
   },
   checkEnd: c => (c.eliminated ? 'eliminated' : c.finished ? 'finished' : null),
@@ -231,13 +240,14 @@ export const MAYHEM: ModeRules = {
   elimination: false,
   elimInterval: 0,
   timeLimit: untimed,
-  hazardScale: 2.4,
-  aggressionScale: 2.0,
+  // 2.0 keeps the chaos without packing the trail into an unreadable minefield
+  hazardScale: 2.0,
+  aggressionScale: 1.75,
   trickScale: 1.25,
   winBy: 'position',
   hud: () => ({
     objective: 'MAYHEM',
-    detail: 'HAZARDS ×2.4',
+    detail: 'HAZARDS ×2 · HOT FIELD',
     meter: -1,
     urgent: true,
   }),
@@ -255,4 +265,9 @@ function fmt(t: number): string {
   if (t <= 0) return '0:00';
   const m = Math.floor(t / 60), s = Math.floor(t % 60);
   return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+/** Whole-second countdown for the last 5s of a knockout cut. */
+function fmtSec(t: number): string {
+  return `${Math.max(0, Math.ceil(t))}s`;
 }

@@ -154,6 +154,24 @@ export function mobilePerfFloor(theme: string, length: number, mobile: boolean):
 }
 
 /**
+ * Mode + mountain quality floor. Mayhem (dense props) and long limestone
+ * (Ironjaw) need a head start on the governor so launch dust + pack don't
+ * hitch the first seconds on phone-class GPUs.
+ */
+export function modePerfFloor(
+  theme: string,
+  length: number,
+  mobile: boolean,
+  modeId?: string,
+  hazardScale = 1,
+): number {
+  let floor = mobilePerfFloor(theme, length, mobile);
+  if (modeId === 'mayhem' || hazardScale >= 1.8) floor = Math.min(2, floor + 1);
+  // Ironjaw is already limestone floor 1; mayhem+mobile lands at 2
+  return floor;
+}
+
+/**
  * Fixed-timestep accumulator. Keeps physics deterministic regardless of
  * frame rate, which matters because the ghost, the balance harness and the
  * live race must all agree.
