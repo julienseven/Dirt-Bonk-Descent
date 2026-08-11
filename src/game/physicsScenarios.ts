@@ -23,7 +23,9 @@ import {
   PELVIS_REST, WHEEL_R, SADDLE_POS, SEAT_T, BB_POS,
   FRONT_AXLE_POS, REAR_AXLE_POS,
 } from './models';
-import { planRivalThink, planRivalHop, planRivalCombat, buildField, AI_TIERS } from './ai';
+import {
+  planRivalThink, planRivalHop, planRivalCombat, buildField, AI_TIERS, themeAiFeel,
+} from './ai';
 import { SKILL_MIN, SKILL_MAX } from './save';
 
 // ---------------------------------------------------------------------------
@@ -674,10 +676,16 @@ export function runAllScenarios(): ScenarioResult[] {
         isPlayer: true, finished: false, crash: 0, index: 0,
       }],
       dt: 1 / 60, rng,
+      theme: 'alpine' as string | undefined,
     };
     const intent = planRivalThink(state, world);
     const hop = planRivalHop(true, 0, 0.9, 1.2, rng);
     const combat = planRivalCombat(state, world, 0);
+    // theme reshapes cap without mutating the brain
+    world.theme = 'volcanic';
+    const capVolc = planRivalThink(state, world).aiCap;
+    world.theme = 'forest';
+    const capForest = planRivalThink(state, world).aiCap;
     return [
       check('steer finite', Number.isFinite(intent.steer) && Math.abs(intent.steer) <= 1,
         `steer=${intent.steer}`),
@@ -685,6 +693,10 @@ export function runAllScenarios(): ScenarioResult[] {
       check('hop on lip', hop.hop === true, `hop=${hop.hop}`),
       check('combat returns index', combat.targetIndex === -1 || combat.targetIndex >= 0,
         `ti=${combat.targetIndex}`),
+      check('theme pace differs', capVolc > capForest,
+        `volc=${capVolc.toFixed(2)} forest=${capForest.toFixed(2)}`),
+      check('theme feel table', themeAiFeel('sunset').trickMul > 1,
+        `trickMul=${themeAiFeel('sunset').trickMul}`),
     ];
   }));
 

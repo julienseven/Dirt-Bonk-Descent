@@ -147,6 +147,9 @@ Difficulty scales decision quality first (line, combat, reaction 0.42 s → 0.06
 speed ceilings close enough that a tucked player still has to race: ROOKIE ~39 m/s →
 ABSURD ~45 m/s against a player soft-cap of 47. Pure speed is no longer a free win.
 
+Mountains also reshape the field via **theme feel** (volcanic send-it, forest caution,
+sunset tricks) without rewriting personalities — see [`docs/TRACKS.md`](docs/TRACKS.md).
+
 ### Crashes
 Six causes, each with its own ragdoll profile so you can identify what went wrong from the
 silhouette alone. Going over the bars pitches you forward; a side bonk barrel-rolls you;

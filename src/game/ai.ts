@@ -193,6 +193,67 @@ export const AI_TIERS: Record<AiTier, TierDef> = {
 export const TIER_LIST = Object.values(AI_TIERS);
 
 // ---------------------------------------------------------------------------
+// Theme feel — how the mountain reshapes every brain at plan time
+//
+// Personality × tier stays identity. Theme multiplies *decision pressure*:
+// volcanic send-it, forest pick-your-line, limestone grind, sunset show.
+// Applied live in planRival* so the same field rides differently per world.
+// ---------------------------------------------------------------------------
+
+export interface ThemeAiFeel {
+  /** hazard / corner brake early factor */
+  cautionMul: number;
+  /** lip hop + air commitment */
+  sendMul: number;
+  /** shortcut commit rate */
+  shortcutMul: number;
+  /** apex / line quality */
+  lineMul: number;
+  /** combat swing rate */
+  combatMul: number;
+  /** speed ceiling */
+  paceMul: number;
+  /** air trick appetite */
+  trickMul: number;
+  /** lateral wander */
+  wanderMul: number;
+}
+
+const THEME_AI_DEFAULT: ThemeAiFeel = {
+  cautionMul: 1, sendMul: 1, shortcutMul: 1, lineMul: 1,
+  combatMul: 1, paceMul: 1, trickMul: 1, wanderMul: 1,
+};
+
+/** Per-theme decision pressure. Keys match TrackTheme. */
+export const THEME_AI: Record<string, ThemeAiFeel> = {
+  alpine: { ...THEME_AI_DEFAULT },
+  volcanic: {
+    cautionMul: 0.72, sendMul: 1.28, shortcutMul: 0.88, lineMul: 0.92,
+    combatMul: 1.18, paceMul: 1.06, trickMul: 0.9, wanderMul: 1.05,
+  },
+  forest: {
+    cautionMul: 1.32, sendMul: 0.78, shortcutMul: 1.15, lineMul: 1.14,
+    combatMul: 0.88, paceMul: 0.94, trickMul: 0.85, wanderMul: 0.9,
+  },
+  limestone: {
+    cautionMul: 1.12, sendMul: 0.92, shortcutMul: 0.95, lineMul: 1.06,
+    combatMul: 1.05, paceMul: 0.97, trickMul: 0.9, wanderMul: 0.95,
+  },
+  sunset: {
+    cautionMul: 0.88, sendMul: 1.22, shortcutMul: 1.0, lineMul: 1.0,
+    combatMul: 1.0, paceMul: 1.02, trickMul: 1.28, wanderMul: 1.05,
+  },
+  canyon: {
+    cautionMul: 1.06, sendMul: 0.95, shortcutMul: 0.82, lineMul: 1.12,
+    combatMul: 1.1, paceMul: 1.0, trickMul: 0.95, wanderMul: 0.92,
+  },
+};
+
+export function themeAiFeel(theme: string): ThemeAiFeel {
+  return THEME_AI[theme] ?? THEME_AI_DEFAULT;
+}
+
+// ---------------------------------------------------------------------------
 // Resolved per-rider brain
 // ---------------------------------------------------------------------------
 
@@ -373,6 +434,8 @@ export interface RivalWorldSample {
   dt: number;
   /** 0..1 rng samples — caller supplies so pure code stays deterministic */
   rng: () => number;
+  /** TrackTheme id — reshapes decisions without mutating the brain */
+  theme?: string;
 }
 
 export interface RivalControlIntent {
@@ -415,6 +478,7 @@ export function planRivalThink(
   const B = r.brain;
   const hw = w.halfWidth;
   const curvAhead = w.curvAhead;
+  const feel = themeAiFeel(w.theme ?? 'alpine');
 
   // ---- CHAOS AGENT mood -------------------------------------------------
   let mood = r.mood;
@@ -431,10 +495,10 @@ export function planRivalThink(
 
   // ---- LINE ------------------------------------------------------------
   const apex = Math.sign(curvAhead) * Math.min(hw * 0.55, Math.abs(curvAhead) * 2200);
-  const quality = clamp01((B ? B.line : r.corner) * moodLine);
+  const quality = clamp01((B ? B.line : r.corner) * moodLine * feel.lineMul);
   let targetX = apex * quality;
   targetX += r.aiOffset * hw * 0.55 * (1 - quality * 0.6);
-  const wander = B ? B.wander : (1.6 - r.corner);
+  const wander = (B ? B.wander : (1.6 - r.corner)) * feel.wanderMul;
   targetX += Math.sin(w.time * 0.7 + r.aiSeed) * hw * 0.12 * wander;
 
   // ---- SHORTCUTS -------------------------------------------------------
@@ -446,7 +510,8 @@ export function planRivalThink(
       if (sc) targetX = sc.side * (hw + sc.width * 0.5);
     } else {
       const sc = w.nearestShortcut;
-      if (sc && sc.s0 - r.s > 4 && sc.s0 - r.s < 26 && w.rng() < B.shortcut * w.dt * 3) {
+      const scRate = B.shortcut * feel.shortcutMul;
+      if (sc && sc.s0 - r.s > 4 && sc.s0 - r.s < 26 && w.rng() < scRate * w.dt * 3) {
         scCommit = (sc.s1 - r.s) / Math.max(8, r.v) + 0.5;
       }
     }
@@ -468,7 +533,7 @@ export function planRivalThink(
   if (w.combatZone) {
     const dp = w.playerS - r.s;
     if (Math.abs(dp) < 26) {
-      targetX = targetX + (w.playerX - targetX) * (0.55 * r.aggression);
+      targetX = targetX + (w.playerX - targetX) * (0.55 * r.aggression * feel.combatMul);
     }
   }
 
@@ -486,7 +551,8 @@ export function planRivalThink(
   const bk = B ? B.bandK : w.bandK;
   const band2 = clamp(rel * 0.0024 * bk, -0.10 * bk, 0.15 * bk);
   const skill = clamp(r.skill + band2, w.skillMin, w.skillMax);
-  const aiCap = B ? B.cap * (1 + band2 * 0.5) : 20.5 + skill * 12.5;
+  const baseCap = B ? B.cap * feel.paceMul : 20.5 + skill * 12.5;
+  const aiCap = baseCap * (1 + band2 * 0.5);
   const early = w.raceTime < 28
     ? 1 - clamp01(w.raceTime / 28) * 0.35
     : 1;
@@ -494,7 +560,7 @@ export function planRivalThink(
   const grip = B ? B.cornerGrip : 15 + r.corner * 9;
   const cornerLimit = Math.abs(curvAhead) > 0.0002
     ? Math.sqrt(grip / Math.abs(curvAhead)) : 999;
-  const caution = B ? B.caution : 0.5;
+  const caution = (B ? B.caution : 0.5) * feel.cautionMul;
   const hazardAhead = aiHazardInPath(r.s, r.x, 12 + r.v * 0.9, obs, w.firstObstacle);
   const brakeFor = hazardAhead ? caution * 0.35 : 0;
   const pedal = r.v < wantSpeed * (1 - brakeFor);
@@ -505,7 +571,7 @@ export function planRivalThink(
   // ---- TRICKS (hop is planRivalHop — needs terrain height from engine) --
   let trickSpin = r.trickSpin;
   if (!r.grounded && r.airTime > 0.22 && B && trickSpin === 0) {
-    if (w.rng() < B.trick) {
+    if (w.rng() < B.trick * feel.trickMul) {
       trickSpin = (w.rng() < 0.5 ? -1 : 1) * (2 + B.tier.trickSkill * 7);
     }
   }
@@ -547,6 +613,7 @@ export function planRivalCombat(
     return { targetIndex: -1, bonkDir: 0, bonkCd };
   }
   const B = r.brain;
+  const feel = themeAiFeel(w.theme ?? 'alpine');
   const moodSwing = B?.p.id === 'chaos' ? r.mood.swing : 1;
   const earlyFight = w.raceTime < 35 ? 1.45 : 1;
   const arena = (w.combatZone ? 2.3 : 1) * earlyFight;
@@ -562,7 +629,7 @@ export function planRivalCombat(
     const vulnerable = (!other.grounded || Math.abs(other.vx) > 5) ? 1.8 : 1;
     const timing = B ? 1 + (vulnerable - 1) * B.tier.combatSkill : 1;
     const rate = (B ? B.swingRate : r.aggression)
-      * spite * arena * modeK * focus * timing * moodSwing;
+      * spite * arena * modeK * focus * timing * moodSwing * feel.combatMul;
     if (w.rng() < rate * w.dt * 1.6) {
       return {
         targetIndex: other.index,

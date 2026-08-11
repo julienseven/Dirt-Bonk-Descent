@@ -96,3 +96,33 @@ Zone `fog` still modulates density as you ride (forest darkens, summit clears).
 | limestone | thin high wind | 152 bpm, strong finale |
 | sunset | warm wind, big finale layers | 156 bpm, finaleMul 1.45 |
 | canyon | grit rumble, sparse birds | 162 bpm |
+
+## Theme-aware AI
+
+Personality × tier stays identity. `themeAiFeel(theme)` multiplies decisions
+at plan time (no brain mutation) so the same field rides each mountain differently:
+
+| Theme | Pace | Caution | Send | Shortcuts | Combat | Tricks |
+|-------|------|---------|------|-----------|--------|--------|
+| alpine | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
+| volcanic | ↑ | ↓ | ↑↑ | ↓ | ↑ | — |
+| forest | ↓ | ↑↑ | ↓ | ↑ | ↓ | ↓ |
+| limestone | slight↓ | ↑ | — | — | — | — |
+| sunset | slight↑ | ↓ | ↑ | — | — | ↑↑ |
+| canyon | — | slight↑ | — | ↓ | ↑ | — |
+
+Wired via `RivalWorldSample.theme` from `track.theme` in `game.ts`.
+
+## Automated playtest / freeze bar
+
+```bash
+npm run audit:tracks   # elev, width, landmarks, identity hooks
+npm run test:race      # full-pack sim per mountain + theme AI + mobile contract
+npm run verify         # typecheck + physics + race + build
+```
+
+Hard gates (fail the audit): elev drop ≥400 m, grade 0.14–0.32, avg width 10–18,
+landmarks ≥4, ≥1 shortcut, ≥8 jumps, intro/finish hooks, est 80–240 s.
+
+Race harness: six AI riders finish every mountain; winner time within ~0.45–2.6×
+`estimateTime`; unique places; no pack stuck under 35% progress.

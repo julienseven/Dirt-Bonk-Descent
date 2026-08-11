@@ -37,9 +37,9 @@ import {
   type TrickTally,
 } from './tricks';
 import { getMode, type ModeId } from './modes';
-import { PerfGovernor, FixedStep, aiThinkInterval, LOD_BANDS, themePerfFloor } from './perf';
+import { PerfGovernor, FixedStep, aiThinkInterval, LOD_BANDS, mobilePerfFloor } from './perf';
 import {
-  AI_TIERS, buildField, tierFromLegacy,
+  AI_TIERS, buildField, tierFromLegacy, themeAiFeel,
   planRivalThink, planRivalHop, planRivalCombat,
   type AiBrain, type AiTier,
 } from './ai';
@@ -678,7 +678,7 @@ export class Game {
     // lock Shaleback alpine look as the starting world
     this.applyAtmosphere(mountainAtmosphere('shaleback'));
     audio.setTheme('alpine');
-    this.perfGov.setThemeFloor(themePerfFloor('alpine', 4600));
+    this.perfGov.setThemeFloor(mobilePerfFloor('alpine', 4600, this.mobile));
 
     // BONK impact rings — small pool, expand + fade, no per-hit alloc
     const ringGeo = new THREE.RingGeometry(0.72, 1.0, 40);
@@ -2343,6 +2343,7 @@ export class Game {
       neighbours,
       dt,
       rng: () => Math.random(),
+      theme: trk.theme,
     };
 
     const planState = {
@@ -2356,9 +2357,10 @@ export class Game {
     };
     const intent = planRivalThink(planState, world);
 
-    // Lip hop — terrain sample stays engine-side
+    // Lip hop — terrain sample stays engine-side; theme sendMul from feel
     const B = r.brain;
-    const send = B ? B.p.sendiness * (0.5 + B.tier.trickSkill * 0.7) : 0.5;
+    const feel = themeAiFeel(trk.theme);
+    const send = (B ? B.p.sendiness * (0.5 + B.tier.trickSkill * 0.7) : 0.5) * feel.sendMul;
     const deltaH = trk.heightAt(r.s + 6, r.x) - trk.heightAt(r.s, r.x);
     const hopPlan = planRivalHop(r.grounded, intent.aiHopCd, send, deltaH, world.rng);
 
@@ -4194,7 +4196,7 @@ export class Game {
     this.applyAtmosphere(mountainAtmosphere(m.id));
     audio.setTheme(def.theme);
     // soft quality floor so dense/long mountains don't thrash first frames
-    this.perfGov.setThemeFloor(themePerfFloor(def.theme, def.length));
+    this.perfGov.setThemeFloor(mobilePerfFloor(def.theme, def.length, this.mobile));
     this.ambience.setBudget(this.perfGov.particleScale);
     this.lastZone = -1;
     this.rig.resetMenuClock();
