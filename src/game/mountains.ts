@@ -62,6 +62,12 @@ export const MOUNTAINS: MountainDef[] = [
     seed: 8829, length: 5600, rating: 5, reqLevel: 0, estSpeed: 29, tint: '#ff2e88',
     authored: true,
   },
+  {
+    id: 'redrock', name: 'REDROCK RASP', sub: 'CANYON GRIND',
+    blurb: 'Sun-blasted shelves, a pipe fight, and a dry wash finish. Technical without the trees.',
+    seed: 441902, length: 3400, rating: 3, reqLevel: 3, estSpeed: 29, tint: '#ff8a40',
+    authored: true,
+  },
 ];
 
 export const getMountain = (id: string) =>

@@ -12,6 +12,7 @@ import { CINDER_SECTIONS, CINDER_SETPIECES } from './cinderChute';
 import { THORNWOOD_SECTIONS, THORNWOOD_SETPIECES } from './thornwoodDeep';
 import { LASTLIGHT_SECTIONS, LASTLIGHT_SETPIECES } from './lastlightSpine';
 import { IRONJAW_SECTIONS, IRONJAW_SETPIECES } from './ironjawPass';
+import { REDROCK_SECTIONS, REDROCK_SETPIECES } from './redrockRasp';
 
 export function buildMountainTrack(id: string, hazardScale = 1): Track {
   const m = getMountain(id);
@@ -25,6 +26,8 @@ export function buildMountainTrack(id: string, hazardScale = 1): Track {
       return new Track(m.seed, m.length, LASTLIGHT_SECTIONS, LASTLIGHT_SETPIECES, hs);
     case 'ironjaw':
       return new Track(m.seed, m.length, IRONJAW_SECTIONS, IRONJAW_SETPIECES, hs);
+    case 'redrock':
+      return new Track(m.seed, m.length, REDROCK_SECTIONS, REDROCK_SETPIECES, hs);
     case 'shaleback':
       return new Track(m.seed, m.length, SHALEBACK_SECTIONS, SHALEBACK_SETPIECES, hs);
     default:

@@ -93,8 +93,6 @@ export interface ModeRules {
 
 const untimed = () => Infinity;
 
-const noHud = (): ModeHud => ({ objective: '', detail: '', meter: -1, urgent: false });
-
 // ---------------------------------------------------------------------------
 // DESCENT — the vertical slice. Fully implemented.
 // ---------------------------------------------------------------------------
@@ -113,7 +111,16 @@ export const DESCENT: ModeRules = {
   aggressionScale: 1,
   trickScale: 1,
   winBy: 'position',
-  hud: noHud,
+  hud: c => {
+    const last = c.place >= c.fieldSize;
+    const podium = c.place <= 3;
+    return {
+      objective: last ? 'LAST PLACE' : `P${c.place} / ${c.fieldSize}`,
+      detail: podium ? 'PODIUM PACE' : 'CHASE THE PACK',
+      meter: clamp01(1 - (c.place - 1) / Math.max(1, c.fieldSize - 1)),
+      urgent: last || c.place === c.fieldSize - 1,
+    };
+  },
   checkEnd: c => (c.finished ? 'finished' : null),
   xpScale: 1,
   cashScale: 1,

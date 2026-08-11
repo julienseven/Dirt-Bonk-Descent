@@ -66,6 +66,10 @@ export interface CamRider {
   crashMax: number;
   finishRoll: number;
   finishCarve: number;
+  /** >0 after touchdown — camera compresses */
+  landTimer?: number;
+  /** chassis pitch for look offset */
+  chassisPitch?: number;
 }
 
 const _v1 = new THREE.Vector3();
@@ -254,15 +258,18 @@ export class CameraRig {
     const air = clamp01(p.airTime / 1.4);
     const gh = trk.heightAt(p.s, p.x);
     const aboveGround = clamp(p.y - gh, 0, 22);
+    const landK = clamp01((p.landTimer ?? 0) * 3.6);
+    const pitch = p.chassisPitch ?? 0;
 
     // a crash is worth watching: pull back and up so the tumble is in frame
     const crashK = p.crash > 0 ? clamp01(p.crash / Math.max(0.4, p.crashMax)) : 0;
-    // Slightly closer/higher than before so the rider silhouette (helmet →
-    // bars → wheels) stays readable at chase distance, not a speck of blobs.
-    const back = 6.8 + speed01 * 3.2 + air * 2.4 + (boosting ? -0.7 : 0)
+    // Slightly closer/higher so helmet → bars → wheels stay readable.
+    // Hard landing compresses height; big air widens framing.
+    const back = 6.8 + speed01 * 3.2 + air * 2.8 + (boosting ? -0.7 : 0)
       + crashK * 3.4;
-    const height = 2.95 - speed01 * 0.45 + air * 1.5 + aboveGround * 0.55
-      + crashK * 2.2;
+    const height = 2.95 - speed01 * 0.45 + air * 1.65 + aboveGround * 0.55
+      + crashK * 2.2
+      - landK * 0.52;
     const camS = p.s - back;
     const camX = p.x * 0.62;
     const camH = trk.heightAt(camS, camX) + height;
@@ -270,20 +277,21 @@ export class CameraRig {
     const want = trk.worldPos(camS, camX, camH, _v1);
     if (snap) this.pos.copy(want);
     else {
-      const rate = tight ? 11 : 6;
+      // landings snap camera slightly tighter for impact weight
+      const rate = tight ? (11 + landK * 6) : 6;
       this.dampPos(want, rate, rate * 0.85, dt);
     }
 
-    // Look a bit closer to the rider (not far down-track) so the bike+body
-    // read as one unit; still lead the path for race feel.
+    // Look at rider unit; lead path; dip look on hard landings
     const lookS = p.s + 5.5 + p.v * 0.22;
     const lookX = p.x * 0.55;
-    const lookH = trk.heightAt(lookS, lookX) + 1.55 + aboveGround * 0.45;
+    const lookH = trk.heightAt(lookS, lookX) + 1.55 + aboveGround * 0.45
+      - landK * 0.32 + pitch * 0.15;
     const lookWant = trk.worldPos(lookS, lookX, lookH, _v2);
     if (snap) this.look.copy(lookWant);
     else {
       this.look.x = damp(this.look.x, lookWant.x, 8, dt);
-      this.look.y = damp(this.look.y, lookWant.y, 7, dt);
+      this.look.y = damp(this.look.y, lookWant.y, 7 + landK * 4, dt);
       this.look.z = damp(this.look.z, lookWant.z, 8, dt);
     }
 
@@ -296,16 +304,16 @@ export class CameraRig {
       + (this.shake > 0 ? (Math.random() - 0.5) * this.shake * 0.06 : 0);
     this.roll = damp(this.roll, targetRoll, 7, dt);
 
-    // ---- SENSE OF SPEED. FOV + deck drop + tuck-in (position above).
-    // Curve is nonlinear: mid-speed barely widens, top-end / boost punches.
+    // Sense of speed: FOV punches at top end / boost / big air; tightens on land
     const fovK = this.reducedMotion ? 0.35 : 1;
-    const speedPunch = speed01 * speed01; // ease-in
+    const speedPunch = speed01 * speed01;
     const targetFov = 65
       + (speedPunch * 14 + speed01 * 6
         + (boosting ? 11 : 0)
         + (p.crash > 0 ? -7 : 0)
-        + air * 4) * fovK;
-    this.commit(targetFov, boosting ? 7 : 5, dt, true);
+        + air * 5
+        - landK * 4.2) * fovK;
+    this.commit(targetFov, boosting || landK > 0.2 ? 9 : 5, dt, true);
   }
 
   /**

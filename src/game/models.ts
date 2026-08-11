@@ -96,17 +96,19 @@ export const RIDER_BUILDS: Record<string, RiderBuild> = {
  * athletic (~45°), NOT flat-horizontal — head must sit clearly above the bars
  * from the chase camera. Prior 60°+ short-spine stack looked like a sausage.
  */
-export const PELVIS_ATTACK = 0.30;
-export const SPINE_ATTACK = 0.20;
-export const CHEST_ATTACK = 0.12;
+/** Aggressive DH: hips low, chest forward, head readable above bars. */
+export const PELVIS_ATTACK = 0.28;
+export const SPINE_ATTACK = 0.18;
+export const CHEST_ATTACK = 0.14;
 /** Alias used by pose layers (chest contribution only). */
 export const ATTACK_PITCH = CHEST_ATTACK;
 
 /**
- * Rest pelvis in bike-local space: over the BB, slightly aft.
- * Height tuned so knees stay bent on pedals and shoulders reach the bars.
+ * Rest pelvis in bike-local space: standing attack over the BB / mid-wheelbase.
+ * Hips sit ABOVE and FORWARD of the slammed DH saddle (see SEAT_T) so the seat
+ * never pokes through the rider's back — classic "stood up, seat out of the way".
  */
-export const PELVIS_REST = { x: 0, y: 0.70, z: -0.16 };
+export const PELVIS_REST = { x: 0, y: 0.70, z: -0.12 };
 
 export const getBuild = (id: string): RiderBuild =>
   RIDER_BUILDS[id] ?? BUILD_DEFAULT;
@@ -413,16 +415,16 @@ export function applyRiderStance(
   const lean = o.lean ?? 0;
   const chestPitch = o.chestPitch ?? CHEST_ATTACK;
 
-  // Hips: butt-back attack over BB; shift with weight / lean / absorb / tricks.
-  // Positive pitch = forward lean (+Y tips toward +Z bars).
-  // Absorb drops the whole chain so elbows/knees fold via IK — hands/feet stay planted.
+  // Hips: CoM between wheels; weight shift / lean / absorb / tricks.
+  // Absorb drops pelvis so knees+elbows fold via IK — hands/feet stay planted.
+  // Brake (w<0) shifts aft; accel (w>0) shifts slightly forward — never onto bars.
   rig.pelvis.position.set(
     PELVIS_REST.x - lean * 0.055,
-    PELVIS_REST.y - abs * 0.10 - Math.max(0, -w) * 0.05 + superM * 0.10,
-    PELVIS_REST.z + w * 0.12 - superM * 0.50 - abs * 0.02,
+    PELVIS_REST.y - abs * 0.16 - Math.max(0, -w) * 0.06 + superM * 0.10,
+    PELVIS_REST.z + w * 0.10 - superM * 0.50 - abs * 0.04,
   );
   rig.pelvis.rotation.set(
-    PELVIS_ATTACK - Math.max(0, -w) * 0.14 + Math.max(0, w) * 0.10 - superM * 0.18 + abs * 0.04,
+    PELVIS_ATTACK - Math.max(0, -w) * 0.16 + Math.max(0, w) * 0.08 - superM * 0.18 + abs * 0.06,
     lean * 0.10,
     -lean * 0.22,
   );
@@ -522,6 +524,10 @@ const PIVOT_Y = 0.72;
 // =============================================================================
 // BIKE GEOMETRY — single source of truth (bike-local, +Z forward, ground y=0)
 //
+// Imagine a World Cup downhill bike: long wheelbase, slack head, dual-crown
+// fork, low-slung top tube, and a fully dropped seat that lives BEHIND the
+// standing rider — never under them like an XC perch.
+//
 // Neutral side-view layout (meters):
 //
 //   front contact ──►  y=0, z=+FRONT_Z
@@ -529,7 +535,8 @@ const PIVOT_Y = 0.72;
 //   both axles    ──►  y=WHEEL_R  (same diameter, same height)
 //   BB            ──►  low, just aft of mid-wheelbase
 //   head tube     ──►  slack DH angle, fork steers from HEAD_B
-//   saddle        ──►  on seat post above SEAT_T (reference, not main support)
+//   top tube      ──►  steep drop ST → HT (low silhouette)
+//   saddle        ──►  slammed on short post, aft of BB, below hips
 //
 // Hierarchy:
 //   bike
@@ -556,21 +563,28 @@ const PIVOT_Y = 0.72;
 export const WHEEL_R = 0.32;
 
 /** Front / rear axle positions in bike-local space. */
-export const FRONT_AXLE_POS = new THREE.Vector3(0, WHEEL_R, 0.58);
-export const REAR_AXLE_POS = new THREE.Vector3(0, WHEEL_R, -0.60);
+export const FRONT_AXLE_POS = new THREE.Vector3(0, WHEEL_R, 0.60);
+export const REAR_AXLE_POS = new THREE.Vector3(0, WHEEL_R, -0.64);
 
 /** Bottom-bracket / swingarm pivot. */
-export const BB_POS = new THREE.Vector3(0, 0.28, -0.04);
+export const BB_POS = new THREE.Vector3(0, 0.30, -0.06);
 
 /**
  * Head tube: crown sits CLEAR above the front tyre top (WHEEL_R*2).
- * Long DH fork visual — axle well below the crown, not jammed into it.
+ * Long dual-crown DH fork — axle well below the crown, slack ~63° read.
  */
-export const HEAD_B = new THREE.Vector3(0, 0.78, 0.42);
+export const HEAD_B = new THREE.Vector3(0, 0.78, 0.44);
 export const HEAD_T = new THREE.Vector3(0, 1.00, 0.30);
 
-/** Seat tube top — low DH seat; short post above this. */
-export const SEAT_T = new THREE.Vector3(0, 0.82, -0.34);
+/**
+ * Seat-tube top — fully dropped DH. Low y gives the sloping top-tube
+ * silhouette; aft z parks the saddle over the rear triangle, clear of
+ * standing hips (PELVIS_REST). Short post + pad sit just above this node.
+ */
+export const SEAT_T = new THREE.Vector3(0, 0.54, -0.44);
+
+/** Saddle top in bike-local (SEAT_T + short post + pad half-height). */
+export const SADDLE_POS = new THREE.Vector3(0, SEAT_T.y + 0.07, SEAT_T.z - 0.02);
 
 /** Rear axle relative to swingarm pivot (BB). */
 export const SWING_AXLE = new THREE.Vector3().subVectors(REAR_AXLE_POS, BB_POS);
@@ -578,9 +592,9 @@ export const SWING_AXLE = new THREE.Vector3().subVectors(REAR_AXLE_POS, BB_POS);
 /** Front axle relative to fork origin (HEAD_B). */
 export const FORK_AXLE_LOCAL = new THREE.Vector3().subVectors(FRONT_AXLE_POS, HEAD_B);
 
-/** Shock mounts: upper on frame, lower on swingarm (local). */
-export const SHOCK_UPPER = new THREE.Vector3(0, 0.72, -0.24);
-export const SHOCK_LOWER = new THREE.Vector3(0, 0.04, -0.26);
+/** Shock mounts: upper under top tube, lower on swingarm rocker (local). */
+export const SHOCK_UPPER = new THREE.Vector3(0, 0.62, -0.22);
+export const SHOCK_LOWER = new THREE.Vector3(0, 0.04, -0.28);
 export const SHOCK_BASE_LEN = SHOCK_UPPER.distanceTo(
   new THREE.Vector3().copy(SHOCK_LOWER).add(BB_POS));
 
@@ -608,7 +622,8 @@ function makeWheel(
 ): THREE.Mesh {
   const R = WHEEL_R;
   // Outer tyre radius == WHEEL_R so contact is exactly at local y=0.
-  const tyreT = 0.045;
+  // Fat DH carcass — reads chunky at chase distance without changing contact.
+  const tyreT = 0.052;
   const major = Math.max(0.08, R - tyreT);
   const g = new THREE.TorusGeometry(major, tyreT, 7, 20).rotateY(Math.PI / 2);
   const wheel = new THREE.Mesh(g, tyre);
@@ -671,8 +686,8 @@ export function auditBikeGeometry(rig: RiderRig): {
   rig.rearWheel.getWorldPosition(rearAxle);
   rig.cranks.getWorldPosition(bb);
   rig.gripL.getWorldPosition(bar);
-  // saddle is child of bike — find by walking, or use SEAT_T + offset
-  saddle.set(0, SEAT_T.y + 0.08, SEAT_T.z - 0.02);
+  // Saddle top from single source (matches construction offsets)
+  saddle.copy(SADDLE_POS);
   rig.bike.localToWorld(saddle);
   rig.pedalL.getWorldPosition(pedalL);
   rig.pedalR.getWorldPosition(pedalR);
@@ -700,6 +715,16 @@ export function auditBikeGeometry(rig: RiderRig): {
   }
   if (bb.z < rearAxle.z || bb.z > frontAxle.z) {
     issues.push('BB not between axles');
+  }
+  // DH slam: saddle below standing hips and clearly aft of BB
+  if (SADDLE_POS.y > PELVIS_REST.y - 0.02) {
+    issues.push(`saddle not below hips (sad=${SADDLE_POS.y.toFixed(3)} hip=${PELVIS_REST.y})`);
+  }
+  if (SADDLE_POS.z > BB_POS.z - 0.18) {
+    issues.push(`saddle setback too short (z=${SADDLE_POS.z.toFixed(3)})`);
+  }
+  if (SADDLE_POS.y > 0.72) {
+    issues.push(`saddle too high for DH slam (${SADDLE_POS.y.toFixed(3)})`);
   }
   // Grips should be above and forward of BB
   if (bar.y < bb.y + 0.35) issues.push('handlebars too low vs BB');
@@ -871,11 +896,11 @@ export function createRider(
   frame.name = 'frame';
   bike.add(frame);
 
-  // Main triangle: down / top / seat + head tube
-  const downTube = ftube(BB, HB, 0.048, mFrame, 8);
-  const topTube = ftube(ST, HT, 0.042, mFrame, 8);
-  const seatTube = ftube(BB, ST, 0.044, mFrame, 8);
-  const headTube = ftube(HB, HT, 0.055, mDark, 8);
+  // Main triangle: fat downtube (DH chassis), steep-drop top tube, seat + head
+  const downTube = ftube(BB, HB, 0.052, mFrame, 8);
+  const topTube = ftube(ST, HT, 0.038, mFrame, 8);
+  const seatTube = ftube(BB, ST, 0.040, mFrame, 8);
+  const headTube = ftube(HB, HT, 0.058, mDark, 8);
   frame.add(downTube, topTube, seatTube, headTube);
   addOutlineShell(downTube, 1.05);
   addOutlineShell(topTube, 1.05);
@@ -908,13 +933,23 @@ export function createRider(
       0.026, mFrame, 6));
   }
 
-  // Short seat post + low DH saddle (not a tall antenna behind the rider)
-  const seatPostTop = V(ST.x, ST.y + 0.04, ST.z - 0.01);
-  frame.add(tube(ST, seatPostTop, 0.018, mDark, 6));
-  const saddle = softPad(0.11, 0.04, 0.22, RIDER_MAT.seat(0x1c1c22), 7);
+  // Fully dropped DH seat: short stub post + clamp + narrow saddle parked
+  // aft of the BB and BELOW standing hips. Rider stands; seat is reference only.
+  const seatPostTop = V(ST.x, ST.y + 0.05, ST.z - 0.015);
+  frame.add(tube(ST, seatPostTop, 0.016, mDark, 6));
+  // Collar clamp so the drop reads intentional (not a missing post)
+  const seatClamp = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.026, 0.026, 0.028, 8), mHub);
+  seatClamp.position.copy(ST);
+  seatClamp.position.y += 0.01;
+  frame.add(seatClamp);
+  // Narrow DH saddle — short nose, slight nose-down for race drop
+  const saddle = softPad(0.095, 0.032, 0.20, RIDER_MAT.seat(0x1c1c22), 7);
+  saddle.name = 'saddle';
   saddle.position.copy(seatPostTop);
-  saddle.position.y += 0.015;
-  saddle.rotation.x = -0.12;
+  saddle.position.y += 0.02;
+  saddle.position.z -= 0.005;
+  saddle.rotation.x = -0.18;
   frame.add(saddle);
 
   // ---- REAR ASSEMBLY (swingarm) ---------------------------------------

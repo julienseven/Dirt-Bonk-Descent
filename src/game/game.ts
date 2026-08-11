@@ -36,7 +36,8 @@ import {
 import { getMode, type ModeId } from './modes';
 import { PerfGovernor, FixedStep, aiThinkInterval, LOD_BANDS } from './perf';
 import {
-  AI_TIERS, buildField, chaosRoll, tierFromLegacy,
+  AI_TIERS, buildField, tierFromLegacy,
+  planRivalThink, planRivalHop, planRivalCombat,
   type AiBrain, type AiTier,
 } from './ai';
 import { bus } from './events';
@@ -57,12 +58,34 @@ import { BoostSystem } from './boostSystem';
 import { CheckpointSystem } from './checkpoints';
 import { GamepadInput } from './input';
 import { CameraRig, INTRO } from './camera';
+import {
+  createSusp, resetSusp, stepSuspension, applySuspVisual, axleLoads,
+  DH_FORK, DH_REAR, type BikeSuspState, type SuspResult,
+} from './bikeDynamics';
+import {
+  createBodyDyn, resetBodyDyn, stepBodyDyn, applyBodyDynToRig,
+  clampRagdollLimbs, type BodyDynState, type BodyDynResult,
+} from './limbPhysics';
+import {
+  createWheel, stepWheel, combinedGripScale, muFromSurface, type WheelState,
+} from './wheelTraction';
+import {
+  stepTwoWheel, stepPump, lipLaunch, bodyPitchFromChassis,
+  createPhysicsDebugGroup, updatePhysicsDebug,
+  BIKE_COM, VEHICLE_MASS,
+  type PhysicsDebugSnapshot,
+} from './vehiclePhysics';
+import {
+  recomputePlaces as rankField,
+  pickKnockoutVictim,
+  eliminationFinishTime,
+} from './raceManager';
 
 export {
   GRAV, SOFT_CAP, ATTACK_PITCH, AXLE_F, AXLE_R, WHEELBASE, DRAG_K, TUCK_DRAG,
 } from './physics';
 import {
-  GRAV, SOFT_CAP, ATTACK_PITCH, AXLE_F, AXLE_R, WHEELBASE, DRAG_K, TUCK_DRAG,
+  GRAV, SOFT_CAP, ATTACK_PITCH, AXLE_F, AXLE_R, DRAG_K, TUCK_DRAG,
 } from './physics';
 
 export type Phase = 'menu' | 'intro' | 'countdown' | 'race' | 'finish' | 'paused';
@@ -198,6 +221,22 @@ interface Racer {
   crashSpin: number;
   suspension: number;
   suspV: number;
+  /** dual-crown + Horst-link integrator */
+  bikeSusp: BikeSuspState;
+  /** last suspension visual snapshot */
+  suspOut: SuspResult | null;
+  /** G-force torso / grip release */
+  bodyDyn: BodyDynState;
+  bodyOut: BodyDynResult | null;
+  /** per-wheel rotating contact */
+  wheelF: WheelState;
+  wheelR: WheelState;
+  /** 0..1 tyre slip for roost FX */
+  slipRoost: number;
+  /** last frame long accel (for G-force) */
+  lastAx: number;
+  lastAy: number;
+  lastAz: number;
   bonkCd: number;
   bonkSwing: number;   // -1..1 animation
   bonkDir: number;
@@ -285,7 +324,10 @@ interface Racer {
   wet: number;
 }
 
-const RIVAL_NAMES = ['BRICK', 'VOLTA', 'MAGPIE', 'SPUD', 'NOODLE', 'TANKA', 'HUSK', 'PIP'];
+const RIVAL_NAMES = [
+  'BRICK', 'VOLTA', 'MAGPIE', 'SPUD', 'NOODLE', 'TANKA', 'HUSK', 'PIP',
+  'CLUTCH', 'RIDGE', 'FUSE', 'JINX', 'SCOWL', 'DRIFT',
+];
 
 export class Game {
   container: HTMLElement;
@@ -325,6 +367,10 @@ export class Game {
   /** ?debug: invincibility, cheats, expanded overlay */
   debugMode = typeof window !== 'undefined'
     && (window.location.search.includes('debug') || window.location.search.includes('states'));
+  /** visual physics gizmos (F8 or ?phys) */
+  physDebug = typeof window !== 'undefined'
+    && (window.location.search.includes('phys') || window.location.search.includes('debug'));
+  private physDebugGroup: THREE.Group | null = null;
   invincible = false;
   /** mode clock remaining (Infinity = untimed) */
   modeClock = Infinity;
@@ -735,14 +781,19 @@ export class Game {
       colorHex: '#' + pal.jersey.toString(16).padStart(6, '0'),
       rig, s: 0, x: 0, y: 0, v: 0, vx: 0, vy: 0, grounded: true, airTime: 0,
       lean: 0, leanV: 0, yaw: 0, steerVis: 0, wheelSpin: 0, crash: 0, crashSpin: 0,
-      suspension: 0, suspV: 0, bonkCd: 0, bonkSwing: 0, bonkDir: 1, stun: 0,
+      suspension: 0, suspV: 0,
+      bikeSusp: createSusp(), suspOut: null,
+      bodyDyn: createBodyDyn(), bodyOut: null,
+      wheelF: createWheel(), wheelR: createWheel(),
+      slipRoost: 0, lastAx: 0, lastAy: 0, lastAz: 0,
+      bonkCd: 0, bonkSwing: 0, bonkDir: 1, stun: 0,
       grace: 0, lastObs: -1, obsCd: 0, crashMax: 1, recover: 0,
       state: BikeState.GROUNDED, prevState: BikeState.GROUNDED,
       stateT: 0, landTimer: 0, log: new TransitionLog(),
       crankAngle: Math.PI * 0.5, pedalling: 0, headYaw: 0, weight: 0,
       chassisPitch: 0, pitchV: 0, contactF: true, contactR: true,
       pump: 0, pumpArmed: 0,
-      mass: 86, swingT: 99, bonkCooldownPair: 0, ragdoll: null,
+      mass: VEHICLE_MASS, swingT: 99, bonkCooldownPair: 0, ragdoll: null,
       // the player rides "neutral"; rivals get personality below
       stCadence: 1, stLean: 1, stWeight: 0, stHead: 1, stTwitch: 1,
       place: i + 1, finished: false, finishTime: 0, eliminated: false, styleScore: 0,
@@ -818,6 +869,11 @@ export class Game {
       r.stateT = 0; r.landTimer = 0; r.log.clear();
       r.chassisPitch = 0; r.pitchV = 0; r.contactF = true; r.contactR = true;
       r.pump = 0; r.pumpArmed = 0;
+      r.suspension = 0; r.suspV = 0;
+      resetSusp(r.bikeSusp); r.suspOut = null;
+      resetBodyDyn(r.bodyDyn); r.bodyOut = null;
+      r.wheelF = createWheel(); r.wheelR = createWheel();
+      r.slipRoost = 0; r.lastAx = 0; r.lastAy = 0; r.lastAz = 0;
       r.swingT = 99; r.bonkCooldownPair = 0;
       r.scCommit = 0; r.moodCd = 0; r.trickSpin = 0; r.trickAngle = 0;
       r.thinkCd = 0; r.aiSteer = 0; r.wantSteer = 0;
@@ -999,6 +1055,13 @@ export class Game {
       if (k === 'F5') { e.preventDefault(); this.invincible = !this.invincible; this.popup(this.invincible ? 'INVINCIBLE' : 'VULNERABLE', 'sub', null, '#c0f000'); return; }
       if (k === 'F6') { e.preventDefault(); this.slowmo = this.slowmo > 0 ? 0 : 8; this.popup(this.slowmo > 0 ? 'SLOW-MO' : 'REAL TIME', 'sub', null, '#9fd0ff'); return; }
       if (k === 'F7') { e.preventDefault(); this.quickRestart(); return; }
+      if (k === 'F8') {
+        e.preventDefault();
+        this.physDebug = !this.physDebug;
+        if (this.physDebugGroup) this.physDebugGroup.visible = this.physDebug;
+        this.popup(this.physDebug ? 'PHYS DEBUG ON' : 'PHYS DEBUG OFF', 'sub', null, '#ffd400');
+        return;
+      }
     }
     // during the cold open Escape means "skip", not "pause"
     if (k === 'Escape') {
@@ -1259,27 +1322,15 @@ export class Game {
 
   /** Rank the field: score modes by style, else by track position / finish time. */
   private recomputePlaces() {
-    const winBy = getMode(this.mode).winBy;
-    const order = [...this.racers].sort((a, b) => {
-      if (a.eliminated !== b.eliminated) return a.eliminated ? 1 : -1;
-      if (winBy === 'score') {
-        const sa = a.isPlayer ? this.score : a.styleScore;
-        const sb = b.isPlayer ? this.score : b.styleScore;
-        if (Math.abs(sb - sa) > 0.5) return sb - sa;
-      }
-      const ra = a.finished ? 1e9 - a.finishTime : a.s;
-      const rb = b.finished ? 1e9 - b.finishTime : b.s;
-      return rb - ra;
-    });
-    order.forEach((r, i) => { r.place = i + 1; });
+    rankField(this.racers, getMode(this.mode).winBy, this.score);
   }
 
   /** Knockout cut: last non-eliminated rider by track progress is gone. */
   private eliminateLast() {
-    // riders who already crossed the line are safe; only the live pack is cut
-    const active = this.racers.filter(r => !r.eliminated && !r.finished);
-    if (active.length <= 1) {
-      // sole survivor (or last standing) wins the knockout
+    const victim = pickKnockoutVictim(this.racers);
+    if (!victim) {
+      // sole survivor (or empty) — crown last standing if needed
+      const active = this.racers.filter(r => !r.eliminated && !r.finished);
       if (active.length === 1 && !active[0].finished) {
         const champ = active[0];
         champ.finished = true;
@@ -1293,11 +1344,11 @@ export class Game {
       }
       return;
     }
-    active.sort((a, b) => a.s - b.s);
-    const victim = active[0];
     victim.eliminated = true;
     victim.finished = true;
-    victim.finishTime = this.raceTime + 1000 + (1 - clamp01(victim.s / this.track.length));
+    victim.finishTime = eliminationFinishTime(
+      this.raceTime, clamp01(victim.s / this.track.length),
+    );
     victim.v *= 0.2;
     this.popup(
       victim.isPlayer ? 'ELIMINATED!' : `${victim.name} OUT`,
@@ -1688,6 +1739,8 @@ export class Game {
     // ---- longitudinal
     // garage upgrades only touch the player; rivals stay on the tuned baseline
     const P = r.isPlayer ? this.perf : IDENTITY_PERF;
+    const prevV = r.v;
+    const prevVy = r.vy;
     let a = GRAV * Math.sin(pitch);
     const speed01 = clamp01(r.v / 33);
     // throttle comes from the state, not the raw key
@@ -1704,108 +1757,149 @@ export class Game {
     if (!r.isPlayer && r.v > r.aiCap) a -= (r.v - r.aiCap) * 4;
     r.v = Math.max(0, r.v + a * dt);
 
+    // ---- wheels + traction (before lateral so grip reflects slip)
+    const mu = muFromSurface(surf.kind, surf.grip);
+    const loadsPre = axleLoads({
+      mass: r.mass, grounded: r.grounded,
+      contactF: r.contactF, contactR: r.contactR,
+      impact: 0, weight: r.weight, pitch: r.chassisPitch,
+      pump: r.pump, v: r.v,
+    });
+    const wF = stepWheel(r.wheelF, {
+      v: r.v, vx: r.vx, radius: WHEEL_R, load: loadsPre.loadF,
+      contact: r.contactF && r.grounded,
+      brake: inp.brake ? 1 : 0, drive: inp.pedal && r.grounded ? 0.55 : 0,
+      muPeak: mu.muPeak, muSlide: mu.muSlide, rollC: mu.rollC, dt,
+    });
+    const wR = stepWheel(r.wheelR, {
+      v: r.v, vx: r.vx, radius: WHEEL_R, load: loadsPre.loadR,
+      contact: r.contactR && r.grounded,
+      brake: inp.brake ? 1 : 0, drive: inp.pedal && r.grounded ? 1 : 0,
+      muPeak: mu.muPeak, muSlide: mu.muSlide, rollC: mu.rollC, dt,
+    });
+    const trac = combinedGripScale(wF, wR, surf.grip);
+    r.slipRoost = trac.slipRoost;
+    // longitudinal scrub from locked / spinning tyres
+    if (r.grounded) r.v = Math.max(0, r.v + trac.longDrag * dt);
+
     // ---- lateral
     // Committing to a bonk takes a hand off the bars: you briefly lose
     // steering authority, so swinging mid-corner at speed is a real gamble.
     const swingCost = r.bonkSwing > 0 ? 1 - clamp01(r.bonkSwing) * 0.45 : 1;
-    const gripK = surf.grip * swingCost * P.grip * RULES.gripMul;
+    const gripK = trac.gripMul * swingCost * P.grip * RULES.gripMul;
     const maxLatSpeed = lerp(15.5, 9.5, speed01) * gripK;
     const maxLatAccel = (r.grounded ? 34 : 11) * gripK;
     const desired = inp.steer * maxLatSpeed;
     let latA = clamp((desired - r.vx) * 7.5, -maxLatAccel, maxLatAccel);
     latA -= curv * r.v * r.v;                 // centrifugal
     latA += -GRAV * Math.sin(bank) * (r.grounded ? 1 : 0.15);  // bank support
+    // tyre lateral force bleed when past peak slip
+    latA += (wF.latForce + wR.latForce) / Math.max(40, r.mass) * 0.08;
+    const prevVx = r.vx;
     r.vx += latA * dt;
     r.vx *= Math.exp(-(r.grounded ? 1.1 : 0.35) * RULES.slipDamp * dt);
     r.x += r.vx * dt;
+    r.lastAy = (r.vx - prevVx) / Math.max(1e-4, dt);
 
-    // ---- vertical: TWO-WHEEL CONTACT ------------------------------------
-    // A bicycle touches the ground in two places, ~1.2m apart. Sampling one
-    // point makes the rider a floating dot; sampling both means a rock under
-    // the front wheel pitches you back, a lip under the rear kicks you up,
-    // and cresting a roller unweights the front before the rear. This is the
-    // single biggest contributor to "that reads as a bike".
+    // ---- vertical: TWO-WHEEL CONTACT (physics root) --------------------
+    // TERRAIN → independent front/rear patches → pitch + supportY → frame.
     const hF = trk.heightAt(r.s + AXLE_F, r.x);
     const hR = trk.heightAt(r.s + AXLE_R, r.x);
-    // the chassis rests on whichever contact is higher
-    const gh = Math.max(hF, hR);
-    // ...and tilts to match the line between the two patches
-    const terrainPitch = Math.atan2(hF - hR, WHEELBASE);
+    const midProbe = trk.heightAt(r.s, r.x);
 
-    r.vy -= GRAV * dt;
-    r.y += r.vy * dt;
-    const wasAir = !r.grounded;
+    const tw = stepTwoWheel({
+      y: r.y, vy: r.vy,
+      chassisPitch: r.chassisPitch, pitchV: r.pitchV,
+      grounded: r.grounded,
+      forkX: r.bikeSusp.fork.x, rearX: r.bikeSusp.rear.x,
+      dt, hop: inp.hop, v: r.v, pump: r.pump, pumpArmed: r.pumpArmed,
+      hF, hR,
+    });
+    r.y = tw.y;
+    r.vy = tw.vy;
+    r.chassisPitch = tw.chassisPitch;
+    r.pitchV = tw.pitchV;
+    r.contactF = tw.contactF;
+    r.contactR = tw.contactR;
+    const wasAir = tw.wasAir;
+    const impact = tw.impact;
 
-    if (r.y <= gh + 0.001) {
-      const impact = -r.vy;
-      r.y = gh;
-      // which wheels are actually touching? (used by FX + landing quality)
-      r.contactF = hF >= hR - 0.05;
-      r.contactR = hR >= hF - 0.05;
-
-      // launch off lips, measured across the real wheelbase
+    if (tw.grounded) {
+      // lip launch across real wheelbase
       const ahead = trk.heightAt(r.s + AXLE_F + 1.8, r.x);
+      const up = lipLaunch(r.v, ahead, hR, AXLE_F + 1.8);
+      if (up > 0 && r.vy < up) r.vy = up;
       const slopeF = (ahead - hR) / (AXLE_F + 1.8 - AXLE_R);
-      const up = slopeF > 0.06 ? r.v * slopeF * 1.15 : 0;
-      r.vy = up;
 
-      // ---- PUMPING: the core downhill momentum skill.
-      // Compress into a compression, extend over a crest. Timed right it
-      // adds real speed; timed wrong it scrubs. Reads brake (weight down)
-      // and hop (weight up) as the pump input.
+      // pump / hop (momentum skill layered on contact)
       const wantDown = inp.brake || (r.isPlayer && this.key('ShiftLeft', 'ShiftRight'));
-      const pumpTarget = wantDown ? 1 : inp.hop ? -1 : 0;
-      r.pump = damp(r.pump, pumpTarget, 9, dt);
-      // terrain curvature: >0 in a compression (valley), <0 over a crest
-      const curveT = (hF + hR) * 0.5 - trk.heightAt(r.s, r.x);
-      if (curveT > 0.012 && r.pump > 0.35) {
-        // loading the bike through a compression stores energy
-        r.pumpArmed = Math.min(1, r.pumpArmed + r.pump * curveT * 22 * dt);
-      } else if (curveT < -0.008 && r.pumpArmed > 0.05 && r.pump < 0.1) {
-        // releasing it over the crest converts to drive
-        const gain = r.pumpArmed * 9;
-        r.v += gain * dt * 8;
-        r.pumpArmed = Math.max(0, r.pumpArmed - dt * 2.4);
+      const pumpOut = stepPump(
+        r.pump, r.pumpArmed, wantDown, inp.hop,
+        hF, hR, midProbe, true, dt,
+      );
+      r.pump = pumpOut.pump;
+      r.pumpArmed = pumpOut.pumpArmed;
+      if (pumpOut.speedGain > 0) {
+        r.v += pumpOut.speedGain * dt;
         if (r.isPlayer && r.pumpArmed > 0.4 && Math.random() < dt * 6) {
           this.style = Math.min(1, this.style + 0.1);
         }
-      } else {
-        r.pumpArmed = Math.max(0, r.pumpArmed - dt * 0.7);
       }
-
-      if (inp.hop) {
-        // a bunny hop loads the rear then springs: preloading pays off
-        r.vy += 7.6 + r.pumpArmed * 3.4;
-        r.pumpArmed = 0;
+      if (pumpOut.hopVy > 0) {
+        r.vy += pumpOut.hopVy;
         if (r.isPlayer) audio.hop();
       }
+
       r.grounded = true;
       if (wasAir) {
         r.landTimer = STATE_TUNING.landWindow;
         this.onLand(r, impact, slopeF);
       }
       r.airTime = 0;
-      // suspension compression, biased by which end took the hit
-      if (impact > 1) { r.suspV -= Math.min(impact * 0.55, 9); }
+      if (impact > 1) r.suspV -= Math.min(impact * 0.55, 9);
     } else {
+      r.grounded = false;
       r.contactF = false;
       r.contactR = false;
-      if (r.grounded && r.y > gh + 0.08) r.grounded = false;
-      if (!r.grounded) {
-        r.airTime += dt;
-        if (r.isPlayer) {
-          this.airPeak = Math.max(this.airPeak, r.y - gh);
-          this.airTotal += dt;
-        }
+      r.pump = damp(r.pump, 0, 6, dt);
+      r.pumpArmed = Math.max(0, r.pumpArmed - dt * 1.2);
+      r.airTime += dt;
+      if (r.isPlayer) {
+        this.airPeak = Math.max(this.airPeak, r.y - tw.supportY);
+        this.airTotal += dt;
       }
     }
 
-    // ---- chassis pitch follows the contact line, sprung so it has weight
-    // rather than snapping. In the air it eases back toward level.
-    const pitchTargetT = r.grounded ? terrainPitch : 0;
-    r.pitchV += (-(r.chassisPitch - pitchTargetT) * 150 - r.pitchV * 17) * dt;
-    r.chassisPitch += r.pitchV * dt;
-    r.chassisPitch = clamp(r.chassisPitch, -0.55, 0.55);
+    // ---- dual-crown fork + Horst-link rear (loads from real contacts)
+    {
+      const loads = axleLoads({
+        mass: r.mass, grounded: r.grounded,
+        contactF: r.contactF, contactR: r.contactR,
+        impact: impact,
+        weight: r.weight, pitch: r.chassisPitch,
+        pump: r.pump, v: r.v,
+      });
+      // bias loads toward which wheel actually hit
+      if (tw.impactF > tw.impactR + 1) {
+        loads.loadF += tw.impactF * r.mass * 6;
+      } else if (tw.impactR > tw.impactF + 1) {
+        loads.loadR += tw.impactR * r.mass * 6;
+      }
+      r.suspOut = stepSuspension(r.bikeSusp, DH_FORK, DH_REAR, {
+        loadF: loads.loadF, loadR: loads.loadR,
+        contactF: r.contactF && r.grounded,
+        contactR: r.contactR && r.grounded,
+        mass: r.mass, pump: r.pump, pitch: r.chassisPitch,
+        chassisVy: r.vy, dt,
+      });
+      const mean = (r.suspOut.forkRatio + r.suspOut.rearRatio) * 0.5;
+      r.suspension = -mean * 0.35;
+      r.suspV = -(r.bikeSusp.fork.v + r.bikeSusp.rear.v) * 0.5;
+    }
+
+    // accel samples for G-force torso
+    r.lastAx = (r.v - prevV) / Math.max(1e-4, dt);
+    r.lastAz = (r.vy - prevVy) / Math.max(1e-4, dt);
 
     // ---- track bounds. Falling off the mountain is its own crash: a long
     // quiet drop, then a respawn. Triggered early on authored drop-offs so
@@ -2182,10 +2276,8 @@ export class Game {
     if (!live && this.hud.phase !== 'countdown') { this.poseRacer(r, dt, 0); return; }
     if (this.hud.phase === 'countdown') { this.poseRacer(r, dt, 0); return; }
 
-    // ---- THINK THROTTLE. Planning is the expensive half of the AI (two
-    // curvature samples, an obstacle sweep and a corner-limit solve). A
-    // rival 300m back doesn't need that at 60Hz — nobody can see them do it.
-    // Movement still integrates every frame, so nothing stutters.
+    // ---- THINK THROTTLE. Planning is the expensive half of the AI.
+    // Movement still integrates every frame so nothing stutters.
     r.thinkCd -= dt;
     if (r.thinkCd > 0) {
       this.stepRacer(r, dt, {
@@ -2197,161 +2289,98 @@ export class Game {
     const dist = Math.abs(r.s - this.player.s);
     r.thinkCd = aiThinkInterval(dist) * this.perfGov.aiScale;
 
-    const hw = trk.halfWidth(r.s);
     const look = r.s + 22 + r.v * 0.55;
-    const curvAhead = trk.curvatureAt(look);
-    // aim for the inside of the coming corner, plus personality offset
+    const scNear = trk.shortcutAt(r.s, r.x) ?? this.nearestShortcut(r.s);
+    const selfIdx = this.racers.indexOf(r);
+    const neighbours = [];
+    for (let i = 0; i < this.racers.length; i++) {
+      if (i === selfIdx) continue;
+      const o = this.racers[i];
+      neighbours.push({
+        s: o.s, x: o.x, y: o.y, grounded: o.grounded, vx: o.vx,
+        isPlayer: o.isPlayer, finished: o.finished, crash: o.crash, index: i,
+      });
+    }
+
+    const world = {
+      halfWidth: trk.halfWidth(r.s),
+      curvAhead: trk.curvatureAt(look),
+      playerS: this.player.s,
+      playerX: this.player.x,
+      raceTime: this.raceTime,
+      time: this.time,
+      combatZone: !!trk.zoneAt(r.s).combat,
+      modeAggression: getMode(this.mode).aggressionScale,
+      bandK: DIFF_TUNING[this.difficulty].bandK,
+      skillMin: SKILL_MIN,
+      skillMax: SKILL_MAX,
+      obstacles: trk.obstacles.map(o => ({
+        s: o.s, x: o.x, r: o.r, hit: o.hit, gone: !!o.gone, mass: o.mass,
+        reaction: PROPS[o.type].reaction as string,
+      })),
+      firstObstacle: trk.firstObstacleAfter(r.s + 2),
+      nearestShortcut: scNear
+        ? { s0: scNear.s0, s1: scNear.s1, side: scNear.side, width: scNear.width }
+        : null,
+      neighbours,
+      dt,
+      rng: () => Math.random(),
+    };
+
+    const planState = {
+      s: r.s, x: r.x, v: r.v, vx: r.vx, y: r.y,
+      grounded: r.grounded, airTime: r.airTime,
+      crash: r.crash, stun: r.stun, finished: r.finished,
+      skill: r.skill, corner: r.corner, aggression: r.aggression,
+      aiOffset: r.aiOffset, aiSeed: r.aiSeed, aiSteer: r.aiSteer,
+      wantSteer: r.wantSteer, aiHopCd: r.aiHopCd, scCommit: r.scCommit,
+      trickSpin: r.trickSpin, mood: r.mood, moodCd: r.moodCd, brain: r.brain,
+    };
+    const intent = planRivalThink(planState, world);
+
+    // Lip hop — terrain sample stays engine-side
     const B = r.brain;
+    const send = B ? B.p.sendiness * (0.5 + B.tier.trickSkill * 0.7) : 0.5;
+    const deltaH = trk.heightAt(r.s + 6, r.x) - trk.heightAt(r.s, r.x);
+    const hopPlan = planRivalHop(r.grounded, intent.aiHopCd, send, deltaH, world.rng);
 
-    // ---- CHAOS AGENT: re-roll intent every few seconds
-    r.moodCd -= dt;
-    if (B && B.p.id === 'chaos' && r.moodCd <= 0) {
-      r.moodCd = 1.6 + Math.random() * 2.8;
-      r.mood = chaosRoll(this.rng);
-    }
-    const moodLine = B?.p.id === 'chaos' ? r.mood.line : 1;
-    const moodSwing = B?.p.id === 'chaos' ? r.mood.swing : 1;
-
-    // ---- LINE SELECTION. Competence decides how close to the true apex
-    // they get; personality decides whether they care.
-    const apex = Math.sign(curvAhead) * Math.min(hw * 0.55, Math.abs(curvAhead) * 2200);
-    const quality = clamp01((B ? B.line : r.corner) * moodLine);
-    let targetX = apex * quality;
-    targetX += r.aiOffset * hw * 0.55 * (1 - quality * 0.6);
-    // erratic riders wander; disciplined ones hold their line
-    const wander = B ? B.wander : (1.6 - r.corner);
-    targetX += Math.sin(this.time * 0.7 + r.aiSeed) * hw * 0.12 * wander;
-
-    // ---- SHORTCUTS. Nerve x skill decides whether they commit, and they
-    // stay committed until the exit rather than dithering at the mouth.
-    if (B) {
-      if (r.scCommit > 0) {
-        r.scCommit -= dt;
-        const sc = trk.shortcutAt(r.s, r.x) ?? this.nearestShortcut(r.s);
-        if (sc) targetX = sc.side * (hw + sc.width * 0.5);
-      } else {
-        const sc = this.nearestShortcut(r.s);
-        if (sc && sc.s0 - r.s > 4 && sc.s0 - r.s < 26 && Math.random() < B.shortcut * dt * 3) {
-          r.scCommit = (sc.s1 - r.s) / Math.max(8, r.v) + 0.5;
-        }
-      }
-    }
-    // avoid obstacles ahead
-    const obs = trk.obstacles;
-    for (let i = trk.firstObstacleAfter(r.s + 2); i < obs.length; i++) {
-      const o = obs[i];
-      if (o.s - r.s > 34) break;
-      if (o.hit > 0 || o.gone) continue;
-      // water, snow and ramps aren't things to steer around
-      const rx = PROPS[o.type].reaction;
-      if (rx === 'surface' || rx === 'launch') continue;
-      if (Math.abs(o.x - targetX) < o.r + 1.4) targetX += (targetX > o.x ? 1 : -1) * (o.r + 2.2);
-    }
-    // ---- combat sections: rivals stop racing the clock and come for you
-    const zoneHere = trk.zoneAt(r.s);
-    if (zoneHere.combat) {
-      const dp = this.player.s - r.s;
-      if (Math.abs(dp) < 26) {
-        // converge on the player's line rather than the racing line
-        targetX = lerp(targetX, this.player.x, 0.55 * r.aggression);
-      }
-    }
-
-    targetX = clamp(targetX, r.scCommit > 0 ? -hw * 2 : -hw * 0.86,
-      r.scCommit > 0 ? hw * 2 : hw * 0.86);
-    const rawSteer = clamp((targetX - r.x) * 0.42 - r.vx * 0.18, -1, 1);
-    // ---- REACTION DELAY. The honest way to make lower tiers beatable:
-    // they want the same thing, they just get there later.
-    r.wantSteer = rawSteer;
-    const react = B ? B.reaction : 0.2;
-    const steer = react > 0.01
-      ? damp(r.aiSteer, r.wantSteer, 1 / Math.max(0.02, react), dt)
-      : rawSteer;
-
-    // rubber-band: keeps the pack breathing around the player without cheating.
-    // bandK is per-difficulty so the band can't erase the difficulty choice.
-    const rel = this.player.s - r.s;
-    const bk = B ? B.bandK : DIFF_TUNING[this.difficulty].bandK;
-    const band2 = clamp(rel * 0.0024 * bk, -0.10 * bk, 0.15 * bk);
-    const skill = clamp(r.skill + band2, SKILL_MIN, SKILL_MAX);
-    // personality sets the ceiling; the band nudges it
-    r.aiCap = B ? B.cap * (1 + band2 * 0.5) : 20.5 + skill * 12.5;
-    // first 30s: pack stays bunched so the holeshot is a real fight, not a parade
-    const early = this.raceTime < 28
-      ? 1 - clamp01(this.raceTime / 28) * 0.35
-      : 1;
-    const wantSpeed = r.aiCap * (0.88 + early * 0.12);
-    // ---- CORNERING. Higher tiers believe in more grip, so they carry more
-    // speed through the same corner rather than simply having a higher cap.
-    const grip = B ? B.cornerGrip : 15 + r.corner * 9;
-    const cornerLimit = Math.abs(curvAhead) > 0.0002
-      ? Math.sqrt(grip / Math.abs(curvAhead)) : 999;
-    // ---- RISK MANAGEMENT. Cautious riders brake earlier for real hazards.
-    const caution = B ? B.caution : 0.5;
-    const hazardAhead = this.aiHazardAhead(r, 12 + r.v * 0.9);
-    const brakeFor = hazardAhead ? caution * 0.35 : 0;
-    const pedal = r.v < wantSpeed * (1 - brakeFor);
-    const brake = (r.v > Math.min(wantSpeed * 1.1, cornerLimit * (1 - caution * 0.12))
-      && Math.abs(curvAhead) > 0.008) || (hazardAhead && caution > 0.6);
-    const tuck = !brake && Math.abs(curvAhead) < 0.005 && r.v > 18;
-
-    // hop off lips
-    // ---- JUMPING. Sendy personalities hop lips; cautious ones roll them.
-    r.aiHopCd -= dt;
-    let hop = false;
-    if (r.grounded && r.aiHopCd <= 0) {
-      const h0 = trk.heightAt(r.s, r.x);
-      const h1 = trk.heightAt(r.s + 6, r.x);
-      const send = B ? B.p.sendiness * (0.5 + B.tier.trickSkill * 0.7) : 0.5;
-      if (h1 - h0 > 0.9 && Math.random() < send) { hop = true; r.aiHopCd = 0.8; }
-    }
-    // ---- TRICKS. Airborne rivals throw rotations if the brain wants to.
-    if (!r.grounded && r.airTime > 0.22 && B && r.trickSpin === 0) {
-      if (Math.random() < B.trick) {
-        // ambition scales with skill: rookies quarter-spin, absurd do flips
-        r.trickSpin = (Math.random() < 0.5 ? -1 : 1)
-          * (2 + B.tier.trickSkill * 7);
-      }
-    }
-    if (r.grounded) r.trickSpin = 0;
-    // ---- rivals swing at WHOEVER is next to them, player or not.
-    // This is what makes the pack feel like a brawl instead of a convoy.
+    // Combat — pure pick, resolve in engine
     r.bonkCd -= dt;
-    if (r.bonkCd <= 0 && r.crash <= 0 && r.stun <= 0) {
-      for (const other of this.racers) {
-        if (other === r || other.crash > 0 || other.finished) continue;
-        const ds = other.s - r.s, dx = other.x - r.x;
-        if (Math.abs(ds) > 3.4 || Math.abs(dx) > 3.6) continue;
-        if (Math.abs(other.y - r.y) > 2.4) continue;
-        // more likely to swing at someone who's beating them
-        const spite = other.s > r.s ? 1.5 : 0.7;
-        // combat sections crank everyone up; so does the mode;
-        // early race also turns up the heat so the pack is a brawl from the gate
-        const earlyFight = this.raceTime < 35 ? 1.45 : 1;
-        const arena = (this.track.zoneAt(r.s).combat ? 2.3 : 1) * earlyFight;
-        const modeK = getMode(this.mode).aggressionScale;
-        const Bc = r.brain;
-        // THE BONKER hunts the player specifically; others take what's near
-        const focus = other.isPlayer ? 1 + (Bc ? Bc.playerFocus * 2.2 : 0) : 1;
-        // higher tiers pick their moment: a rider mid-corner or mid-air is
-        // far easier to put down, and good AI knows it
-        const vulnerable = (!other.grounded || Math.abs(other.vx) > 5) ? 1.8 : 1;
-        const timing = Bc ? 1 + (vulnerable - 1) * Bc.tier.combatSkill : 1;
-        const rate = (Bc ? Bc.swingRate : r.aggression)
-          * spite * arena * modeK * focus * timing * moodSwing;
-        if (Math.random() < rate * dt * 1.6) {
-          r.bonkCd = 1.6;
-          r.bonkSwing = 1;
-          r.bonkDir = Math.sign(dx) || 1;
-          r.swingT = 0;
-          this.resolveContact(r, other, true);
-        }
-        break;
+    const combat = planRivalCombat(
+      { ...planState, aiHopCd: hopPlan.aiHopCd, scCommit: intent.scCommit,
+        trickSpin: intent.trickSpin, mood: intent.mood, moodCd: intent.moodCd },
+      world, r.bonkCd,
+    );
+    if (combat.targetIndex >= 0) {
+      const other = this.racers[combat.targetIndex];
+      if (other && other !== r) {
+        r.bonkCd = combat.bonkCd;
+        r.bonkSwing = 1;
+        r.bonkDir = combat.bonkDir;
+        r.swingT = 0;
+        this.resolveContact(r, other, true);
       }
+    } else {
+      r.bonkCd = combat.bonkCd;
     }
-    // cache the plan so throttled frames can replay it
-    r.aiSteer = steer; r.aiPedal = pedal; r.aiBrake = brake; r.aiTuck = tuck;
-    this.stepRacer(r, dt, { steer, pedal, brake, tuck, hop, boost: false, live });
+
+    r.aiSteer = intent.aiSteer;
+    r.wantSteer = intent.wantSteer;
+    r.aiPedal = intent.aiPedal;
+    r.aiBrake = intent.aiBrake;
+    r.aiTuck = intent.aiTuck;
+    r.aiCap = intent.aiCap;
+    r.aiHopCd = hopPlan.aiHopCd;
+    r.scCommit = intent.scCommit;
+    r.trickSpin = intent.trickSpin;
+    r.mood = intent.mood;
+    r.moodCd = intent.moodCd;
+    r.skill = intent.skill;
+
+    this.stepRacer(r, dt, {
+      steer: intent.steer, pedal: intent.pedal, brake: intent.brake,
+      tuck: intent.tuck, hop: hopPlan.hop, boost: false, live,
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -2435,18 +2464,6 @@ export class Game {
       r.lodNear = near;
       r.rig.root.visible = near;
     }
-  }
-
-  /** Is there a solid hazard in this rival's path within `reach` metres? */
-  private aiHazardAhead(r: Racer, reach: number): boolean {
-    const list = this.track.obstacles;
-    for (let i = this.track.firstObstacleAfter(r.s); i < list.length; i++) {
-      const o = list[i];
-      if (o.s - r.s > reach) break;
-      if (o.gone || o.mass < 100) continue;
-      if (Math.abs(o.x - r.x) < o.r + 1.2) return true;
-    }
-    return false;
   }
 
   /** Next shortcut mouth at or ahead of `s`. */
@@ -3187,15 +3204,18 @@ export class Game {
     const rig = r.rig;
     const fwd = _f1, right = _f2, up = _f3;
     trk.frameAt(r.s, fwd, right, up);
-    // suspension spring
-    r.suspV += (-r.suspension * 210 - r.suspV * 19) * dt;
-    r.suspension += r.suspV * dt;
-    r.suspension = clamp(r.suspension, -0.42, 0.28);
-
-    const pos = trk.worldPos(r.s, r.x, r.y + 0.02 + r.suspension * 0.5, _v1);
+    // PHYSICS ROOT: world pos from two-wheel support (r.y). Soft heave only
+    // from residual damper energy — wheel contact already accounts for sag.
+    if (!r.suspOut) {
+      r.suspV += (-r.suspension * 210 - r.suspV * 19) * dt;
+      r.suspension += r.suspV * dt;
+      r.suspension = clamp(r.suspension, -0.42, 0.28);
+    }
+    const heave = r.suspOut ? r.suspOut.heave * 0.55 : r.suspension * 0.35;
+    const pos = trk.worldPos(r.s, r.x, r.y + 0.02 + heave, _v1);
     rig.root.position.copy(pos);
 
-    // orientation: track frame + yaw drift
+    // orientation: track frame + yaw drift (bike forward = track + steer)
     const driftYaw = Math.atan2(r.vx, Math.max(6, r.v));
     r.yaw = damp(r.yaw, clamp(driftYaw * (r.grounded ? 1.25 : 0.7), -0.85, 0.85), 9, dt);
     const m = _m1.makeBasis(right, up, fwd);
@@ -3204,7 +3224,7 @@ export class Game {
     _q1.multiply(_q2);
     rig.root.quaternion.copy(_q1);
 
-    // lean
+    // lean from curvature + steer + lateral vel
     const curv = trk.curvatureAt(r.s);
     const targetLean = clamp(
       (curv * r.v * r.v * 0.021 + steerInput * 0.16 + r.vx * 0.028) * r.stLean,
@@ -3214,46 +3234,51 @@ export class Game {
     r.lean = clamp(r.lean, -0.95, 0.95);
     rig.lean.rotation.z = -r.lean;
 
-    // Body pitch: the chassis rides the line between the two contact patches,
-    // plus a small vertical-velocity lean. This is what makes the bike look
-    // like it's rolling over terrain instead of sliding along a curve.
-    // Landing squat + brake hang-back + accel attack are layered on top so
-    // the rider never reads as a rigid mannequin bolted to the frame.
+    // Chassis pitch from two-wheel geometry (not a mesh-offset hack).
+    // Landing crouch + weight transfer layered on top.
     const landCrouch = r.landTimer > 0 ? clamp01(r.landTimer * 3.2) * 0.14 : 0;
-    const pitchTarget = (r.grounded ? clamp(-r.vy * 0.012, -0.16, 0.16) : clamp(-r.vy * 0.016, -0.3, 0.3))
-      - r.chassisPitch
-      + landCrouch
-      + clamp01(-r.weight) * 0.06
-      - clamp01(r.weight) * 0.05;
-    rig.body.rotation.x = damp(rig.body.rotation.x, pitchTarget, 14, dt);
-    rig.body.position.y = r.suspension * 0.35 - landCrouch * 0.55;
+    const pitchTarget = bodyPitchFromChassis(
+      r.chassisPitch, r.vy, r.grounded, landCrouch, r.weight,
+    );
+    // grounded: track terrain tightly; air: keep angular momentum feel
+    const pitchRate = r.grounded ? 18 : 9;
+    rig.body.rotation.x = damp(rig.body.rotation.x, pitchTarget, pitchRate, dt);
+    // Frame squat from suspension ratios — rider chain compresses with it
+    const squat = r.suspOut
+      ? -(r.suspOut.forkRatio * 0.55 + r.suspOut.rearRatio * 0.70) * 0.085
+      : r.suspension * 0.35;
+    rig.body.position.y = squat - landCrouch * 0.55;
 
-    // ---- suspension travel ---------------------------------------------
-    // The frame drops with `suspension`; the fork lowers and swingarm move
-    // the opposite way by the same amount, so the wheels stay planted while
-    // the bike visibly squats into hits.
-    // Differential travel: the end carrying the load compresses more, so a
-    // nose-down attitude dives the fork and a nose-up squats the shock.
-    const comp = -r.suspension;                        // >0 when compressed
-    const bias = clamp(r.chassisPitch * 1.5, -0.5, 0.5);
-    const travel = clamp((comp + Math.max(0, -bias) * 0.16) * 0.5, -0.035, 0.13);
-    rig.forkLower.position.copy(FORK_AXIS).multiplyScalar(-travel);
-    const swing = clamp((comp + Math.max(0, bias) * 0.16) * 0.38, -0.03, 0.15);
-    rig.swingarm.rotation.x = swing;
-    // re-aim the coil shock between its frame and swingarm mounts
-    _v3.copy(SHOCK_LOWER).applyAxisAngle(_xAxis, swing).add(BB_POS);
-    _v4.subVectors(_v3, SHOCK_UPPER);
-    const shockLen = _v4.length() || SHOCK_BASE_LEN;
-    rig.shock.position.copy(SHOCK_UPPER).addScaledVector(_v4, 0.5);
-    rig.shock.quaternion.setFromUnitVectors(_yAxis, _v4.divideScalar(shockLen));
-    rig.shock.scale.y = shockLen / SHOCK_BASE_LEN;
+    // ---- dual-crown fork + Horst-link rear (kinematics → mesh) ----------
+    if (r.suspOut) {
+      applySuspVisual(rig, DH_FORK, DH_REAR, r.suspOut);
+    } else {
+      const comp = -r.suspension;
+      const bias = clamp(r.chassisPitch * 1.5, -0.5, 0.5);
+      const travel = clamp((comp + Math.max(0, -bias) * 0.16) * 0.5, -0.035, 0.13);
+      rig.forkLower.position.copy(FORK_AXIS).multiplyScalar(-travel);
+      const swing = clamp((comp + Math.max(0, bias) * 0.16) * 0.38, -0.03, 0.15);
+      rig.swingarm.rotation.x = swing;
+      _v3.copy(SHOCK_LOWER).applyAxisAngle(_xAxis, swing).add(BB_POS);
+      _v4.subVectors(_v3, SHOCK_UPPER);
+      const shockLen = _v4.length() || SHOCK_BASE_LEN;
+      rig.shock.position.copy(SHOCK_UPPER).addScaledVector(_v4, 0.5);
+      rig.shock.quaternion.setFromUnitVectors(_yAxis, _v4.divideScalar(shockLen));
+      rig.shock.scale.y = shockLen / SHOCK_BASE_LEN;
+    }
 
     // style weights for IK / trick layers (player only)
     let styleSuperman = 0, styleNoHand = 0, styleOneFoot = 0;
-    // trick rotations for the player
+    // Tricks: BIKE rotation and RIDER body are layered separately where possible.
+    // Spin/flip live on chassis pivots; rider tuck/extend is stance + IK, not a
+    // second whole-mesh rotate of the bike.
+    let flipTuck = 0;
     if (r.isPlayer) {
       rig.spin.rotation.y = damp(rig.spin.rotation.y, this.airSpin, 30, dt);
       rig.flip.rotation.x = damp(rig.flip.rotation.x, this.airFlip, 26, dt);
+      // Backflip tuck: rider compresses independently of bike rotation amount
+      flipTuck = clamp01(Math.abs(this.airFlip) / 2.2) * 0.55
+        * clamp01(r.airTime * 2);
       const A = this.styleActive;
       const on = (s: StyleTrick) => (A.has(s) ? 1 : 0);
       styleSuperman = clamp01(this.airPose * 3) * on(StyleTrick.SUPERMAN);
@@ -3264,20 +3289,34 @@ export class Game {
       const bars = on(StyleTrick.BARSPIN);
       const D = 11;
 
-      // tabletop: whole bike laid flat sideways under the rider
+      // tabletop: bike lays flat; rider stays more upright via less table on rider
       rig.bike.rotation.z = damp(rig.bike.rotation.z, table * 1.15, D, dt);
       rig.bike.rotation.y = damp(rig.bike.rotation.y, table * 0.25, D, dt);
+      // slight counter on rider so body ≠ bike during table
+      if (table > 0.05) {
+        rig.rider.rotation.z = damp(rig.rider.rotation.z, -table * 0.35, D, dt);
+      } else {
+        rig.rider.rotation.z = damp(rig.rider.rotation.z, 0, 10, dt);
+      }
 
-      // tailwhip: the frame rotates around the steerer
+      // tailwhip: frame rotates; rider stays via feet/hands (IK) on pedals/grips
       this.whipAngle += whip * 13 * dt;
       if (!whip) this.whipAngle = damp(this.whipAngle,
         Math.round(this.whipAngle / TAU) * TAU, 9, dt);
       rig.swingarm.rotation.y = this.whipAngle;
+      // whip the main frame too (not just swingarm) for full bike rotation
+      rig.bike.rotation.y = damp(
+        rig.bike.rotation.y,
+        table * 0.25 + Math.sin(this.whipAngle) * whip * 0.15,
+        D, dt,
+      );
 
       // barspin: bars spin; fork yaw applied later with steer for IK
       this.barAngle += bars * 15 * dt;
       if (!bars) this.barAngle = damp(this.barAngle,
         Math.round(this.barAngle / TAU) * TAU, 11, dt);
+    } else if (rig.rider.rotation.z !== 0) {
+      rig.rider.rotation.z = damp(rig.rider.rotation.z, 0, 10, dt);
     }
     if (!r.isPlayer && !r.grounded && r.trickSpin !== 0) {
       // rival is committed to a trick: spin it, then unwind on touchdown
@@ -3308,7 +3347,8 @@ export class Game {
         rig.spin.rotation.y = rd.yaw;
         rig.lean.rotation.z = rd.roll;
         rig.body.rotation.x = 0;
-        const lim = sampleRagdollLimbs(rd, this.time);
+        // anatomical joint limits on flail
+        const lim = clampRagdollLimbs(sampleRagdollLimbs(rd, this.time));
         rig.armL.rotation.set(lim.armL[0], lim.armL[1], lim.armL[2]);
         rig.armR.rotation.set(lim.armR[0], lim.armR[1], lim.armR[2]);
         rig.foreL.rotation.set(lim.foreL, 0, 0);
@@ -3334,13 +3374,21 @@ export class Game {
       rig.bike.rotation.set(0, 0, 0);
     }
 
-    // steering + wheels
+    // steering + wheels (spin from traction omega when available)
     r.steerVis = damp(r.steerVis, clamp(steerInput * 0.42 + r.yaw * 0.5, -0.6, 0.6), 12, dt);
     const barSpin = r.isPlayer ? this.barAngle : 0;
     rig.fork.rotation.y = r.steerVis + barSpin;
-    r.wheelSpin += r.v * dt / WHEEL_R;
+    if (r.wheelF.contact || r.wheelR.contact || r.grounded) {
+      // prefer integrated wheel omega; fall back to free-roll
+      const oF = r.wheelF.omega || r.v / WHEEL_R;
+      const oR = r.wheelR.omega || r.v / WHEEL_R;
+      r.wheelSpin += ((oF + oR) * 0.5) * dt;
+    } else {
+      r.wheelSpin += r.v * dt / WHEEL_R;
+    }
     rig.frontWheel.rotation.x = r.wheelSpin;
-    rig.rearWheel.rotation.x = r.wheelSpin;
+    // rear can scrub relative to front under brake lock
+    rig.rearWheel.rotation.x = r.wheelSpin + r.wheelR.slipLong * 0.8;
     // ---- drivetrain ---------------------------------------------------
     if (r.pedalling > 0.02) {
       rig.cranks.rotation.x = r.crankAngle;
@@ -3372,17 +3420,24 @@ export class Game {
     const st = r.steerVis;
     let bonkArm = 0;
     const vp = r.finishPose;
-    // Suspension fold + landing pulse + brake crouch + air crouch → knees/elbows.
-    // Absorb only drops the pelvis chain; hands/feet stay locked to anchors.
-    const landPulse = r.landTimer > 0 ? clamp01(r.landTimer * 3.5) * 0.42 : 0;
-    const brakeFold = r.grounded && r.weight < -0.35 ? clamp01(-r.weight) * 0.14 : 0;
+    // Absorb from REAL suspension travel + landing + brake + air.
+    // Hands/feet stay IK-locked to grips/pedals; knees/elbows fold via chain.
+    const forkR = r.suspOut?.forkRatio ?? 0;
+    const rearR = r.suspOut?.rearRatio ?? 0;
+    const suspFold = (forkR * 0.45 + rearR * 0.55);
+    const landPulse = r.landTimer > 0 ? clamp01(r.landTimer * 3.5) * 0.48 : 0;
+    const brakeFold = r.grounded && r.weight < -0.35 ? clamp01(-r.weight) * 0.16 : 0;
     const airCrouch = !r.grounded && r.airTime > 0.08
       ? clamp01(r.airTime * 2.2) * 0.22 + clamp01(-r.vy * 0.04) * 0.15
       : 0;
-    // High speed: slightly more loaded athletic posture
+    // Pitch counter-balance: nose down → rider shifts back (absorb legs)
+    const pitchShift = r.grounded ? clamp(r.chassisPitch * 0.12, -0.08, 0.10) : 0;
     const speedLoad = r.grounded ? clamp01((r.v - 18) / 40) * 0.08 : 0;
     const absorb = r.crash <= 0
-      ? clamp(-r.suspension * 1.45 + landPulse + brakeFold + airCrouch + speedLoad, 0, 0.88)
+      ? clamp(
+        suspFold * 0.95 + landPulse + brakeFold + airCrouch + speedLoad + flipTuck,
+        0, 0.92,
+      )
       : 0;
 
     let chestYawTarget = -st * 0.18 - r.lean * 0.06;
@@ -3412,26 +3467,54 @@ export class Game {
       if (r.grounded) rig.bike.rotation.z = damp(rig.bike.rotation.z, 0, 10, dt);
     }
 
+    // G-force torso + grip release (hybrid mounted / detach)
     if (r.crash <= 0) {
-      // Single damp pass into the skeletal stance driver — no position hacks.
+      r.bodyOut = stepBodyDyn(r.bodyDyn, {
+        ax: r.lastAx,
+        ay: r.lastAy + r.lean * r.v * r.v * 0.15,
+        az: r.lastAz,
+        lean: r.lean,
+        pitch: r.chassisPitch,
+        absorb,
+        crash: false,
+        handOffL: styleNoHand,
+        handOffR: Math.max(styleNoHand, vp),
+        footOffR: styleOneFoot,
+        bonkImpulse: r.bonkSwing > 0.5 ? 0.6 : 0,
+        dt,
+      });
+    } else {
+      r.bodyOut = stepBodyDyn(r.bodyDyn, {
+        ax: r.lastAx, ay: r.lastAy, az: r.lastAz,
+        lean: r.lean, pitch: r.chassisPitch, absorb: 0,
+        crash: true, handOffL: 1, handOffR: 1, footOffR: 1,
+        bonkImpulse: 1, dt,
+      });
+    }
+
+    if (r.crash <= 0) {
+      // Stance from physics intent; pelvis CoM stays between wheels (PELVIS_REST).
+      // Pitch-shift: nose down → weight back; nose up → weight forward.
       const pitch = damp(rig.torso.rotation.x, _poseTorsoBase + _poseTorsoX, 7.5, dt);
       const yaw = damp(rig.torso.rotation.y, chestYawTarget, 9, dt);
       applyRiderStance(rig, {
         chestPitch: pitch,
         chestYaw: yaw,
-        weight: clamp(r.weight + bonkWeightBias, -1, 1),
+        weight: clamp(r.weight + bonkWeightBias - pitchShift * 3.5, -1, 1),
         absorb,
         superman: styleSuperman,
         lean: r.lean,
       });
+      if (r.bodyOut) applyBodyDynToRig(rig, r.bodyOut, r.lean);
     }
 
     // ---- two-bone IK: hands→grips, feet→pedals (anchor matrix space) ---
     if (r.crash <= 0) {
+      const bd = r.bodyOut;
       solveRiderIK(rig, {
-        handOffL: styleNoHand,
-        handOffR: Math.max(styleNoHand, vp),
-        footOffR: styleOneFoot,
+        handOffL: Math.max(styleNoHand, bd?.handOffL ?? 0),
+        handOffR: Math.max(styleNoHand, vp, bd?.handOffR ?? 0),
+        footOffR: Math.max(styleOneFoot, bd?.footOffR ?? 0),
         superman: styleSuperman,
         bonkArm: bonkArm || undefined,
         lockLegs: styleSuperman > 0.85,
@@ -3466,7 +3549,7 @@ export class Game {
       }
     }
 
-    // ---- head: look where you're going --------------------------------
+    // ---- head: look where you're going; counter-rotate vs torso for readability
     const lookTarget = r.crash > 0
       ? 0
       : clamp((-trk.curvatureAt(r.s + 20 + r.v * 0.5) * 34 - r.yaw * 0.5) * r.stHead,
@@ -3474,7 +3557,9 @@ export class Game {
     r.headYaw = damp(r.headYaw, lookTarget, 5 * r.stTwitch, dt);
     rig.head.rotation.y = r.headYaw;
     const chinAir = r.grounded ? 0 : clamp(-r.vy * 0.012, -0.22, 0.22);
-    rig.head.rotation.x = damp(rig.head.rotation.x, chinAir + _poseHeadX, 6, dt);
+    // slight counter-pitch so helmet stays readable when torso compresses
+    const headCounter = -absorb * 0.08 - (r.bodyOut?.chestPitchAdd ?? 0) * 0.25;
+    rig.head.rotation.x = damp(rig.head.rotation.x, chinAir + _poseHeadX + headCounter, 6, dt);
 
     // Soft contact shadow — offset slightly down-sun (golden-hour raking)
     // so the blob reads as a real cast shadow, not a sticker under the bike.
@@ -3518,6 +3603,83 @@ export class Game {
     const rearLoad = clamp01(0.55 - r.weight * 0.45 + (r.chassisPitch < 0 ? 0.25 : 0));
     place(rig.contactF, FRONT_AXLE_POS.z, 1, frontLoad);
     place(rig.contactR, REAR_AXLE_POS.z, 1.15, rearLoad);
+
+    // ---- physics debug gizmos (player only; F8 / ?phys / ?debug) -------
+    if (r.isPlayer) {
+      if (this.physDebug) this.updatePhysDebug(r, fwd, right, up);
+      else if (this.physDebugGroup) this.physDebugGroup.visible = false;
+    }
+  }
+
+  private ensurePhysDebug() {
+    if (this.physDebugGroup) return;
+    this.physDebugGroup = createPhysicsDebugGroup();
+    this.physDebugGroup.visible = this.physDebug;
+    this.scene.add(this.physDebugGroup);
+  }
+
+  private updatePhysDebug(
+    r: Racer,
+    fwd: THREE.Vector3,
+    right: THREE.Vector3,
+    up: THREE.Vector3,
+  ) {
+    this.ensurePhysDebug();
+    const g = this.physDebugGroup!;
+    g.visible = true;
+    const rig = r.rig;
+    rig.root.updateWorldMatrix(true, true);
+    rig.bike.updateWorldMatrix(true, true);
+
+    const root = rig.root.position.clone();
+    const bikeCom = BIKE_COM.clone().applyMatrix4(rig.bike.matrixWorld);
+    // Rider CoM ≈ pelvis + short chest rise (attack stance mass center)
+    const pelvisW = new THREE.Vector3();
+    rig.pelvis.getWorldPosition(pelvisW);
+    pelvisW.addScaledVector(up, 0.18).addScaledVector(fwd, 0.05);
+
+    const cF = new THREE.Vector3();
+    const cR = new THREE.Vector3();
+    // contact points: axle world projected down by wheel radius along up
+    rig.frontWheel.getWorldPosition(cF);
+    cF.addScaledVector(up, -WHEEL_R);
+    rig.rearWheel.getWorldPosition(cR);
+    cR.addScaledVector(up, -WHEEL_R);
+
+    const gripL = new THREE.Vector3(), gripR = new THREE.Vector3();
+    const pedalL = new THREE.Vector3(), pedalR = new THREE.Vector3();
+    rig.gripL.getWorldPosition(gripL);
+    rig.gripR.getWorldPosition(gripR);
+    rig.pedalL.getWorldPosition(pedalL);
+    rig.pedalR.getWorldPosition(pedalR);
+
+    const steerAxis = new THREE.Vector3();
+    rig.fork.getWorldPosition(steerAxis);
+
+    const vel = fwd.clone().multiplyScalar(r.v).addScaledVector(right, r.vx).addScaledVector(up, r.vy);
+    // scale velocity arrow for readability
+    const velLen = Math.min(8, vel.length() * 0.12);
+    if (vel.lengthSq() > 1e-6) vel.normalize().multiplyScalar(velLen);
+    else vel.set(0, 0, 0);
+
+    const snap: PhysicsDebugSnapshot = {
+      root,
+      bikeCom,
+      riderCom: pelvisW,
+      contactF: cF,
+      contactR: cR,
+      forward: fwd.clone().multiplyScalar(1.4),
+      velocity: vel,
+      normal: up.clone().multiplyScalar(1.1),
+      steerAxis,
+      gripL, gripR, pedalL, pedalR,
+      forkRatio: r.suspOut?.forkRatio ?? 0,
+      rearRatio: r.suspOut?.rearRatio ?? 0,
+      contactFOn: r.contactF,
+      contactROn: r.contactR,
+      grounded: r.grounded,
+    };
+    updatePhysicsDebug(g, snap);
   }
 
   // -------------------------------------------------------------------------
@@ -3530,7 +3692,8 @@ export class Game {
     const stRoost = roostFactor(r.state);
     const pScale = this.perfGov.particleScale;
     if (stRoost > 0 && r.v > 4) {
-      const slip = Math.abs(r.vx) + Math.abs(inp.steer) * r.v * 0.14;
+      const slip = Math.abs(r.vx) + Math.abs(inp.steer) * r.v * 0.14
+        + r.slipRoost * 6;
       const rate = (2 + slip * 2.4 + r.v * 0.5) * surf.roost * stRoost * pScale;
       this.roostAccum += rate * dt;
       const rear = trk.worldPos(r.s - 0.7, r.x, r.y + 0.15, _v1);

@@ -61,13 +61,21 @@ result must be reproducible across runs (track generation, AI personality assign
 
 ## Verification
 
-Two harnesses run in-browser rather than as a test suite, because both need the real
-generated track:
+```bash
+npm run test:physics   # 18 pure-sim scenarios (vehicle chain)
+npm run typecheck
+npm run verify         # typecheck + physics scenarios + build
+```
+
+In-browser harnesses (need the real generated track):
 
 - **`?tune`** — balance simulation plus exhaustive sweeps of the state machine and bonk
   system. Check this after changing AI tiers, physics constants or state transitions.
-- **`?states`** — live state and performance overlay. Check FPS and draw calls after any
-  rendering change.
+- **`?states` / `?debug`** — live state and performance overlay. Check FPS and draw calls
+  after any rendering change.
+- **`?phys` or F8** — physics debug gizmos (CoM, contacts, susp, IK targets).
+
+Physics architecture and feel notes: [`docs/PHYSICS.md`](docs/PHYSICS.md).
 
 ## Tuning knobs
 
@@ -75,9 +83,14 @@ Most feel-critical constants are grouped deliberately:
 
 | What | Where |
 |---|---|
-| Speed envelope, drag | `GRAV`, `SOFT_CAP`, `DRAG_K` in `game.ts` |
+| Two-wheel contact / hop stick | `vehiclePhysics.ts` |
+| Fork / rear spring & loads | `DH_FORK`, `DH_REAR`, `axleLoads` in `bikeDynamics.ts` |
+| Speed envelope, drag | `GRAV`, `SOFT_CAP`, `DRAG_K` in `physics.ts` |
 | State physics | `STATE_RULES` in `bikeState.ts` |
 | Collision outcomes | `BONK_TUNING` in `bonk.ts` |
+| Rider attach / G-body | `limbPhysics.ts` |
+| Stance / IK mounts | `PELVIS_REST`, `solveRiderIK` in `models.ts` |
+| Placings / knockout | `raceManager.ts` |
 | Crash feel | `CRASH_PROFILES` in `crash.ts` |
 | AI difficulty | `AI_TIERS` in `ai.ts` |
 | LOD distances | `reg()` calls in `buildScenery()` |

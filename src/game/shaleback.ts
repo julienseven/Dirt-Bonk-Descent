@@ -75,8 +75,8 @@ export const SHALEBACK_SECTIONS: Zone[] = [
     width: 18, rough: 0.30, steep: 0.020, surface: 'dirt',
     treeDensity: 0.12, treeType: 'mixed', rockDensity: 0.10,
     crowd: 2.8, fog: 0.7,
-    features: ['table', 'kicker'],
-    props: ['ramp', 'cone', 'bale', 'sign'],
+    features: ['table', 'kicker', 'double', 'berm'],
+    props: ['ramp', 'cone', 'bale', 'sign', 'barrier'],
     twist: 0.2,
   },
   {
@@ -132,8 +132,8 @@ export const SHALEBACK_SECTIONS: Zone[] = [
     width: 19, rough: 0.35, steep: 0.095, surface: 'dirt',
     treeDensity: 0.15, treeType: 'mixed', rockDensity: 0.08,
     crowd: 3.0, fog: 0.65,
-    features: ['kicker', 'table', 'roller'],
-    props: ['fence', 'cone', 'bale', 'ramp'],
+    features: ['kicker', 'table', 'roller', 'double', 'berm'],
+    props: ['fence', 'cone', 'bale', 'ramp', 'sign'],
     twist: 0.35,
   },
 ];
@@ -147,14 +147,22 @@ export const SHALEBACK_SETPIECES: {
 }[] = [
   // 01 — a steep launch off the gate to set the tone immediately
   { kind: 'kicker', at: 0.040, len: 16, h: 2.4, depth: 0 },
+  // 02 — whoops into pine panic
+  { kind: 'whoops', at: 0.110, len: 28, h: 0.65, depth: 0 },
   // 03 — technical double through the rocks
   { kind: 'double', at: 0.238, len: 32, h: 2.2, depth: 1.1 },
+  // 04 — bridge roller (forces weight shift mid-fight)
+  { kind: 'roller', at: 0.325, len: 18, h: 1.0, depth: 0 },
   // 05 — THE showpiece: a genuinely enormous gap
   { kind: 'gap', at: 0.392, len: 88, h: 5.6, depth: 7.5 },
   // 05 — landing roller so you can pump out of it
   { kind: 'roller', at: 0.432, len: 24, h: 1.2, depth: 0 },
+  // 08 — cliffside kicker (commit or scrub)
+  { kind: 'kicker', at: 0.690, len: 18, h: 2.8, depth: 0 },
   // 09 — big tabletop in the middle of the brawl
   { kind: 'table', at: 0.795, len: 52, h: 3.4, depth: 0 },
+  // 09 — second double so the canyon isn't one note
+  { kind: 'double', at: 0.840, len: 30, h: 2.0, depth: 1.0 },
   // 10 — final launch at the crowd
   { kind: 'kicker', at: 0.952, len: 20, h: 3.6, depth: 0 },
 ];

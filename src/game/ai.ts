@@ -287,4 +287,307 @@ export const tierFromLegacy = (d: string): AiTier =>
   : d === 'savage' ? 'absurd'
   : 'pro';
 
-void clamp;
+// ---------------------------------------------------------------------------
+// Pure rival controller (planning only — no scene graph / audio / FX)
+//
+// game.ts samples the world, calls planRivalThink / planRivalCombat, then
+// applies the returned intents via stepRacer + resolveContact.
+// ---------------------------------------------------------------------------
+
+/** Minimal obstacle slice the planner needs. */
+export interface AiObstacle {
+  s: number;
+  x: number;
+  r: number;
+  hit: number;
+  gone: boolean;
+  mass: number;
+  /** 'surface' | 'launch' | other — surface/launch are not steered around */
+  reaction: string;
+}
+
+export interface AiShortcut {
+  s0: number;
+  s1: number;
+  side: number;
+  width: number;
+}
+
+export interface AiNeighbour {
+  s: number;
+  x: number;
+  y: number;
+  grounded: boolean;
+  vx: number;
+  isPlayer: boolean;
+  finished: boolean;
+  crash: number;
+  /** stable index into the caller's racer list */
+  index: number;
+}
+
+export interface RivalPlanState {
+  s: number;
+  x: number;
+  v: number;
+  vx: number;
+  y: number;
+  grounded: boolean;
+  airTime: number;
+  crash: number;
+  stun: number;
+  finished: boolean;
+  skill: number;
+  corner: number;
+  aggression: number;
+  aiOffset: number;
+  aiSeed: number;
+  aiSteer: number;
+  wantSteer: number;
+  aiHopCd: number;
+  scCommit: number;
+  trickSpin: number;
+  mood: { line: number; swing: number; send: number };
+  moodCd: number;
+  brain: AiBrain | null;
+}
+
+export interface RivalWorldSample {
+  halfWidth: number;
+  curvAhead: number;
+  playerS: number;
+  playerX: number;
+  raceTime: number;
+  time: number;
+  combatZone: boolean;
+  modeAggression: number;
+  /** rubber-band scale from save difficulty */
+  bandK: number;
+  skillMin: number;
+  skillMax: number;
+  obstacles: AiObstacle[];
+  /** first index where o.s >= rival.s + 2 (caller may pass full list) */
+  firstObstacle: number;
+  nearestShortcut: AiShortcut | null;
+  neighbours: AiNeighbour[];
+  dt: number;
+  /** 0..1 rng samples — caller supplies so pure code stays deterministic */
+  rng: () => number;
+}
+
+export interface RivalControlIntent {
+  steer: number;
+  pedal: boolean;
+  brake: boolean;
+  tuck: boolean;
+  hop: boolean;
+  /** updated cached plan fields to write back on the racer */
+  aiSteer: number;
+  wantSteer: number;
+  aiPedal: boolean;
+  aiBrake: boolean;
+  aiTuck: boolean;
+  aiCap: number;
+  aiHopCd: number;
+  scCommit: number;
+  trickSpin: number;
+  mood: { line: number; swing: number; send: number };
+  moodCd: number;
+  skill: number;
+}
+
+export interface RivalCombatIntent {
+  /** neighbour index to swing at, or -1 */
+  targetIndex: number;
+  bonkDir: number;
+  /** cooldown to write if a swing was chosen */
+  bonkCd: number;
+}
+
+/**
+ * Plan one rival frame: line, speed, hop, tricks. Pure — no mutation of
+ * external objects beyond returning the next state snapshot.
+ */
+export function planRivalThink(
+  r: RivalPlanState,
+  w: RivalWorldSample,
+): RivalControlIntent {
+  const B = r.brain;
+  const hw = w.halfWidth;
+  const curvAhead = w.curvAhead;
+
+  // ---- CHAOS AGENT mood -------------------------------------------------
+  let mood = r.mood;
+  let moodCd = r.moodCd - w.dt;
+  if (B && B.p.id === 'chaos' && moodCd <= 0) {
+    moodCd = 1.6 + w.rng() * 2.8;
+    const m = w.rng();
+    if (m < 0.25) mood = { line: 0.2, swing: 2.2, send: 1.3 };
+    else if (m < 0.5) mood = { line: 1.4, swing: 0.3, send: 1.2 };
+    else if (m < 0.75) mood = { line: 0.6, swing: 0.8, send: 0.5 };
+    else mood = { line: 0.9, swing: 1.4, send: 1.6 };
+  }
+  const moodLine = B?.p.id === 'chaos' ? mood.line : 1;
+
+  // ---- LINE ------------------------------------------------------------
+  const apex = Math.sign(curvAhead) * Math.min(hw * 0.55, Math.abs(curvAhead) * 2200);
+  const quality = clamp01((B ? B.line : r.corner) * moodLine);
+  let targetX = apex * quality;
+  targetX += r.aiOffset * hw * 0.55 * (1 - quality * 0.6);
+  const wander = B ? B.wander : (1.6 - r.corner);
+  targetX += Math.sin(w.time * 0.7 + r.aiSeed) * hw * 0.12 * wander;
+
+  // ---- SHORTCUTS -------------------------------------------------------
+  let scCommit = r.scCommit;
+  if (B) {
+    if (scCommit > 0) {
+      scCommit -= w.dt;
+      const sc = w.nearestShortcut;
+      if (sc) targetX = sc.side * (hw + sc.width * 0.5);
+    } else {
+      const sc = w.nearestShortcut;
+      if (sc && sc.s0 - r.s > 4 && sc.s0 - r.s < 26 && w.rng() < B.shortcut * w.dt * 3) {
+        scCommit = (sc.s1 - r.s) / Math.max(8, r.v) + 0.5;
+      }
+    }
+  }
+
+  // ---- OBSTACLES -------------------------------------------------------
+  const obs = w.obstacles;
+  for (let i = w.firstObstacle; i < obs.length; i++) {
+    const o = obs[i];
+    if (o.s - r.s > 34) break;
+    if (o.hit > 0 || o.gone) continue;
+    if (o.reaction === 'surface' || o.reaction === 'launch') continue;
+    if (Math.abs(o.x - targetX) < o.r + 1.4) {
+      targetX += (targetX > o.x ? 1 : -1) * (o.r + 2.2);
+    }
+  }
+
+  // ---- COMBAT ZONE: hunt player line -----------------------------------
+  if (w.combatZone) {
+    const dp = w.playerS - r.s;
+    if (Math.abs(dp) < 26) {
+      targetX = targetX + (w.playerX - targetX) * (0.55 * r.aggression);
+    }
+  }
+
+  targetX = clamp(targetX, scCommit > 0 ? -hw * 2 : -hw * 0.86,
+    scCommit > 0 ? hw * 2 : hw * 0.86);
+  const rawSteer = clamp((targetX - r.x) * 0.42 - r.vx * 0.18, -1, 1);
+  const wantSteer = rawSteer;
+  const react = B ? B.reaction : 0.2;
+  const steer = react > 0.01
+    ? dampLocal(r.aiSteer, wantSteer, 1 / Math.max(0.02, react), w.dt)
+    : rawSteer;
+
+  // ---- RUBBER BAND + SPEED CAP -----------------------------------------
+  const rel = w.playerS - r.s;
+  const bk = B ? B.bandK : w.bandK;
+  const band2 = clamp(rel * 0.0024 * bk, -0.10 * bk, 0.15 * bk);
+  const skill = clamp(r.skill + band2, w.skillMin, w.skillMax);
+  const aiCap = B ? B.cap * (1 + band2 * 0.5) : 20.5 + skill * 12.5;
+  const early = w.raceTime < 28
+    ? 1 - clamp01(w.raceTime / 28) * 0.35
+    : 1;
+  const wantSpeed = aiCap * (0.88 + early * 0.12);
+  const grip = B ? B.cornerGrip : 15 + r.corner * 9;
+  const cornerLimit = Math.abs(curvAhead) > 0.0002
+    ? Math.sqrt(grip / Math.abs(curvAhead)) : 999;
+  const caution = B ? B.caution : 0.5;
+  const hazardAhead = aiHazardInPath(r.s, r.x, 12 + r.v * 0.9, obs, w.firstObstacle);
+  const brakeFor = hazardAhead ? caution * 0.35 : 0;
+  const pedal = r.v < wantSpeed * (1 - brakeFor);
+  const brake = (r.v > Math.min(wantSpeed * 1.1, cornerLimit * (1 - caution * 0.12))
+    && Math.abs(curvAhead) > 0.008) || (hazardAhead && caution > 0.6);
+  const tuck = !brake && Math.abs(curvAhead) < 0.005 && r.v > 18;
+
+  // ---- TRICKS (hop is planRivalHop — needs terrain height from engine) --
+  let trickSpin = r.trickSpin;
+  if (!r.grounded && r.airTime > 0.22 && B && trickSpin === 0) {
+    if (w.rng() < B.trick) {
+      trickSpin = (w.rng() < 0.5 ? -1 : 1) * (2 + B.tier.trickSkill * 7);
+    }
+  }
+  if (r.grounded) trickSpin = 0;
+
+  return {
+    steer, pedal, brake, tuck, hop: false,
+    aiSteer: steer, wantSteer, aiPedal: pedal, aiBrake: brake, aiTuck: tuck,
+    aiCap, aiHopCd: r.aiHopCd - w.dt, scCommit, trickSpin, mood, moodCd, skill,
+  };
+}
+
+/** Lip hop decision — pure. `deltaH` = height at s+6 minus height at s. */
+export function planRivalHop(
+  grounded: boolean,
+  aiHopCd: number,
+  sendiness: number,
+  deltaH: number,
+  rng: () => number,
+): { hop: boolean; aiHopCd: number } {
+  let cd = aiHopCd;
+  if (!grounded || cd > 0) return { hop: false, aiHopCd: Math.max(0, cd) };
+  if (deltaH > 0.9 && rng() < sendiness) {
+    return { hop: true, aiHopCd: 0.8 };
+  }
+  return { hop: false, aiHopCd: cd };
+}
+
+/**
+ * Combat swing pick — pure. Returns who to bonk (or -1).
+ * Caller owns bonkCd countdown; only call when bonkCd <= 0 and crash/stun clear.
+ */
+export function planRivalCombat(
+  r: RivalPlanState,
+  w: RivalWorldSample,
+  bonkCd: number,
+): RivalCombatIntent {
+  if (bonkCd > 0 || r.crash > 0 || r.stun > 0) {
+    return { targetIndex: -1, bonkDir: 0, bonkCd };
+  }
+  const B = r.brain;
+  const moodSwing = B?.p.id === 'chaos' ? r.mood.swing : 1;
+  const earlyFight = w.raceTime < 35 ? 1.45 : 1;
+  const arena = (w.combatZone ? 2.3 : 1) * earlyFight;
+  const modeK = w.modeAggression;
+
+  for (const other of w.neighbours) {
+    if (other.crash > 0 || other.finished) continue;
+    const ds = other.s - r.s, dx = other.x - r.x;
+    if (Math.abs(ds) > 3.4 || Math.abs(dx) > 3.6) continue;
+    if (Math.abs(other.y - r.y) > 2.4) continue;
+    const spite = other.s > r.s ? 1.5 : 0.7;
+    const focus = other.isPlayer ? 1 + (B ? B.playerFocus * 2.2 : 0) : 1;
+    const vulnerable = (!other.grounded || Math.abs(other.vx) > 5) ? 1.8 : 1;
+    const timing = B ? 1 + (vulnerable - 1) * B.tier.combatSkill : 1;
+    const rate = (B ? B.swingRate : r.aggression)
+      * spite * arena * modeK * focus * timing * moodSwing;
+    if (w.rng() < rate * w.dt * 1.6) {
+      return {
+        targetIndex: other.index,
+        bonkDir: Math.sign(dx) || 1,
+        bonkCd: 1.6,
+      };
+    }
+  }
+  return { targetIndex: -1, bonkDir: 0, bonkCd };
+}
+
+/** Solid hazard in path within reach (mass ≥ 100). */
+export function aiHazardInPath(
+  s: number, x: number, reach: number,
+  obs: AiObstacle[], first: number,
+): boolean {
+  for (let i = first; i < obs.length; i++) {
+    const o = obs[i];
+    if (o.s - s > reach) break;
+    if (o.gone || o.mass < 100) continue;
+    if (Math.abs(o.x - x) < o.r + 1.2) return true;
+  }
+  return false;
+}
+
+function dampLocal(a: number, b: number, rate: number, dt: number): number {
+  return a + (b - a) * (1 - Math.exp(-rate * dt));
+}
