@@ -804,6 +804,7 @@ export const BIKE_SHAPE_DEFAULT: BikeShape = {
 
 /**
  * Per-class character, keyed by garage bike id.
+ * Magnitudes are pushed hard so silhouettes read at chase + garage distance.
  *
  *   HORNET  the reference frame — the other three are read against it
  *   SLAB    scaffolding: fat slabbed beams, a truss, wide stays, high bars
@@ -812,9 +813,9 @@ export const BIKE_SHAPE_DEFAULT: BikeShape = {
  */
 const BIKE_SHAPES: Record<string, Omit<BikeShape, 'tube'>> = {
   hornet: { sectionX: 1.00, sectionZ: 1.00, truss: false, gusset: true,  drop:  0.000, reach:  0.00, rise:  0.000, barW: 1.00, spread: 1.00 },
-  slab:   { sectionX: 1.45, sectionZ: 1.02, truss: true,  gusset: true,  drop: -0.030, reach: -0.02, rise:  0.036, barW: 1.14, spread: 1.28 },
-  wisp:   { sectionX: 0.70, sectionZ: 1.15, truss: false, gusset: false, drop:  0.020, reach: -0.05, rise:  0.012, barW: 0.94, spread: 0.80 },
-  bolt:   { sectionX: 1.06, sectionZ: 1.20, truss: false, gusset: true,  drop:  0.085, reach:  0.06, rise: -0.032, barW: 1.06, spread: 1.06 },
+  slab:   { sectionX: 1.72, sectionZ: 1.10, truss: true,  gusset: true,  drop: -0.048, reach: -0.05, rise:  0.062, barW: 1.26, spread: 1.48 },
+  wisp:   { sectionX: 0.52, sectionZ: 1.30, truss: false, gusset: false, drop:  0.042, reach: -0.09, rise:  0.022, barW: 0.86, spread: 0.62 },
+  bolt:   { sectionX: 1.14, sectionZ: 1.38, truss: false, gusset: true,  drop:  0.125, reach:  0.12, rise: -0.055, barW: 1.14, spread: 1.16 },
 };
 
 /**
@@ -825,8 +826,9 @@ const BIKE_SHAPES: Record<string, Omit<BikeShape, 'tube'>> = {
  */
 export function shapeForBike(id: string, tubeScale = 1): BikeShape {
   const s = BIKE_SHAPES[id] ?? BIKE_SHAPES.hornet;
-  const t = 1 + (tubeScale - 1) * 2.0;
-  return { ...s, tube: Math.max(0.5, Math.min(1.7, t)) };
+  // 2.6× deviation so Wisp/Slab/Bolt tubes diverge hard in 3/4 + chase cam
+  const t = 1 + (tubeScale - 1) * 2.6;
+  return { ...s, tube: Math.max(0.42, Math.min(1.85, t)) };
 }
 
 export function createRider(
@@ -954,7 +956,9 @@ export function createRider(
   }
 
   // Cable stops along the downtube (tiny nubs → "real bike" at garage distance)
-  for (const t of [0.28, 0.52, 0.74]) {
+  // Wisp skips most hardware — sparseness is the freeride tell.
+  const cableTs = sh.tube < 0.85 ? [0.5] : [0.28, 0.52, 0.74];
+  for (const t of cableTs) {
     const p = V(
       0.03 * sh.sectionX,
       BB.y + (HB.y - BB.y) * t,
@@ -963,6 +967,35 @@ export function createRider(
     const stop = new THREE.Mesh(new THREE.SphereGeometry(0.012, 5, 4), mDark);
     stop.position.copy(p);
     frame.add(stop);
+  }
+
+  // Class badge on the downtube — colour + plate size sell identity at a glance
+  {
+    const plateW = 0.06 + sh.sectionX * 0.04;
+    const plateH = 0.028 + sh.tube * 0.01;
+    const plate = new THREE.Mesh(
+      new THREE.BoxGeometry(plateW, plateH, 0.08),
+      mHub,
+    );
+    plate.position.set(
+      0.045 * sh.sectionX,
+      BB.y + (HB.y - BB.y) * 0.42,
+      BB.z + (HB.z - BB.z) * 0.42,
+    );
+    // Align roughly with downtube pitch
+    plate.rotation.x = Math.atan2(HB.z - BB.z, HB.y - BB.y);
+    frame.add(plate);
+  }
+
+  // Slab / heavy: extra downtube armour plate (reads as scaffolding mass)
+  if (sh.truss) {
+    const armour = new THREE.Mesh(
+      new THREE.BoxGeometry(0.04 * sh.sectionX, 0.055, 0.22),
+      mDark,
+    );
+    armour.position.set(0, BB.y + 0.18, BB.z + 0.14);
+    armour.rotation.x = 0.55;
+    frame.add(armour);
   }
 
   // Fully dropped MTB seat: short post + clamp + narrow saddle aft of BB
@@ -1098,6 +1131,15 @@ export function createRider(
   crown.scale.set(1, 1, 1.2);
   crown.position.set(0, 0.01, 0.01);
   fork.add(crown);
+
+  // Dual-crown tell for long/low or heavy frames (Bolt + Slab)
+  if (sh.drop > 0.05 || sh.truss) {
+    const lowerCrown = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.032 * sh.tube, 0.20 * sh.spread, 3, 8), mDark);
+    lowerCrown.rotation.z = Math.PI / 2;
+    lowerCrown.position.set(0, -0.08, 0.02);
+    fork.add(lowerCrown);
+  }
 
   // Steerer stub up into the head tube / stem
   fork.add(tube(V(0, 0.0, 0), V(0, 0.22, -0.04), 0.028 * sh.tube, mDark, 6));

@@ -1,20 +1,21 @@
 {
-  "updated": "2026-08-11T14:30:00Z",
-  "stage": 14,
-  "stageName": "Playtest + race harness + theme AI + mobile + freeze",
+  "updated": "2026-08-11T16:00:00Z",
+  "stage": 15,
+  "stageName": "Start pack + MTB identity + content freeze",
   "percent": 100,
   "log": [
-    "Balance audit gates on all mountains (elev/width/identity)",
-    "Full-race harness: pack finishes every course",
-    "Theme-aware AI: pace/caution/send/combat per world",
-    "Mobile: touch detect + perf floor + control scale CSS",
+    "Shoulder-to-shoulder start (KO staggered, TA solo gate)",
+    "Launch pack FX: dirt, whoosh, holeshot kick",
+    "MTB frame silhouette + per-class bike shapes (Slab/Wisp/Bolt)",
+    "Standing logs removed from all prop lists",
+    "Garage clean product studio (no landscape backdrop)",
     "verify: physics + race + typecheck + build"
   ],
   "items": [
-    { "id": "playtest", "title": "Soft playtest audit", "note": "npm run audit:tracks", "status": "done" },
-    { "id": "harness", "title": "Full-race harness", "note": "npm run test:race", "status": "done" },
-    { "id": "theme-ai", "title": "Theme-aware AI", "note": "themeAiFeel live in plan", "status": "done" },
-    { "id": "mobile", "title": "Mobile validation", "note": "floor + touch + CSS", "status": "done" },
-    { "id": "freeze", "title": "Ship freeze bar", "note": "verify includes race", "status": "done" }
+    { "id": "start-grid", "title": "Mode-aware start grid", "note": "pack / KO / solo", "status": "done" },
+    { "id": "start-juice", "title": "Start-line launch polish", "note": "launchPack()", "status": "done" },
+    { "id": "bike-class", "title": "Bike class silhouettes", "note": "shape + badge + dual crown", "status": "done" },
+    { "id": "no-logs", "title": "Remove standing logs", "note": "env + zones", "status": "done" },
+    { "id": "freeze", "title": "Content freeze docs", "note": "progress + README", "status": "done" }
   ]
 }
