@@ -31,7 +31,8 @@ export const IRONJAW_SECTIONS: Zone[] = [
     crowd: 0.3, fog: 0.95,
     features: ['whoops', 'berm', 'roller'],
     props: ['rock', 'boulder', 'rock'],
-    twist: 1.15,
+    // early high line for riders who commit on the scree
+    secret: true, twist: 1.25,
     setpiece: 'CANYON CUT',
   },
   {
@@ -63,12 +64,13 @@ export const IRONJAW_SECTIONS: Zone[] = [
     name: '05 LONG BURN', sub: 'SAVE YOUR BOOST',
     t0: 0.36, t1: 0.48,
     dirt: 0x8a7458, verge: 0x688048, far: 0x486030,
-    width: 15, rough: 0.55, steep: 0.015, surface: 'dirt',
-    treeDensity: 0.25, treeType: 'mixed', rockDensity: 0.30,
-    crowd: 0.5, fog: 0.85,
-    features: ['berm', 'roller', 'whoops'],
+    // false-flat release: wider, gentler — then THE TEETH punishes early boost
+    width: 16, rough: 0.45, steep: 0.010, surface: 'dirt',
+    treeDensity: 0.22, treeType: 'mixed', rockDensity: 0.25,
+    crowd: 0.5, fog: 0.80,
+    features: ['berm', 'roller', 'whoops', 'kicker'],
     props: ['fence', 'log', 'sign'],
-    twist: 0.85,
+    twist: 0.75,
     setpiece: 'KICKER RIDGE',
   },
   {

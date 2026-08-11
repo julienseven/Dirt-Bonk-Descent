@@ -350,12 +350,13 @@ export function Results({
     rows.splice(1, 0, ['MARGIN', `${d.gap < 0.01 ? '<0.01' : d.gap.toFixed(2)}s`]);
   }
   const photo = !cut && isFinite(d.gap) && d.gap < 0.75;
+  const mtn = getMountain(save.mountain);
   const banner = cut
     ? 'CUT FROM THE FIELD'
     : photo ? 'DECIDED BY INCHES'
-    : win ? 'YOU TOOK THE MOUNTAIN'
+    : win ? mtn.finishHook
     : 'RUN COMPLETE';
-  const accent = cut ? '#ff6a00' : win ? '#ffd400' : '#ff2e88';
+  const accent = cut ? '#ff6a00' : win ? mtn.tint : '#ff2e88';
   const modeName = MODES.find(m => m.id === d.modeId)?.name ?? 'DESCENT';
   return (
     <div className="screen-pad absolute inset-0 z-20 flex items-center justify-center"

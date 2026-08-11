@@ -463,7 +463,10 @@ export class Track {
       let sum = 0, samples = 0;
       for (let k = s; k < s + span; k += 10) { sum += this.curvatureAt(k); samples++; }
       const avg = sum / Math.max(1, samples);
-      if (Math.abs(avg) < 0.0075) continue;
+      // slightly looser so technical / low-twist mountains still get
+      // meaningful off-piste lines (audit: several courses only had the
+      // authored SECRET SEND and nothing else)
+      if (Math.abs(avg) < 0.0055) continue;
 
       // don't overlap a gap / table / double
       let blocked = false;
@@ -474,8 +477,13 @@ export class Track {
         }
       }
       if (blocked) continue;
-      // keep them apart
-      if (this.shortcuts.length && s - this.shortcuts[this.shortcuts.length - 1].s1 < 260) continue;
+      // keep them apart (check ALL existing, not just the last — authored
+      // SECRET SEND lives mid-mountain and used to block every earlier cut)
+      let tooClose = false;
+      for (const sc of this.shortcuts) {
+        if (s < sc.s1 + 200 && s + span > sc.s0 - 200) { tooClose = true; break; }
+      }
+      if (tooClose) continue;
 
       // outside of the corner: curvature > 0 bends toward +x, so outside is -x
       const side = avg > 0 ? -1 : 1;

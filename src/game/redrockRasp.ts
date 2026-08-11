@@ -50,7 +50,8 @@ export const REDROCK_SECTIONS: Zone[] = [
     crowd: 1.2, fog: 0.85,
     features: ['table', 'kicker', 'berm', 'roller'],
     props: ['cone', 'bale', 'ramp'],
-    twist: 0.7,
+    // shelf cut rewards looking left of the wash
+    secret: true, twist: 0.85,
   },
   {
     name: '05 RASP RIDGE', sub: 'EXPOSED',

@@ -56,7 +56,8 @@ export const LASTLIGHT_SECTIONS: Zone[] = [
     crowd: 0.4, fog: 0.75,
     features: ['berm', 'roller', 'whoops'],
     props: ['fence', 'rock', 'sign'],
-    twist: 0.70,
+    // golden line along the shelf lip
+    secret: true, twist: 0.95,
     setpiece: 'KICKER RIDGE',
   },
   {
@@ -113,27 +114,29 @@ export const LASTLIGHT_SECTIONS: Zone[] = [
   },
   {
     name: '09 FINAL SPINE', sub: 'KNIFE EDGE',
-    t0: 0.84, t1: 0.93,
+    t0: 0.84, t1: 0.92,
     dirt: 0x7a5840, verge: 0x5a6a38, far: 0x4a5230,
-    width: 10, rough: 0.50, steep: 0.055, surface: 'gravel',
-    treeDensity: 0.05, treeType: 'none', rockDensity: 0.60,
-    crowd: 1.0, fog: 0.65,
+    // true knife-edge: single line, drops both sides
+    width: 8.5, rough: 0.45, steep: 0.060, surface: 'gravel',
+    treeDensity: 0.0, treeType: 'none', rockDensity: 0.55,
+    crowd: 1.2, fog: 0.60,
     features: ['whoops', 'kicker', 'berm'],
     props: ['rock', 'barrier'],
-    twist: 0.40,
-    dropSide: 0, dropDepth: 5.5,
+    twist: 0.35,
+    dropSide: 0, dropDepth: 6.0,
     setpiece: 'CANYON CUT',
   },
   {
     name: '10 THE FINAL JUMP', sub: 'FLY TO THE FINISH',
-    t0: 0.93, t1: 1.001,
+    t0: 0.92, t1: 1.001,
     dirt: 0x8a7050, verge: 0x5a7a40, far: 0x4a6230,
-    width: 16, rough: 0.30, steep: 0.070, surface: 'dirt',
-    treeDensity: 0.10, treeType: 'mixed', rockDensity: 0.10,
-    crowd: 2.8, fog: 0.55,
+    // biggest finish on the range — open vista into the grandstands
+    width: 18, rough: 0.25, steep: 0.080, surface: 'dirt',
+    treeDensity: 0.08, treeType: 'mixed', rockDensity: 0.08,
+    crowd: 3.0, fog: 0.50,
     features: ['kicker', 'table', 'kicker'],
-    props: ['cone', 'bale', 'sign'],
-    twist: 0.15,
+    props: ['cone', 'bale', 'sign', 'fence'],
+    twist: 0.12,
     setpiece: 'FINISH FURY',
   },
 ];
@@ -146,7 +149,9 @@ export const LASTLIGHT_SETPIECES: ScriptedFeature[] = [
   { kind: 'whoops', at: 0.60, len: 24, h: 0.55, depth: 0 },
   { kind: 'double', at: 0.78, len: 28, h: 2.4, depth: 1.0 },
   { kind: 'table', at: 0.88, len: 40, h: 3.0, depth: 0 },
-  { kind: 'kicker', at: 0.96, len: 22, h: 4.8, depth: 0 },
+  // the money shot: bigger than Shaleback's final, framed by sunset
+  { kind: 'gap', at: 0.945, len: 70, h: 5.2, depth: 6.0 },
+  { kind: 'kicker', at: 0.985, len: 18, h: 3.6, depth: 0 },
 ];
 
 export const LASTLIGHT_LANDMARKS: TrackLandmark[] = [

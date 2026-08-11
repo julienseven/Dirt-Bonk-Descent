@@ -23,7 +23,7 @@ import {
   type Perf, type Loadout, computePerf, getBike, loadoutColors, RIDER_BUILD_OF,
 } from './garage';
 import { getMountain } from './mountains';
-import { buildMountainTrack, mountainAtmosphere } from './mountainsBuild';
+import { buildMountainTrack, mountainAtmosphere, getTrackDefinition } from './mountainsBuild';
 import {
   PROPS, PROP_SCORE, PROP_BOOST, PROP_CALL, patchSurface,
   type PropDef, type PropKind,
@@ -1946,6 +1946,9 @@ export class Game {
         this.finishBlast = false;
         audio.cheer(1.2);
         this.slowmo = Math.max(this.slowmo, 1.1);
+        // mountain-specific finish callout (identity beat at the line)
+        const mtn = getMountain(this.mountainId);
+        this.popup(mtn.finishHook, 'trick', null, mtn.tint);
         // if someone just beat us across, call it immediately; the winning
         // margin is resolved later once the chasers have landed too
         for (const o of this.racers) {
@@ -4306,9 +4309,14 @@ export class Game {
     }
 
     // ---------- text beats ----------
-    if (t < INTRO.rival) {
+    const mtn = getMountain(this.mountainId);
+    if (t < INTRO.swing + 0.4) {
+      // first beat: mountain name + identity hook (theme sell)
       h.introLine = '';
-      h.introSub = getMountain(this.mountainId).name;
+      h.introSub = mtn.name;
+    } else if (t < INTRO.rival) {
+      h.introLine = '';
+      h.introSub = mtn.introHook;
     } else if (t < INTRO.jump) {
       h.introLine = '';
       h.introSub = `${foe.name} SIZES YOU UP`;
@@ -4325,7 +4333,7 @@ export class Game {
       }
     } else {
       h.introLine = 'SEND IT.';
-      h.introSub = '';
+      h.introSub = mtn.themeLabel;
       if (!this.introSent) {
         this.introSent = true;
         audio.countBeep(true);
@@ -4354,7 +4362,8 @@ export class Game {
   }
 
   private introCamera(t: number, dt: number) {
-    this.rig.intro(this.track, this.player, t, dt);
+    const theme = getTrackDefinition(this.mountainId).theme;
+    this.rig.intro(this.track, this.player, t, dt, theme);
   }
 
   private updateCamera(dt: number, snap: boolean) {
@@ -4368,7 +4377,9 @@ export class Game {
     }
     if (phase === 'intro') return;                          // the cold open drives it
     if (this.player.finished && phase === 'race') {         // the finish sequence owns it
-      this.rig.finish(this.track, this.player, dt);
+      // Lastlight gets the epic pull-back so the sunset vista owns the frame
+      const epic = this.mountainId === 'lastlight';
+      this.rig.finish(this.track, this.player, dt, epic);
       return;
     }
     if (this.replayData && phase === 'finish') return;      // replay drives it

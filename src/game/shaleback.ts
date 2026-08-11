@@ -29,12 +29,13 @@ export const SHALEBACK_SECTIONS: Zone[] = [
     name: '02 PINE PANIC', sub: 'NO SIGHTLINES',
     t0: 0.075, t1: 0.185,
     dirt: 0x5f4a30, verge: 0x2f5a26, far: 0x1d3a19,
-    width: 11.5, rough: 1.35, steep: 0.030, surface: 'dirt',
-    treeDensity: 1.60, treeType: 'pine', rockDensity: 0.35,
-    crowd: 0.35, fog: 1.55,
+    width: 11.5, rough: 1.30, steep: 0.030, surface: 'dirt',
+    treeDensity: 1.50, treeType: 'pine', rockDensity: 0.35,
+    // slight fog pullback for line readability at full speed
+    crowd: 0.35, fog: 1.40,
     features: ['whoops', 'kicker', 'berm', 'roller'],
     props: ['log', 'fence', 'rock', 'sign'],
-    twist: 1.55,
+    twist: 1.50,
     setpiece: 'PINE PLUNGE',
   },
   {
@@ -46,7 +47,8 @@ export const SHALEBACK_SECTIONS: Zone[] = [
     crowd: 0.6, fog: 0.95,
     features: ['whoops', 'roller', 'kicker', 'berm'],
     props: ['rock', 'boulder', 'barrier', 'rock'],
-    twist: 1.20,
+    // technical off-camber cut through the rocks
+    secret: true, twist: 1.25,
     setpiece: 'CANYON CUT',
   },
   {

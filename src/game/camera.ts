@@ -200,29 +200,37 @@ export class CameraRig {
     return s;
   }
 
-  /** The cold open. Beat-sheet driven; `t` is seconds into the intro. */
-  intro(trk: Track, p: CamRider, t: number, dt: number) {
+  /**
+   * The cold open. Beat-sheet driven; `t` is seconds into the intro.
+   * `theme` shifts the opening wide shot so each mountain's first frame
+   * sells its identity (spine silhouette vs forest canopy vs caldera).
+   */
+  intro(trk: Track, p: CamRider, t: number, dt: number, theme = 'alpine') {
     const first = t < dt * 2;
     const rate = first ? 999 : 3.2;
     let cs: number, cx: number, ch: number, ls: number, lx: number, lh: number, fov: number;
 
+    // theme-tuned opening: how far/high we start the hero silhouette
+    const open = introOpen(theme);
+
     if (t < INTRO.swing) {
       // low and in front, looking back up at the rider against the sky
       const k = clamp01(t / INTRO.swing);
-      cs = p.s + lerp(9, 5.5, k);
-      cx = p.x + lerp(3.4, 1.6, k);
-      ch = lerp(0.6, 1.5, k);
+      cs = p.s + lerp(open.front, 5.5, k);
+      cx = p.x + lerp(open.side, 1.6, k);
+      ch = lerp(open.height, 1.5, k);
       ls = p.s; lx = p.x; lh = 1.5;
-      fov = lerp(42, 50, k);
+      fov = lerp(open.fov, 50, k);
     } else if (t < INTRO.rival) {
-      // swing around behind, revealing the drop
+      // swing around behind, revealing the drop — look-ahead sells scale
       const k = smootherstep(clamp01((t - INTRO.swing) / (INTRO.rival - INTRO.swing)));
       const a = lerp(0, Math.PI, k);
-      cs = p.s + Math.cos(a) * 6.5;
-      cx = p.x + Math.sin(a) * 5.0;
-      ch = lerp(1.5, 3.1, k);
-      ls = p.s + 14; lx = p.x; lh = 0.4;
-      fov = lerp(50, 62, k);
+      const radius = open.swingR;
+      cs = p.s + Math.cos(a) * radius;
+      cx = p.x + Math.sin(a) * (radius * 0.77);
+      ch = lerp(1.5, open.swingH, k);
+      ls = p.s + open.lookAhead; lx = p.x; lh = open.lookH;
+      fov = lerp(50, open.swingFov, k);
     } else if (t < INTRO.jump) {
       // two-shot: both riders in frame
       cs = p.s - 5.4; cx = p.x - 1.4; ch = 2.5;
@@ -318,33 +326,34 @@ export class CameraRig {
 
   /**
    * FINISH CAMERA. Pulls back and rises as the rider crosses, then swings
-   * around to the side so the carve and the victory pose are both in frame.
-   * Deliberately slow rates — the whole point is that it feels like the
-   * camera is savouring the moment rather than tracking a race.
+   * around to the carve side so the carve and the victory pose are both in
+   * frame. `epic` (Lastlight) pulls further and slower so the sunset vista
+   * owns the final frame.
    */
-  finish(trk: Track, p: CamRider, dt: number) {
+  finish(trk: Track, p: CamRider, dt: number, epic = false) {
     const t = p.finishRoll;
 
     // 0-1.0s: drop back and up, still behind
     // 1.0s+ : arc around to the carve side, framing the rider three-quarter
-    const arc = smootherstep(clamp01((t - 1.0) / 2.4));
-    const back = lerp(8.5, 13.5, clamp01(t / 2.5));
-    const height = lerp(3.0, 6.2, clamp01(t / 3.0));
-    const side = arc * 9 * -p.finishCarve;
+    const arc = smootherstep(clamp01((t - 1.0) / (epic ? 3.2 : 2.4)));
+    const back = lerp(epic ? 10 : 8.5, epic ? 18 : 13.5, clamp01(t / (epic ? 3.4 : 2.5)));
+    const height = lerp(epic ? 3.6 : 3.0, epic ? 9.5 : 6.2, clamp01(t / (epic ? 4.0 : 3.0)));
+    const side = arc * (epic ? 12 : 9) * -p.finishCarve;
 
     const cs = p.s - back;
     const cx = p.x + side;
-    this.dampPos(trk.worldPos(cs, cx, trk.heightAt(cs, cx) + height, _v1), 2.6, 2.6, dt);
+    this.dampPos(trk.worldPos(cs, cx, trk.heightAt(cs, cx) + height, _v1), epic ? 2.0 : 2.6, epic ? 2.0 : 2.6, dt);
 
     // look slightly ahead of the rider early, then settle onto them
-    const lookS = p.s + lerp(6, 0.5, arc);
-    this.dampLook(trk.worldPos(lookS, p.x, trk.heightAt(lookS, p.x) + 1.6, _v2), 3.2, dt);
+    // epic: keep looking past the rider into the valley a beat longer
+    const lookS = p.s + lerp(epic ? 10 : 6, epic ? 1.2 : 0.5, arc);
+    this.dampLook(trk.worldPos(lookS, p.x, trk.heightAt(lookS, p.x) + (epic ? 1.2 : 1.6), _v2), epic ? 2.4 : 3.2, dt);
 
     this.camera.position.copy(this.pos);
     this.applyShake(dt, 0.7, false);
     this.roll = damp(this.roll, arc * 0.05 * p.finishCarve, 2, dt);
-    // widen slightly as we pull out, so the mountain comes back into frame
-    this.commit(lerp(70, 58, clamp01(t / 2.5)), 2.2, dt, false);
+    // widen as we pull out — epic ends wider so the whole spine is in frame
+    this.commit(lerp(epic ? 74 : 70, epic ? 52 : 58, clamp01(t / (epic ? 3.5 : 2.5))), epic ? 1.6 : 2.2, dt, false);
   }
 
   /**
@@ -367,5 +376,27 @@ export class CameraRig {
     this.camera.position.copy(this.pos);
     this.roll = shot === 2 ? 0.06 : 0;
     this.commit(shot === 3 ? 52 : 64, 3, dt, false);
+  }
+}
+
+/** Per-theme cold-open framing. */
+function introOpen(theme: string) {
+  switch (theme) {
+    case 'volcanic':
+      // lower, closer to the ash — heat and ground
+      return { front: 8, side: 2.8, height: 0.45, fov: 40, swingR: 6.2, swingH: 2.8, swingFov: 60, lookAhead: 12, lookH: 0.2 };
+    case 'forest':
+      // nestled, less sky — canopy owns the frame
+      return { front: 7.5, side: 2.4, height: 0.9, fov: 44, swingR: 5.8, swingH: 2.6, swingFov: 58, lookAhead: 10, lookH: 0.5 };
+    case 'limestone':
+      // high and wide — thin air, big walls
+      return { front: 11, side: 4.2, height: 1.1, fov: 38, swingR: 7.5, swingH: 3.8, swingFov: 66, lookAhead: 18, lookH: 0.1 };
+    case 'sunset':
+      // hero silhouette against the sky — trailer money shot
+      return { front: 12, side: 4.5, height: 0.35, fov: 36, swingR: 8.0, swingH: 4.2, swingFov: 68, lookAhead: 22, lookH: -0.2 };
+    case 'canyon':
+      return { front: 9.5, side: 3.6, height: 0.7, fov: 40, swingR: 6.8, swingH: 3.2, swingFov: 62, lookAhead: 15, lookH: 0.3 };
+    default: // alpine
+      return { front: 9, side: 3.4, height: 0.6, fov: 42, swingR: 6.5, swingH: 3.1, swingFov: 62, lookAhead: 14, lookH: 0.4 };
   }
 }
