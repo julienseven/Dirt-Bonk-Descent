@@ -15,6 +15,7 @@ import {
 } from './models';
 import { PROPS, THEME_PROPS, type PropKind } from './env';
 import { WORLD_MAT, attachWind, groundRough, type WindUniforms } from './riderMaterials';
+import type { TrackTheme, TrackLandmark, ScriptedFeature } from './trackDef';
 
 export const TRACK_LENGTH = 4600;
 const STEP = 3;
@@ -52,6 +53,12 @@ export interface Zone {
   twist?: number;
   /** rivals bunch up here — combat arena */
   combat?: boolean;
+  /**
+   * Explicit set-piece theme key for buildZoneSetPieces().
+   * When set, overrides name-based theme detection so authored mountains
+   * can share builders (e.g. volcanic 'CANYON CUT', forest 'PINE PLUNGE').
+   */
+  setpiece?: string;
 }
 
 export const ZONES: Zone[] = [
@@ -195,19 +202,33 @@ export class Track {
   /** section list for THIS mountain (authored or the generic default) */
   zones: Zone[] = ZONES;
   /** guaranteed set-pieces, as fractions of length */
-  private scripted: { kind: string; at: number; len: number; h: number; depth: number }[] = [];
+  private scripted: ScriptedFeature[] = [];
   /**
    * Mode-driven density multiplier for props + scenery hazards.
    * 1 = authored density; <1 Time Attack / Trick Jam; >1 Mayhem.
    */
   densityScale = 1;
+  /** Visual world identity (drives landmark builders + debug). */
+  theme: TrackTheme = 'alpine';
+  /** Hand-placed landmarks for this mountain. */
+  landmarks: TrackLandmark[] = [];
+  /** Summit elevation used when integrating the spline. */
+  startElevation = 980;
+  /** Stable mountain id for debug / HUD. */
+  mountainId = 'shaleback';
 
   constructor(
     seed = 20260114,
     length = TRACK_LENGTH,
     zones?: Zone[],
-    scripted?: { kind: string; at: number; len: number; h: number; depth: number }[],
+    scripted?: ScriptedFeature[],
     densityScale = 1,
+    meta?: {
+      theme?: TrackTheme;
+      landmarks?: TrackLandmark[];
+      startElevation?: number;
+      mountainId?: string;
+    },
   ) {
     this.rng = new RNG(seed);
     this.length = length;
@@ -215,6 +236,10 @@ export class Track {
     if (zones && zones.length) this.zones = zones;
     if (scripted) this.scripted = scripted;
     this.densityScale = Math.max(0.25, densityScale);
+    if (meta?.theme) this.theme = meta.theme;
+    if (meta?.landmarks) this.landmarks = meta.landmarks;
+    if (meta?.startElevation !== undefined) this.startElevation = meta.startElevation;
+    if (meta?.mountainId) this.mountainId = meta.mountainId;
     this.buildNodes();
     this.buildFeatures();
     this.buildShortcuts();
@@ -235,7 +260,7 @@ export class Track {
     this.zoneIdx = new Uint8Array(n);
 
     let heading = 0;
-    let x = 0, y = 980, z = 0;
+    let x = 0, y = this.startElevation, z = 0;
 
     for (let i = 0; i < n; i++) {
       const s = i * STEP;
@@ -864,11 +889,122 @@ export class Track {
     this.buildPropMeshes();
     this.buildSpectatorMeshes();
     this.buildZoneSetPieces();
+    this.buildLandmarks();
     this.buildBridges();
     this.buildWater();
     this.buildShortcutSigns();
     this.buildStartFinish();
     return this.group;
+  }
+
+  /**
+   * Dev overlay: centreline spline, half-width ribbons, section boundaries,
+   * shortcuts, jump features. Toggle via Track.debugGroup.visible.
+   */
+  debugGroup: THREE.Group | null = null;
+
+  buildDebugOverlay(): THREE.Group {
+    if (this.debugGroup) return this.debugGroup;
+    const g = new THREE.Group();
+    g.name = 'track-debug';
+
+    // centreline
+    const cPts: number[] = [];
+    for (let i = 0; i < this.count; i += 2) {
+      const s = i * STEP;
+      const h = this.heightAt(s, 0) + 0.4;
+      this.worldPos(s, 0, h, _v);
+      cPts.push(_v.x, _v.y, _v.z);
+    }
+    const cGeo = new THREE.BufferGeometry();
+    cGeo.setAttribute('position', new THREE.Float32BufferAttribute(cPts, 3));
+    g.add(new THREE.Line(
+      cGeo,
+      new THREE.LineBasicMaterial({ color: 0xffd400, depthTest: false }),
+    ));
+
+    // width edges
+    for (const side of [-1, 1] as const) {
+      const pts: number[] = [];
+      for (let i = 0; i < this.count; i += 3) {
+        const s = i * STEP;
+        const hw = this.hw[i];
+        const x = side * hw;
+        const h = this.heightAt(s, x) + 0.35;
+        this.worldPos(s, x, h, _v);
+        pts.push(_v.x, _v.y, _v.z);
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+      g.add(new THREE.Line(
+        geo,
+        new THREE.LineBasicMaterial({ color: 0x2fe6c8, depthTest: false }),
+      ));
+    }
+
+    // section boundaries
+    for (const Z of this.zones) {
+      const s = Z.t0 * this.length;
+      const hw = this.halfWidth(s);
+      const h = this.heightAt(s, 0) + 0.5;
+      const a = this.worldPos(s, -hw - 2, h, new THREE.Vector3());
+      const b = this.worldPos(s, hw + 2, h, new THREE.Vector3());
+      const geo = new THREE.BufferGeometry().setFromPoints([a, b]);
+      g.add(new THREE.Line(
+        geo,
+        new THREE.LineBasicMaterial({ color: 0xff2e88, depthTest: false }),
+      ));
+    }
+
+    // shortcuts
+    for (const sc of this.shortcuts) {
+      const mid = (sc.s0 + sc.s1) * 0.5;
+      const hw = this.halfWidth(mid);
+      const x = sc.side * (hw + sc.width * 0.5);
+      const h = this.heightAt(mid, x) + 1.2;
+      this.worldPos(mid, x, h, _v);
+      const m = new THREE.Mesh(
+        new THREE.SphereGeometry(1.2, 8, 6),
+        new THREE.MeshBasicMaterial({ color: 0xc0f000, depthTest: false }),
+      );
+      m.position.copy(_v);
+      g.add(m);
+    }
+
+    // features (jumps)
+    for (const f of this.features) {
+      if (f.kind !== 'gap' && f.kind !== 'table' && f.kind !== 'kicker' && f.kind !== 'double') continue;
+      const s = f.s0 + f.len * 0.5;
+      const h = this.heightAt(s, 0) + f.h + 1.5;
+      this.worldPos(s, 0, h, _v);
+      const m = new THREE.Mesh(
+        new THREE.ConeGeometry(1.0, 2.4, 6),
+        new THREE.MeshBasicMaterial({
+          color: f.kind === 'gap' ? 0xff6a00 : 0x9fd0ff,
+          depthTest: false,
+        }),
+      );
+      m.position.copy(_v);
+      g.add(m);
+    }
+
+    // landmarks
+    for (const lm of this.landmarks) {
+      const s = lm.at * this.length;
+      const h = this.heightAt(s, 0) + 3;
+      this.worldPos(s, 0, h, _v);
+      const m = new THREE.Mesh(
+        new THREE.OctahedronGeometry(1.6),
+        new THREE.MeshBasicMaterial({ color: 0xff2e88, depthTest: false }),
+      );
+      m.position.copy(_v);
+      g.add(m);
+    }
+
+    g.visible = false;
+    this.debugGroup = g;
+    this.group.add(g);
+    return g;
   }
 
   private colOffsets(hw: number): number[] {
@@ -1818,19 +1954,22 @@ export class Track {
       const Z = this.zones[zi];
       const s0 = Z.t0 * this.length, s1 = Z.t1 * this.length;
 
-      // Set-piece scenery is keyed by theme, so authored sections ("02 PINE
-      // PANIC") reuse the same builders as the generic ones ("PINE PLUNGE").
+      // Set-piece scenery is keyed by theme. Authored sections prefer an
+      // explicit setpiece tag; otherwise name-based detection covers the
+      // generic default course and loosely-named mountain sections.
       const n = Z.name.toUpperCase();
-      const theme =
-        /PINE/.test(n) ? 'PINE PLUNGE' :
-        /ROCK|CLIFF|CANYON/.test(n) ? 'CANYON CUT' :
-        /BONKYARD|SCRAP/.test(n) ? 'THE BONKYARD' :
-        /MUD/.test(n) ? 'MUDPIT MIRE' :
-        /HAY|FARM/.test(n) ? 'HAYSTACK HOLLOW' :
-        /BIG AIR/.test(n) ? 'BIG AIR' :
-        /KICKER/.test(n) ? 'KICKER RIDGE' :
-        /FINAL|FINISH/.test(n) ? 'FINISH FURY' :
-        /DROP|START/.test(n) ? 'START GATE' : '';
+      const theme = Z.setpiece
+        ?? (/PINE|THORN|ROOT|FOREST|BIRCH|ANCIENT/.test(n) ? 'PINE PLUNGE'
+          : /ROCK|CLIFF|CANYON|ASH|BASALT|IRON|JAW|TEETH|SCREE|CRAG|SPINE|COLLAPS/.test(n) ? 'CANYON CUT'
+          : /BONKYARD|SCRAP|PACK FIGHT|BONK/.test(n) ? 'THE BONKYARD'
+          : /MUD/.test(n) ? 'MUDPIT MIRE'
+          : /HAY|FARM/.test(n) ? 'HAYSTACK HOLLOW'
+          : /BIG AIR|RIDGE JUMP|FINAL JUMP|ERUPTION|GAP/.test(n) ? 'BIG AIR'
+          : /KICKER|WIND GAP/.test(n) ? 'KICKER RIDGE'
+          : /FINAL|FINISH|SUMMIT RUN|EMERGENCE|SEND/.test(n) ? 'FINISH FURY'
+          : /DROP|START|GATE|CALDERA|HIGH GATE|THE SPINE/.test(n) ? 'START GATE'
+          : /LAVA|CINDER|VOLCAN/.test(n) ? 'CANYON CUT'
+          : '');
 
       switch (theme) {
         case 'PINE PLUNGE': {
@@ -1849,10 +1988,18 @@ export class Track {
           break;
         }
         case 'BIG AIR': {
-          // ---- THE RAMP. Timber revetment walls flanking the launch, so
-          // the gap reads as a built structure you can see coming rather
-          // than a rise in the ground. Placed at the scripted gap.
-          const gapS = this.length * 0.392;
+          // Timber revetment at the largest gap inside this section (or the
+          // section mid-point if none). Works for Shaleback, Lastlight, etc.
+          let gapS = (s0 + s1) * 0.5;
+          let gapLen = 60;
+          for (const f of this.features) {
+            if (f.kind !== 'gap' && f.kind !== 'table') continue;
+            if (f.s0 < s0 || f.s0 > s1) continue;
+            if (f.len > gapLen || f.kind === 'gap') {
+              gapS = f.s0; gapLen = f.len;
+              if (f.kind === 'gap') break;
+            }
+          }
           for (let side = -1; side <= 1; side += 2) {
             for (let k = 0; k < 7; k++) {
               const s = gapS + k * 3.2;
@@ -1861,16 +2008,14 @@ export class Track {
                 new THREE.BoxGeometry(0.5, 2.2 + k * 0.55, 3.3), wood);
               put(wall, s, side * (hw + 0.9), (2.2 + k * 0.55) * 0.5 - 0.4);
             }
-            // landing-side marker posts
             for (let k = 0; k < 4; k++) {
-              const s = gapS + 62 + k * 4;
+              const s = gapS + gapLen * 0.7 + k * 4;
               const hw = this.halfWidth(s);
               const post = new THREE.Mesh(
                 new THREE.CylinderGeometry(0.13, 0.16, 3.4, 6), darkWood);
               put(post, s, side * (hw + 1.3), 1.7);
             }
           }
-          // huge sponsor gantry straddling the lip: reads from far uphill
           const hwG = this.halfWidth(gapS - 14);
           for (let side = -1; side <= 1; side += 2) {
             const tower = new THREE.Mesh(
@@ -2040,6 +2185,269 @@ export class Track {
           const roof2 = new THREE.Mesh(new THREE.BoxGeometry(4.8, 0.3, 4.8), rust);
           roof2.position.y = 9.6; tower.add(roof2);
           put(tower, s0 + 42, this.halfWidth(s0 + 42) + 6.5);
+          break;
+        }
+      }
+    }
+    this.group.add(grp);
+  }
+
+  /**
+   * Hand-placed landmarks from TrackDefinition. These are the memorable
+   * silhouettes players navigate by — giant trees, basalt walls, iron jaws.
+   * Zone setpieces handle density; landmarks are the showpieces.
+   */
+  private buildLandmarks() {
+    if (!this.landmarks.length) return;
+    const rng = new RNG(this.mountainId.length * 911 + 42);
+    const grp = new THREE.Group();
+    const wood = WORLD_MAT.wood(0x6b4a2c);
+    const darkWood = WORLD_MAT.wood(0x4a3320);
+    const stone = WORLD_MAT.rock(0x8a7d6d);
+    const darkStone = WORLD_MAT.rock(0x4a4240);
+    const basalt = WORLD_MAT.rock(0x3a322e);
+    const lava = WORLD_MAT.paint(0xc04018);
+    const metal = WORLD_MAT.metal(0x59606b);
+    const rust = WORLD_MAT.paint(0x8a4b2a);
+    const rockPool = [rockGeo(3), rockGeo(17), rockGeo(41), rockGeo(63)];
+
+    const put = (mesh: THREE.Object3D, s: number, x: number, lift = 0, yaw = 0) => {
+      const h = this.heightAt(s, x) + lift;
+      this.worldPos(s, x, h, _p);
+      this.frameAt(s, _fwd2, _right2, _up2);
+      mesh.position.copy(_p);
+      mesh.quaternion.setFromRotationMatrix(
+        new THREE.Matrix4().makeBasis(_right2, _up2, _fwd2));
+      mesh.rotateY(yaw);
+      grp.add(mesh);
+      return mesh;
+    };
+
+    for (const lm of this.landmarks) {
+      const s = lm.at * this.length;
+      const hw = this.halfWidth(s);
+      const side = lm.side ?? (rng.chance(0.5) ? -1 : 1);
+      const sc = lm.scale ?? 1;
+
+      switch (lm.kind) {
+        case 'summit_crags': {
+          for (let k = -1; k <= 1; k += 2) {
+            const crag = new THREE.Mesh(rockPool[rng.int(0, 3)], stone);
+            crag.scale.set(12 * sc, 34 * sc, 12 * sc);
+            put(crag, s, k * (hw + 20), -4, rng.range(0, 3));
+            const cap = new THREE.Mesh(rockPool[rng.int(0, 3)], WORLD_MAT.rock(0xe6eef6));
+            cap.scale.set(6 * sc, 8 * sc, 6 * sc);
+            put(cap, s, k * (hw + 20), 22 * sc, rng.range(0, 3));
+          }
+          break;
+        }
+        case 'start_tower': {
+          const tower = new THREE.Group();
+          for (let i = 0; i < 4; i++) {
+            const leg = new THREE.Mesh(new THREE.BoxGeometry(0.28, 7, 0.28), metal);
+            leg.position.set((i % 2 ? 1 : -1) * 1.4, 3.5, (i < 2 ? 1 : -1) * 1.4);
+            tower.add(leg);
+          }
+          const booth = new THREE.Mesh(new THREE.BoxGeometry(4, 2.6, 4), WORLD_MAT.paint(0x1f2630));
+          booth.position.y = 8.2; tower.add(booth);
+          const roof = new THREE.Mesh(new THREE.BoxGeometry(4.8, 0.3, 4.8), rust);
+          roof.position.y = 9.6; tower.add(roof);
+          put(tower, s, side * (hw + 6.5));
+          break;
+        }
+        case 'fallen_giant': {
+          const trunk = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.7 * sc, 0.95 * sc, hw * 3.2, 8), wood);
+          trunk.rotation.z = Math.PI / 2;
+          put(trunk, s, 0, 7.2 * sc, rng.range(-0.2, 0.2));
+          const stump = new THREE.Mesh(
+            new THREE.CylinderGeometry(1.0 * sc, 1.3 * sc, 2.8 * sc, 8), darkWood);
+          put(stump, s + 4, -(hw + 4), 1.4 * sc);
+          break;
+        }
+        case 'shale_formation': {
+          for (let k = 0; k < 5; k++) {
+            const slab = new THREE.Mesh(rockPool[k % 4], stone);
+            slab.scale.set(
+              (3 + k * 0.8) * sc, (8 + k * 3) * sc, (2 + k * 0.5) * sc);
+            put(slab, s + k * 4, side * (hw + 5 + k), -1, k * 0.35);
+          }
+          break;
+        }
+        case 'timber_bridge':
+          // visual only — rails/deck come from buildBridges when zone.rails
+          break;
+        case 'cliff_jump': {
+          for (let k = 0; k < 6; k++) {
+            for (const sd of [-1, 1] as const) {
+              const wall = new THREE.Mesh(
+                new THREE.BoxGeometry(0.5, 2.0 + k * 0.5, 3.0), wood);
+              put(wall, s + k * 3.2, sd * (hw + 0.9), (2.0 + k * 0.5) * 0.5);
+            }
+          }
+          break;
+        }
+        case 'volcano_rim': {
+          for (let k = 0; k < 8; k++) {
+            const a = (k / 8) * TAU;
+            const r = hw + 18;
+            const cone = new THREE.Mesh(
+              new THREE.ConeGeometry(4 * sc, 10 * sc, 6), basalt);
+            put(cone, s + Math.cos(a) * 6, Math.sin(a) * r, 0, a);
+          }
+          break;
+        }
+        case 'basalt_wall': {
+          for (let k = 0; k < 7; k++) {
+            const col = new THREE.Mesh(
+              new THREE.CylinderGeometry(1.4 * sc, 1.6 * sc, (12 + k % 3 * 4) * sc, 6),
+              basalt);
+            put(col, s + k * 3.5, side * (hw + 3.5), 0, rng.range(0, 0.4));
+          }
+          break;
+        }
+        case 'ash_chute': {
+          for (let k = 0; k < 4; k++) {
+            const pile = new THREE.Mesh(
+              new THREE.ConeGeometry(5 * sc, 3 * sc, 7), darkStone);
+            put(pile, s + k * 8, side * (hw + 6 + k), -0.5, rng.range(0, 2));
+          }
+          break;
+        }
+        case 'lava_fissure': {
+          for (let k = 0; k < 5; k++) {
+            const crack = new THREE.Mesh(
+              new THREE.BoxGeometry(0.8, 0.15, 6), lava);
+            put(crack, s + k * 5, side * (hw + 2 + k * 0.5), 0.05, rng.range(-0.3, 0.3));
+            const glow = new THREE.Mesh(
+              new THREE.BoxGeometry(1.6, 0.08, 7),
+              new THREE.MeshBasicMaterial({
+                color: 0xff6020, transparent: true, opacity: 0.55, depthWrite: false,
+              }));
+            put(glow, s + k * 5, side * (hw + 2 + k * 0.5), 0.12);
+          }
+          break;
+        }
+        case 'ancient_tree': {
+          const trunk = new THREE.Mesh(
+            new THREE.CylinderGeometry(1.4 * sc, 2.2 * sc, 18 * sc, 8), darkWood);
+          put(trunk, s, side * (hw + 8), 0);
+          for (let b = 0; b < 5; b++) {
+            const br = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.25, 0.45, 8 * sc, 5), wood);
+            br.rotation.z = 0.9;
+            put(br, s, side * (hw + 8), 8 + b * 1.5, b * 1.1);
+          }
+          break;
+        }
+        case 'root_tunnel': {
+          for (let k = 0; k < 4; k++) {
+            const root = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.35, 0.5, hw * 2.4, 6), darkWood);
+            root.rotation.z = Math.PI / 2;
+            put(root, s + k * 6, 0, 4.5 + (k % 2) * 1.2, rng.range(-0.15, 0.15));
+          }
+          break;
+        }
+        case 'mist_ravine': {
+          // soft planes for mist volume — lightweight atmosphere cue
+          for (let k = 0; k < 3; k++) {
+            const mist = new THREE.Mesh(
+              new THREE.PlaneGeometry(28, 10),
+              new THREE.MeshBasicMaterial({
+                color: 0xc0d0c8, transparent: true, opacity: 0.22,
+                depthWrite: false, side: THREE.DoubleSide,
+              }));
+            put(mist, s + k * 10, side * (hw + 12), 2 + k, rng.range(0, 1));
+          }
+          break;
+        }
+        case 'iron_jaw': {
+          // two massive opposing rock jaws framing the trail
+          for (const sd of [-1, 1] as const) {
+            const jaw = new THREE.Mesh(rockPool[rng.int(0, 3)], darkStone);
+            jaw.scale.set(10 * sc, 28 * sc, 14 * sc);
+            put(jaw, s, sd * (hw + 8), -2, sd > 0 ? 0.4 : -0.4);
+            // "teeth" spikes
+            for (let t = 0; t < 4; t++) {
+              const tooth = new THREE.Mesh(
+                new THREE.ConeGeometry(1.2 * sc, 5 * sc, 5), stone);
+              put(tooth, s + t * 3 - 4.5, sd * (hw + 5), 8 * sc, 0);
+            }
+          }
+          break;
+        }
+        case 'suspension_bridge': {
+          for (const sd of [-1, 1] as const) {
+            const tower = new THREE.Mesh(new THREE.BoxGeometry(1.2, 14, 1.2), metal);
+            put(tower, s, sd * (hw + 1.5), 0);
+          }
+          const cable = new THREE.Mesh(
+            new THREE.BoxGeometry(hw * 2 + 3, 0.12, 0.12), metal);
+          put(cable, s, 0, 12);
+          break;
+        }
+        case 'cliff_gate': {
+          for (const sd of [-1, 1] as const) {
+            const pillar = new THREE.Mesh(rockPool[0], stone);
+            pillar.scale.set(5 * sc, 22 * sc, 5 * sc);
+            put(pillar, s, sd * (hw + 3), -1);
+          }
+          break;
+        }
+        case 'wind_gap': {
+          for (const sd of [-1, 1] as const) {
+            const wall = new THREE.Mesh(rockPool[2], stone);
+            wall.scale.set(6 * sc, 18 * sc, 20 * sc);
+            put(wall, s, sd * (hw + 10), -3, 0);
+          }
+          break;
+        }
+        case 'spine_ridge': {
+          for (let k = 0; k < 6; k++) {
+            const spine = new THREE.Mesh(rockPool[k % 4], stone);
+            spine.scale.set(4 * sc, (6 + k) * sc, 8 * sc);
+            put(spine, s + k * 7, 0, -1, k * 0.1);
+          }
+          break;
+        }
+        case 'sunset_overlook': {
+          const platform = new THREE.Mesh(
+            new THREE.BoxGeometry(hw * 1.4, 0.4, 8), stone);
+          put(platform, s, side * (hw + 4), 0.2);
+          const rail = new THREE.Mesh(new THREE.BoxGeometry(0.15, 1.2, 8), wood);
+          put(rail, s, side * (hw + 4 + hw * 0.5), 0.8);
+          break;
+        }
+        case 'final_spine': {
+          for (let k = 0; k < 5; k++) {
+            const slab = new THREE.Mesh(rockPool[k % 4], stone);
+            slab.scale.set(8 * sc, (14 + k * 2) * sc, 5 * sc);
+            put(slab, s + k * 5, side * (hw + 6), -2, 0.2);
+          }
+          break;
+        }
+        case 'grandstand': {
+          for (const sd of [-1, 1] as const) {
+            const stand = new THREE.Group();
+            for (let row = 0; row < 5; row++) {
+              const step = new THREE.Mesh(
+                new THREE.BoxGeometry(1.5, 0.55, 20),
+                WORLD_MAT.paint(row % 2 ? 0x37414d : 0x2b333d));
+              step.position.set(row * 1.5, 0.3 + row * 0.85, 0);
+              stand.add(step);
+            }
+            put(stand, s, sd * (hw + 3.4), 0, sd > 0 ? 0 : Math.PI);
+          }
+          break;
+        }
+        case 'finish_plaza': {
+          const archL = new THREE.Mesh(new THREE.BoxGeometry(1, 10, 1), metal);
+          const archR = new THREE.Mesh(new THREE.BoxGeometry(1, 10, 1), metal);
+          put(archL, s, -(hw + 2), 0);
+          put(archR, s, hw + 2, 0);
+          const beam = new THREE.Mesh(new THREE.BoxGeometry(hw * 2 + 4, 0.6, 0.6), rust);
+          put(beam, s, 0, 9.5);
           break;
         }
       }

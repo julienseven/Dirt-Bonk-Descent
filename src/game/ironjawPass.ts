@@ -1,24 +1,13 @@
 // ---------------------------------------------------------------------------
-// IRONJAW PASS — endurance alpine grind
+// IRONJAW PASS — extreme rocky mountain pass
 //
-// 6200 m, ~3:25 at 30.5 m/s average. The longest course: high limestone,
-// thin air, long sightlines, and a mid-mountain wall that sorts the pack.
-//
-// Pacing (never two of the same kind back-to-back):
-//
-//   01 HIGH GATE     release   wide alpine start, learn the length
-//   02 SCREE SHELF   tension   loose rock, braking tests
-//   03 WIND GAP      release   exposed knife with big air
-//   04 IRON WALL     combat    narrow bridge into a brawl slot
-//   05 LONG BURN     tension   false flats that punish early boost
-//   06 TEETH         tension   whoops + rock garden
-//   07 SECRET RIM    reward    hidden high line
-//   08 DROP JAW      dread     cliff edge, no tape
-//   09 PACK FIGHT    combat    wide bowl, crowd, bonks
-//   10 SUMMIT RUN    release   steepest push to the line
+// Identity: giant rock walls, cliffs, bridges, enormous scale, thin air.
+// Longest course (6.2 km endurance).
 // ---------------------------------------------------------------------------
 
 import type { Zone } from './track';
+import type { TrackDefinition, ScriptedFeature, TrackLandmark } from './trackDef';
+import { ATMOS_LIMESTONE } from './trackDef';
 
 export const IRONJAW_SECTIONS: Zone[] = [
   {
@@ -31,6 +20,7 @@ export const IRONJAW_SECTIONS: Zone[] = [
     features: ['roller', 'kicker'],
     props: ['cone', 'bale', 'sign'],
     twist: 0.22,
+    setpiece: 'START GATE',
   },
   {
     name: '02 SCREE SHELF', sub: 'LOOSE & LONG',
@@ -42,6 +32,7 @@ export const IRONJAW_SECTIONS: Zone[] = [
     features: ['whoops', 'berm', 'roller'],
     props: ['rock', 'boulder', 'rock'],
     twist: 1.15,
+    setpiece: 'CANYON CUT',
   },
   {
     name: '03 WIND GAP', sub: 'HOLD YOUR LINE',
@@ -54,6 +45,7 @@ export const IRONJAW_SECTIONS: Zone[] = [
     props: ['cone', 'bale', 'ramp'],
     twist: 0.30,
     dropSide: 1, dropDepth: 3.2,
+    setpiece: 'KICKER RIDGE',
   },
   {
     name: '04 IRON WALL', sub: 'NO ROOM LEFT',
@@ -77,6 +69,7 @@ export const IRONJAW_SECTIONS: Zone[] = [
     features: ['berm', 'roller', 'whoops'],
     props: ['fence', 'log', 'sign'],
     twist: 0.85,
+    setpiece: 'KICKER RIDGE',
   },
   {
     name: '06 THE TEETH', sub: 'ROCK GARDEN',
@@ -88,6 +81,7 @@ export const IRONJAW_SECTIONS: Zone[] = [
     features: ['whoops', 'kicker', 'berm'],
     props: ['rock', 'boulder', 'barrier'],
     twist: 1.25,
+    setpiece: 'CANYON CUT',
   },
   {
     name: '07 SECRET RIM', sub: 'IF YOU LOOK UP',
@@ -99,6 +93,7 @@ export const IRONJAW_SECTIONS: Zone[] = [
     features: ['berm', 'roller', 'kicker'],
     props: ['log', 'rock'],
     secret: true, twist: 1.40,
+    setpiece: 'PINE PLUNGE',
   },
   {
     name: '08 DROP JAW', sub: 'ONE SIDE ONLY',
@@ -110,6 +105,7 @@ export const IRONJAW_SECTIONS: Zone[] = [
     features: ['roller', 'berm', 'whoops'],
     props: ['drift', 'rock', 'sign'],
     dropSide: -1, dropDepth: 5.2, twist: 1.20,
+    setpiece: 'CANYON CUT',
   },
   {
     name: '09 PACK FIGHT', sub: 'SETTLE IT',
@@ -121,6 +117,7 @@ export const IRONJAW_SECTIONS: Zone[] = [
     features: ['berm', 'table', 'roller'],
     props: ['bale', 'barrel', 'cone'],
     twist: 0.55, combat: true,
+    setpiece: 'THE BONKYARD',
   },
   {
     name: '10 SUMMIT RUN', sub: 'EMPTY THE TANK',
@@ -132,20 +129,42 @@ export const IRONJAW_SECTIONS: Zone[] = [
     features: ['kicker', 'table', 'roller'],
     props: ['fence', 'cone', 'bale', 'sign'],
     twist: 0.30,
+    setpiece: 'FINISH FURY',
   },
 ];
 
-export const IRONJAW_SETPIECES: {
-  kind: string; at: number; len: number; h: number; depth: number;
-}[] = [
-  // early send so the length doesn't feel like a crawl
+export const IRONJAW_SETPIECES: ScriptedFeature[] = [
   { kind: 'kicker', at: 0.05, len: 16, h: 2.6, depth: 0 },
-  // wind gap trailer moment
   { kind: 'gap', at: 0.22, len: 70, h: 4.8, depth: 6.2 },
-  // teeth double
+  { kind: 'roller', at: 0.32, len: 18, h: 1.0, depth: 0 },
+  { kind: 'whoops', at: 0.42, len: 30, h: 0.65, depth: 0 },
   { kind: 'double', at: 0.52, len: 30, h: 2.3, depth: 1.0 },
-  // pack-fight table
+  { kind: 'kicker', at: 0.70, len: 18, h: 2.8, depth: 0 },
   { kind: 'table', at: 0.81, len: 48, h: 3.2, depth: 0 },
-  // final send
   { kind: 'kicker', at: 0.94, len: 20, h: 3.8, depth: 0 },
 ];
+
+export const IRONJAW_LANDMARKS: TrackLandmark[] = [
+  { id: 'summit', kind: 'summit_crags', at: 0.03, label: 'High Gate Crags' },
+  { id: 'wind', kind: 'wind_gap', at: 0.22, label: 'Wind Gap' },
+  { id: 'bridge', kind: 'suspension_bridge', at: 0.32, label: 'Iron Wall Bridge' },
+  { id: 'jaw', kind: 'iron_jaw', at: 0.52, scale: 1.2, label: 'The Iron Jaw' },
+  { id: 'gate', kind: 'cliff_gate', at: 0.70, label: 'Cliff Gate' },
+  { id: 'drop', kind: 'cliff_jump', at: 0.70, side: -1, label: 'Drop Jaw' },
+  { id: 'finish', kind: 'grandstand', at: 0.95, label: 'Summit Finish' },
+  { id: 'plaza', kind: 'finish_plaza', at: 0.99, label: 'Finish Plaza' },
+];
+
+export const IRONJAW: TrackDefinition = {
+  id: 'ironjaw',
+  name: 'IRONJAW PASS',
+  theme: 'limestone',
+  seed: 505017,
+  length: 6200,
+  difficulty: 4,
+  sections: IRONJAW_SECTIONS,
+  setpieces: IRONJAW_SETPIECES,
+  landmarks: IRONJAW_LANDMARKS,
+  atmosphere: ATMOS_LIMESTONE,
+  startElevation: 1280,
+};

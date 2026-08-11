@@ -1,25 +1,16 @@
 // ---------------------------------------------------------------------------
-// SHALEBACK RUN — the authored vertical slice
+// SHALEBACK RUN — REFERENCE-QUALITY TRACK
 //
-// Ten hand-placed sections rather than a procedural sample. The generator
-// still fills in micro-terrain, scenery and props, but the shape, width,
-// surface, hazard mix and set-pieces of every stretch are specified here.
+// The classic Dirt Bonk Descent mountain. Cool mountain daylight, green
+// forest, warm brown dirt, gray rock. Ten hand-authored sections with full
+// landmarks, setpieces, and alpine atmosphere.
 //
-// Pacing intent — alternating tension and release, never two of the same
-// kind back to back:
-//
-//   01 DROP        release   plunge, wide, learn the speed
-//   02 PINE PANIC  tension   tight, blind, claustrophobic
-//   03 ROCK & ROLL tension   technical, punishing line choice
-//   04 BONK BRIDGE combat    narrow, no escape, fight or fall
-//   05 BIG AIR     release   one enormous jump, pure spectacle
-//   06 MUD PIT     tension   grip vanishes, everything slides
-//   07 SECRET SEND reward    the hidden line, for players who look
-//   08 CLIFFSIDE   dread     one wrong input and you're gone
-//   09 BONK CANYON combat    wide arena, crowd, the big brawl
-//   10 FINAL SEND  release   steepest, fastest, everything at once
+// Pacing: release → tension → tension → combat → release → tension →
+//         reward → dread → combat → release
 // ---------------------------------------------------------------------------
 import type { Zone } from './track';
+import type { TrackDefinition, ScriptedFeature, TrackLandmark } from './trackDef';
+import { ATMOS_ALPINE } from './trackDef';
 
 export const SHALEBACK_SECTIONS: Zone[] = [
   {
@@ -32,6 +23,7 @@ export const SHALEBACK_SECTIONS: Zone[] = [
     features: ['roller', 'roller', 'kicker'],
     props: ['cone', 'bale'],
     twist: 0.25,
+    setpiece: 'START GATE',
   },
   {
     name: '02 PINE PANIC', sub: 'NO SIGHTLINES',
@@ -43,6 +35,7 @@ export const SHALEBACK_SECTIONS: Zone[] = [
     features: ['whoops', 'kicker', 'berm', 'roller'],
     props: ['log', 'fence', 'rock', 'sign'],
     twist: 1.55,
+    setpiece: 'PINE PLUNGE',
   },
   {
     name: '03 ROCK & ROLL', sub: 'PICK YOUR LINE',
@@ -54,6 +47,7 @@ export const SHALEBACK_SECTIONS: Zone[] = [
     features: ['whoops', 'roller', 'kicker', 'berm'],
     props: ['rock', 'boulder', 'barrier', 'rock'],
     twist: 1.20,
+    setpiece: 'CANYON CUT',
   },
   {
     name: '04 BONK BRIDGE', sub: 'NOWHERE TO GO',
@@ -64,7 +58,6 @@ export const SHALEBACK_SECTIONS: Zone[] = [
     crowd: 2.4, fog: 1.15,
     features: ['roller'],
     props: ['barrel'],
-    // the whole point: the deck ends and there is nothing under you
     dropSide: 0, dropDepth: 3.4, noTape: true, rails: true,
     twist: 0.15, combat: true,
   },
@@ -78,6 +71,7 @@ export const SHALEBACK_SECTIONS: Zone[] = [
     features: ['table', 'kicker', 'double', 'berm'],
     props: ['ramp', 'cone', 'bale', 'sign', 'barrier'],
     twist: 0.2,
+    setpiece: 'BIG AIR',
   },
   {
     name: '06 MUD PIT', sub: 'NO GRIP',
@@ -89,6 +83,7 @@ export const SHALEBACK_SECTIONS: Zone[] = [
     features: ['roller', 'whoops', 'berm'],
     props: ['water', 'puddle', 'log', 'water', 'bale'],
     twist: 1.15,
+    setpiece: 'MUDPIT MIRE',
   },
   {
     name: '07 SECRET SEND', sub: 'IF YOU KNOW',
@@ -100,6 +95,7 @@ export const SHALEBACK_SECTIONS: Zone[] = [
     features: ['berm', 'roller', 'kicker'],
     props: ['log', 'rock'],
     secret: true, twist: 1.45,
+    setpiece: 'PINE PLUNGE',
   },
   {
     name: '08 CLIFFSIDE', sub: 'DO NOT LOOK DOWN',
@@ -109,10 +105,9 @@ export const SHALEBACK_SECTIONS: Zone[] = [
     treeDensity: 0.15, treeType: 'pine', rockDensity: 0.70,
     crowd: 0.45, fog: 0.8,
     features: ['roller', 'berm', 'whoops'],
-    // exposed altitude: snow clings to the cliff edge
     props: ['drift', 'rock', 'drift', 'sign'],
-    // the mountain simply stops on the right
     dropSide: 1, dropDepth: 5.0, twist: 1.30,
+    setpiece: 'CANYON CUT',
   },
   {
     name: '09 THE BONK CANYON', sub: 'SETTLE IT HERE',
@@ -124,6 +119,7 @@ export const SHALEBACK_SECTIONS: Zone[] = [
     features: ['roller', 'kicker', 'berm', 'double'],
     props: ['barrier', 'barrel', 'bale', 'boulder', 'barrier'],
     twist: 0.75, combat: true,
+    setpiece: 'CANYON CUT',
   },
   {
     name: '10 FINAL SEND', sub: 'ALL OF IT',
@@ -135,34 +131,46 @@ export const SHALEBACK_SECTIONS: Zone[] = [
     features: ['kicker', 'table', 'roller', 'double', 'berm'],
     props: ['fence', 'cone', 'bale', 'ramp', 'sign'],
     twist: 0.35,
+    setpiece: 'FINISH FURY',
   },
 ];
 
-/**
- * Hand-placed showpieces, as fractions of track length. These are guaranteed
- * — the procedural pass fills around them but never overwrites them.
- */
-export const SHALEBACK_SETPIECES: {
-  kind: string; at: number; len: number; h: number; depth: number;
-}[] = [
-  // 01 — a steep launch off the gate to set the tone immediately
+export const SHALEBACK_SETPIECES: ScriptedFeature[] = [
   { kind: 'kicker', at: 0.040, len: 16, h: 2.4, depth: 0 },
-  // 02 — whoops into pine panic
   { kind: 'whoops', at: 0.110, len: 28, h: 0.65, depth: 0 },
-  // 03 — technical double through the rocks
   { kind: 'double', at: 0.238, len: 32, h: 2.2, depth: 1.1 },
-  // 04 — bridge roller (forces weight shift mid-fight)
   { kind: 'roller', at: 0.325, len: 18, h: 1.0, depth: 0 },
-  // 05 — THE showpiece: a genuinely enormous gap
   { kind: 'gap', at: 0.392, len: 88, h: 5.6, depth: 7.5 },
-  // 05 — landing roller so you can pump out of it
   { kind: 'roller', at: 0.432, len: 24, h: 1.2, depth: 0 },
-  // 08 — cliffside kicker (commit or scrub)
   { kind: 'kicker', at: 0.690, len: 18, h: 2.8, depth: 0 },
-  // 09 — big tabletop in the middle of the brawl
   { kind: 'table', at: 0.795, len: 52, h: 3.4, depth: 0 },
-  // 09 — second double so the canyon isn't one note
   { kind: 'double', at: 0.840, len: 30, h: 2.0, depth: 1.0 },
-  // 10 — final launch at the crowd
   { kind: 'kicker', at: 0.952, len: 20, h: 3.6, depth: 0 },
 ];
+
+export const SHALEBACK_LANDMARKS: TrackLandmark[] = [
+  { id: 'summit', kind: 'summit_crags', at: 0.02, label: 'Summit Crags' },
+  { id: 'start_tower', kind: 'start_tower', at: 0.03, side: 1, label: "Starter's Tower" },
+  { id: 'fallen_giant', kind: 'fallen_giant', at: 0.13, label: 'Giant Fallen Pine' },
+  { id: 'shale_rock', kind: 'shale_formation', at: 0.22, side: -1, scale: 1.3, label: 'Shaleback Formation' },
+  { id: 'bridge', kind: 'timber_bridge', at: 0.325, label: 'Bonk Bridge' },
+  { id: 'big_air', kind: 'cliff_jump', at: 0.392, label: 'The Big One' },
+  { id: 'cliff_jump', kind: 'cliff_jump', at: 0.690, side: 1, label: 'Cliff Launch' },
+  { id: 'finish', kind: 'grandstand', at: 0.94, label: 'Finish Crowds' },
+  { id: 'plaza', kind: 'finish_plaza', at: 0.99, label: 'Finish Plaza' },
+];
+
+/** Full reference definition for Shaleback Run. */
+export const SHALEBACK: TrackDefinition = {
+  id: 'shaleback',
+  name: 'SHALEBACK RUN',
+  theme: 'alpine',
+  seed: 20260114,
+  length: 4600,
+  difficulty: 2,
+  sections: SHALEBACK_SECTIONS,
+  setpieces: SHALEBACK_SETPIECES,
+  landmarks: SHALEBACK_LANDMARKS,
+  atmosphere: ATMOS_ALPINE,
+  startElevation: 980,
+};

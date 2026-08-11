@@ -177,10 +177,20 @@ not by convention.
 `hazardScale` densifies props/scenery when a mode builds the course. Knockout
 cuts the last rider every 20 seconds until one remains.
 
-## The mountain
+## The mountains
 
-**SHALEBACK RUN** — ten hand-authored sections, each with its own silhouette, surface
-physics and hazard mix:
+Five full TrackDefinitions — each with its own spline sections, landmarks, sky,
+lighting, ridge palette and ambient particles. See [`docs/TRACKS.md`](docs/TRACKS.md).
+
+| Mountain | Theme | Feel |
+|---|---|---|
+| **SHALEBACK RUN** | alpine | Reference track — pine, timber bridge, 88 m gap |
+| **CINDER CHUTE** | volcanic | Ash, basalt, lava glow, steep chutes |
+| **THORNWOOD DEEP** | forest | Mist, roots, progressive density |
+| **IRONJAW PASS** | limestone | Cliffs, iron jaw, 6.2 km endurance |
+| **LASTLIGHT SPINE** | sunset | Golden-hour knife-edge finale |
+
+**SHALEBACK** (reference) — ten hand-authored sections:
 
 | # | Section | Identity |
 |---|---|---|
@@ -195,11 +205,7 @@ physics and hazard mix:
 | 09 | BONK CANYON | Wide combat arena |
 | 10 | FINAL SEND | Steepest, fastest, into the crowd |
 
-Pacing alternates deliberately — release, tension, tension, **combat**, release, tension,
-reward, dread, **combat**, release.
-
-Also authored: **Cinder Chute**, **Thornwood Deep**, **Lastlight Spine**, **Ironjaw Pass**
-(6.2 km endurance).
+Pacing: release → tension → tension → **combat** → release → tension → reward → dread → **combat** → release.
 
 ---
 
@@ -237,6 +243,8 @@ soundtrack that gains finale layers over the last 500 m. Impacts sidechain-duck 
 |---|---|
 | `?tune` | Headless balance harness. Simulates ~72 races across difficulties and reports win rates, plus verification sweeps for the state machine (~24,500 cases) and bonk system (~8,000 collisions). |
 | `?states` | Live overlay: current bike state, transition log, FPS, quality tier, particle count, draw calls, triangles. |
+| `?track` / F11 | Track debug: spline, width, section bounds, shortcuts, jumps, landmarks. |
+| `?phys` / F8 | Physics gizmos (axles, contact, COM). |
 
 ---
 
@@ -247,9 +255,11 @@ src/game/
   game.ts          engine, race flow, rider sim
   physics.ts       shared speed / axle / drag constants
   track.ts         procedural course generation + scenery
-  mountainsBuild.ts  mountain id → Track factory
-  shaleback.ts     authored mountains (also cinder / thornwood / …)
-  ironjawPass.ts   endurance course
+  mountainsBuild.ts  mountain id → TrackDefinition factory
+  trackDef.ts      TrackDefinition + atmosphere presets
+  atmosphere.ts    theme sky, ridges, ambient particles
+  shaleback.ts     reference mountain (+ cinder / thornwood / …)
+  ironjawPass.ts   endurance limestone course
   bikeState.ts     physics state machine (pure resolver + rule table)
   bonk.ts          collision resolver
   tricks.ts        rotation / flip / style composition

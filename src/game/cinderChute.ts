@@ -1,70 +1,55 @@
 // ---------------------------------------------------------------------------
-// CINDER CHUTE — volcanic scree slope, short and vicious
+// CINDER CHUTE — volcanic speed descent
 //
-// 2800 m, ~1:35 at 28 m/s average. Five tight sections with no breathing
-// room. The environment is dark rock, ash, lava glow, narrow trails, and
-// constant rockfall.
-//
-// Pacing: tension → release → tension → combat → release
+// Identity: black ash, red/brown earth, smoke, steep chutes, rock shelves.
+// Shorter sprint (~1:35) with aggressive pacing and zero vegetation.
 // ---------------------------------------------------------------------------
 
 import type { Zone } from './track';
+import type { TrackDefinition, ScriptedFeature, TrackLandmark } from './trackDef';
+import { ATMOS_VOLCANIC } from './trackDef';
 
-/**
- * Cinder Chute. The volcanic mountain.
- *
- * Every section shares the dark, desaturated base palette of the volcano.
- * Visual variety comes from temperature: cool grey ash near the summit,
-// warm orange rock where lava has been, and a deep red interior in the
- * chasm. Lava glow at the edges makes the trail feel like the mountain
- * is alive and hostile.
- *
- * Widths are deliberately tight. This is a sprint, not a cruise — the
- * trail rarely exceeds 13 m and sometimes narrows to 8. Speed is the
- * only option because the terrain won't let you think.
- */
 export const CINDER_SECTIONS: Zone[] = [
-  // ---- 01: CALDERA EDGE
-  // The start sits on the lip of an active volcano. The trail drops
-  // almost vertically, flanked by ash cones and fumaroles. First section
-  // teaches the player: the mountain does not care about you.
   {
     name: '01 CALDERA EDGE', sub: 'STRAIGHT DOWN THE MOUTH',
-    t0: 0.000, t1: 0.14,
+    t0: 0.000, t1: 0.10,
     dirt: 0x4a3e36, verge: 0x3d332a, far: 0x2e2822,
-    width: 12, rough: 0.65, steep: 0.135, surface: 'gravel',
-    treeDensity: 0.0, treeType: 'none', rockDensity: 0.40,
+    width: 13, rough: 0.55, steep: 0.140, surface: 'gravel',
+    treeDensity: 0.0, treeType: 'none', rockDensity: 0.45,
     crowd: 0.0, fog: 1.4,
     features: ['roller', 'kicker'],
     props: ['rock', 'cone'],
     twist: 0.18,
+    setpiece: 'START GATE',
   },
-
-  // ---- 02: ASH CASCADES
-  // Narrow trails along the crater rim. Loose scree falls away on one side
-  // into a fog-filled abyss. Rockfall arrows warn of boulders rolling
-  // across the line every few seconds.
   {
     name: '02 ASH CASCADES', sub: 'RIM OF THE MOUTH',
-    t0: 0.14, t1: 0.32,
+    t0: 0.10, t1: 0.22,
     dirt: 0x3a332c, verge: 0x2e2822, far: 0x22201c,
-    width: 10, rough: 1.0, steep: 0.045, surface: 'gravel',
-    treeDensity: 0.0, treeType: 'none', rockDensity: 0.90,
+    width: 10, rough: 1.05, steep: 0.050, surface: 'gravel',
+    treeDensity: 0.0, treeType: 'none', rockDensity: 0.95,
     crowd: 0.0, fog: 1.6,
     features: ['whoops', 'roller', 'berm'],
     props: ['rock', 'boulder', 'rock'],
-    twist: 1.25,
+    twist: 1.30,
     dropSide: -1, dropDepth: 4.2,
+    setpiece: 'CANYON CUT',
   },
-
-  // ---- 03: LAVA RUNS
-  // The trail crosses a lava field. Orange glow on the terrain edges,
-  // heat-shimmer implied by dense fog. Standing water (rain on hot rock
-  // creates steam). The ground is rougher here — more whoops, harder to
-  // keep the wheel planted.
   {
-    name: '03 LAVA RUNS', sub: 'HOT GROUND',
-    t0: 0.32, t1: 0.52,
+    name: '03 BASALT SHELF', sub: 'BLACK STONE HIGHWAY',
+    t0: 0.22, t1: 0.34,
+    dirt: 0x3a3430, verge: 0x2a2420, far: 0x1e1a18,
+    width: 12, rough: 0.70, steep: 0.035, surface: 'rock',
+    treeDensity: 0.0, treeType: 'none', rockDensity: 1.25,
+    crowd: 0.0, fog: 1.3,
+    features: ['berm', 'kicker', 'roller'],
+    props: ['rock', 'barrier', 'boulder'],
+    twist: 0.85,
+    setpiece: 'CANYON CUT',
+  },
+  {
+    name: '04 LAVA RUNS', sub: 'HOT GROUND',
+    t0: 0.34, t1: 0.48,
     dirt: 0x5c3e28, verge: 0x6b3420, far: 0x4a2818,
     width: 11.5, rough: 1.45, steep: 0.030, surface: 'mud',
     treeDensity: 0.0, treeType: 'none', rockDensity: 1.10,
@@ -72,15 +57,24 @@ export const CINDER_SECTIONS: Zone[] = [
     features: ['whoops', 'kicker', 'roller'],
     props: ['rock', 'puddle', 'rock'],
     twist: 0.95,
+    setpiece: 'CANYON CUT',
   },
-
-  // ---- 04: THE CANYON
-  // The widest section — but only because it's a slot canyon with vertical
-  // walls on both sides. Rockfalls are the main hazard. Combat section:
-  // there's nowhere to hide, so the AI comes for you.
   {
-    name: '04 THE CANYON', sub: 'NO ESCAPE',
-    t0: 0.52, t1: 0.74,
+    name: '05 NARROW CHUTE', sub: 'SINGLE FILE',
+    t0: 0.48, t1: 0.58,
+    dirt: 0x4a3830, verge: 0x3a2c24, far: 0x2a2018,
+    width: 8, rough: 0.90, steep: 0.070, surface: 'gravel',
+    treeDensity: 0.0, treeType: 'none', rockDensity: 0.80,
+    crowd: 0.0, fog: 1.5,
+    features: ['roller', 'whoops'],
+    props: ['rock', 'boulder'],
+    twist: 0.45,
+    dropSide: 0, dropDepth: 3.8, noTape: true,
+    setpiece: 'CANYON CUT',
+  },
+  {
+    name: '06 THE CANYON', sub: 'NO ESCAPE',
+    t0: 0.58, t1: 0.72,
     dirt: 0x5a4432, verge: 0x4e3c2c, far: 0x3a2c20,
     width: 14, rough: 0.80, steep: 0.055, surface: 'gravel',
     treeDensity: 0.0, treeType: 'none', rockDensity: 1.20,
@@ -89,30 +83,64 @@ export const CINDER_SECTIONS: Zone[] = [
     props: ['rock', 'barrel', 'rock'],
     twist: 0.65,
     combat: true,
+    setpiece: 'THE BONKYARD',
   },
-
-  // ---- 05: ERUPTION POINT
-  // The fastest section. A straight blast down the final scree field,
-  // the volcano looming behind, a huge kicker into the finish. Everything
-  // you have, right now, or it's over.
   {
-    name: '05 ERUPTION POINT', sub: 'FINAL SCREE',
-    t0: 0.74, t1: 1.001,
+    name: '07 ROCKFALL', sub: 'DODGE OR DIE',
+    t0: 0.72, t1: 0.84,
+    dirt: 0x4a3a30, verge: 0x3a2e26, far: 0x2a221c,
+    width: 11, rough: 1.20, steep: 0.040, surface: 'rock',
+    treeDensity: 0.0, treeType: 'none', rockDensity: 1.40,
+    crowd: 0.0, fog: 1.45,
+    features: ['whoops', 'kicker', 'berm'],
+    props: ['boulder', 'rock', 'boulder'],
+    twist: 1.10,
+    setpiece: 'CANYON CUT',
+  },
+  {
+    name: '08 ERUPTION POINT', sub: 'FINAL SCREE',
+    t0: 0.84, t1: 1.001,
     dirt: 0x4e4038, verge: 0x3a3028, far: 0x2a2420,
-    width: 13.5, rough: 0.40, steep: 0.110, surface: 'gravel',
+    width: 14, rough: 0.40, steep: 0.115, surface: 'gravel',
     treeDensity: 0.0, treeType: 'none', rockDensity: 0.35,
     crowd: 0.0, fog: 1.0,
     features: ['kicker', 'table', 'roller'],
     props: ['rock', 'cone'],
     twist: 0.22,
+    setpiece: 'FINISH FURY',
   },
 ];
 
-export const CINDER_SETPIECES: {
-  kind: string; at: number; len: number; h: number; depth: number;
-}[] = [
-  { kind: 'kicker', at: 0.06, len: 14, h: 2.8, depth: 0 },
-  { kind: 'double', at: 0.39, len: 26, h: 2.0, depth: 1.2 },
-  { kind: 'gap', at: 0.58, len: 38, h: 3.6, depth: 4.0 },
-  { kind: 'kicker', at: 0.92, len: 16, h: 3.2, depth: 0 },
+export const CINDER_SETPIECES: ScriptedFeature[] = [
+  { kind: 'kicker', at: 0.05, len: 14, h: 2.8, depth: 0 },
+  { kind: 'whoops', at: 0.16, len: 24, h: 0.7, depth: 0 },
+  { kind: 'double', at: 0.40, len: 26, h: 2.0, depth: 1.2 },
+  { kind: 'gap', at: 0.62, len: 42, h: 3.8, depth: 4.2 },
+  { kind: 'kicker', at: 0.78, len: 16, h: 2.6, depth: 0 },
+  { kind: 'table', at: 0.90, len: 36, h: 3.0, depth: 0 },
+  { kind: 'kicker', at: 0.96, len: 16, h: 3.4, depth: 0 },
 ];
+
+export const CINDER_LANDMARKS: TrackLandmark[] = [
+  { id: 'rim', kind: 'volcano_rim', at: 0.04, label: 'Caldera Rim' },
+  { id: 'ash', kind: 'ash_chute', at: 0.16, side: -1, label: 'Ash Cascades' },
+  { id: 'basalt', kind: 'basalt_wall', at: 0.28, side: 1, label: 'Basalt Wall' },
+  { id: 'fissure', kind: 'lava_fissure', at: 0.40, side: -1, label: 'Glowing Fissure' },
+  { id: 'chute', kind: 'cliff_gate', at: 0.52, label: 'Narrow Chute' },
+  { id: 'canyon', kind: 'basalt_wall', at: 0.65, side: 0, scale: 1.4, label: 'Canyon Walls' },
+  { id: 'final', kind: 'cliff_jump', at: 0.92, label: 'Eruption Launch' },
+];
+
+export const CINDER: TrackDefinition = {
+  id: 'cinder',
+  name: 'CINDER CHUTE',
+  theme: 'volcanic',
+  seed: 771453,
+  length: 2800,
+  difficulty: 3,
+  sections: CINDER_SECTIONS,
+  setpieces: CINDER_SETPIECES,
+  landmarks: CINDER_LANDMARKS,
+  atmosphere: ATMOS_VOLCANIC,
+  startElevation: 1120,
+};

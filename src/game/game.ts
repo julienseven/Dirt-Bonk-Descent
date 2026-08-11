@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 import * as THREE from 'three';
 import {
-  clamp, clamp01, damp, lerp, RNG, TAU, smoothstep, smootherstep, fbm1,
+  clamp, clamp01, damp, lerp, RNG, TAU, smoothstep, smootherstep,
 } from './core';
 import { Track, Obstacle, ZONES } from './track';
 import {
@@ -15,12 +15,15 @@ import {
 import {
   ParticlePool, makeSoftTexture, makeChunkTexture, makeSkyTexture, makeCloudTexture,
 } from './fx';
+import { makeThemeSkyTexture, buildThemeRidges, AmbienceParticles } from './atmosphere';
+import type { TrackAtmosphere } from './trackDef';
+import { ATMOS_ALPINE } from './trackDef';
 import { audio } from './audio';
 import {
   type Perf, type Loadout, computePerf, getBike, loadoutColors, RIDER_BUILD_OF,
 } from './garage';
 import { getMountain } from './mountains';
-import { buildMountainTrack } from './mountainsBuild';
+import { buildMountainTrack, mountainAtmosphere } from './mountainsBuild';
 import {
   PROPS, PROP_SCORE, PROP_BOOST, PROP_CALL, patchSurface,
   type PropDef, type PropKind,
@@ -467,6 +470,12 @@ export class Game {
   private sun!: THREE.DirectionalLight;
   private hemi!: THREE.HemisphereLight;
   private fog!: THREE.FogExp2;
+  /** Active mountain atmosphere (sky, light, fog, particles). */
+  private atmo: TrackAtmosphere = ATMOS_ALPINE;
+  private ambience!: AmbienceParticles;
+  /** F11 / ?track: spline + section debug overlay */
+  trackDebug = typeof window !== 'undefined'
+    && window.location.search.includes('track');
   private rng = new RNG(4242);
   private lastZone = -1;
   private countTimer = 0;
@@ -615,16 +624,20 @@ export class Game {
     bounce.position.set(0.2, -1, 0.1);
     this.scene.add(bounce);
 
-    // sky
+    // sky — theme texture applied in applyAtmosphere()
     const skyGeo = new THREE.SphereGeometry(3200, 24, 16);
-    const skyMat = new THREE.MeshBasicMaterial({ map: makeSkyTexture(), side: THREE.BackSide, fog: false, depthWrite: false });
+    const skyMat = new THREE.MeshBasicMaterial({
+      map: makeSkyTexture(), side: THREE.BackSide, fog: false, depthWrite: false,
+    });
     this.sky = new THREE.Mesh(skyGeo, skyMat);
     this.sky.renderOrder = -10;
     this.scene.add(this.sky);
 
     this.clouds = new THREE.Group();
     const cloudTex = makeCloudTexture();
-    const cloudMat = new THREE.MeshBasicMaterial({ map: cloudTex, transparent: true, depthWrite: false, fog: false, opacity: 0.85 });
+    const cloudMat = new THREE.MeshBasicMaterial({
+      map: cloudTex, transparent: true, depthWrite: false, fog: false, opacity: 0.85,
+    });
     for (let i = 0; i < 26; i++) {
       const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), cloudMat);
       const a = this.rng.range(0, TAU);
@@ -637,15 +650,18 @@ export class Game {
     this.clouds.renderOrder = -9;
     this.scene.add(this.clouds);
 
-    // distant ridges
-    this.ridge = this.buildRidges();
+    // distant ridges — rebuilt per mountain in applyAtmosphere()
+    this.ridge = buildThemeRidges(ATMOS_ALPINE);
     this.scene.add(this.ridge);
 
-    // track — the default mountain is the authored vertical slice
+    // track — Shaleback is the reference-quality default
     this.track = buildMountainTrack('shaleback', 1);
     this.scene.add(this.track.build());
     this.track.updateSceneryLod(0, 1, true);
     this.checkpoints.build(this.track);
+    if (this.trackDebug) {
+      this.track.buildDebugOverlay().visible = true;
+    }
 
     // particles
     const soft = makeSoftTexture();
@@ -654,6 +670,13 @@ export class Game {
     this.smokePool = new ParticlePool(700, soft, THREE.NormalBlending);
     this.sparkPool = new ParticlePool(500, soft, THREE.AdditiveBlending);
     this.scene.add(this.smokePool.points, this.dirtPool.points, this.sparkPool.points);
+
+    // per-mountain ambient (ash / mist / dust / embers)
+    this.ambience = new AmbienceParticles(soft, 160);
+    this.scene.add(this.ambience.points);
+
+    // lock Shaleback alpine look as the starting world
+    this.applyAtmosphere(mountainAtmosphere('shaleback'));
 
     // BONK impact rings — small pool, expand + fade, no per-hit alloc
     const ringGeo = new THREE.RingGeometry(0.72, 1.0, 40);
@@ -691,74 +714,56 @@ export class Game {
   }
 
   /**
-   * Layered mountain vistas. Three concentric rings at different distances,
-   * each paler and bluer than the one in front — cheap aerial perspective
-   * that gives the horizon real depth instead of one flat cut-out band.
+   * Apply a mountain's sky, lighting, fog, ridges and ambient particles.
+   * Called on first load and every loadMountain() so each course is
+   * immediately recognizable from the horizon alone.
    */
-  private buildRidges(): THREE.Group {
-    const group = new THREE.Group();
-    const LAYERS = [
-      { R: 1750, base: -340, amp: 210, tall: 300, seed: 0.0, tint: 0.18, sharp: 1.5 },
-      { R: 2500, base: -320, amp: 300, tall: 520, seed: 51.3, tint: 0.46, sharp: 1.1 },
-      { R: 3300, base: -300, amp: 380, tall: 760, seed: 97.7, tint: 0.72, sharp: 0.85 },
-    ];
-    const HAZE = new THREE.Color(0.78, 0.86, 0.95);
+  private applyAtmosphere(atmo: TrackAtmosphere) {
+    this.atmo = atmo;
 
-    // ---- MOUNTAIN SCALE. A hazy valley floor far below the course, so the
-    // drop reads as "thousands of metres down a mountain" rather than "a
-    // hillside with a skybox". Sits under everything and never occludes.
-    const floor = new THREE.Mesh(
-      new THREE.CircleGeometry(3400, 40).rotateX(-Math.PI / 2),
-      new THREE.MeshBasicMaterial({
-        color: new THREE.Color(0.60, 0.70, 0.80),
-        fog: false, depthWrite: false, transparent: true, opacity: 0.92,
-      }),
-    );
-    floor.position.y = -560;
-    floor.renderOrder = -9;
-    group.add(floor);
+    // sky gradient
+    const skyMat = this.sky.material as THREE.MeshBasicMaterial;
+    const oldMap = skyMat.map;
+    skyMat.map = makeThemeSkyTexture(atmo.sky);
+    skyMat.needsUpdate = true;
+    oldMap?.dispose();
 
-    for (const L of LAYERS) {
-      const seg = 190;
-      const pos: number[] = [], col: number[] = [], idx: number[] = [];
-      const c = new THREE.Color();
-      for (let i = 0; i <= seg; i++) {
-        const a = (i / seg) * TAU;
-        // sharpened noise gives angular peaks rather than rolling lumps,
-        // which is what reads as "mountain silhouette"
-        const n1 = fbm1(i * 0.11 + L.seed, 4);
-        const n2 = Math.max(0, fbm1(i * 0.037 + L.seed + 20, 2));
-        const peak = Math.pow(Math.abs(n1), 1 / L.sharp) * Math.sign(n1);
-        const hgt = L.amp + peak * L.amp * 0.9 + n2 * L.tall;
-        const x = Math.cos(a) * L.R, z = Math.sin(a) * L.R;
-        pos.push(x, L.base, z);
-        pos.push(x, L.base + hgt, z);
-        // rock at the base, snow-lit toward the peaks, all pushed to haze
-        c.setRGB(0.30, 0.36, 0.48).lerp(HAZE, L.tint);
-        col.push(c.r, c.g, c.b);
-        const snow = clamp01((hgt - L.amp * 1.1) / (L.tall * 0.7));
-        c.setRGB(0.52, 0.60, 0.72).lerp(new THREE.Color(1, 1, 1), snow * 0.65)
-          .lerp(HAZE, L.tint);
-        col.push(c.r, c.g, c.b);
+    // key + ambient
+    this.sun.color.setHex(atmo.sunColor);
+    this.sun.intensity = atmo.sunIntensity;
+    this.hemi.color.setHex(atmo.hemiSky);
+    this.hemi.groundColor.setHex(atmo.hemiGround);
+    this.hemi.intensity = atmo.hemiIntensity;
+    this.renderer.toneMappingExposure = atmo.exposure;
+
+    // fog base
+    this.fog.color.setHex(atmo.fogColor);
+    this.fog.density = 0.0011 * atmo.fogScale;
+
+    // clouds opacity
+    this.clouds.traverse(o => {
+      const m = o as THREE.Mesh;
+      if (m.material && (m.material as THREE.MeshBasicMaterial).opacity !== undefined) {
+        (m.material as THREE.MeshBasicMaterial).opacity = atmo.cloudOpacity;
       }
-      for (let i = 0; i < seg; i++) {
-        const a = i * 2, b = a + 1, d = a + 2, e = a + 3;
-        idx.push(a, d, b, b, d, e);
-      }
-      const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-      g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-      g.setIndex(idx);
-      // Unlit is correct here and only here: these are atmospheric backdrop
-      // layers whose colour IS the aerial perspective. Lighting them would
-      // fight the haze gradient that sells the distance.
-      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
-        vertexColors: true, side: THREE.DoubleSide, fog: false, depthWrite: false,
-      }));
-      m.renderOrder = -8;
-      group.add(m);
+    });
+
+    // rebuild distant ridges with theme colours
+    if (this.ridge) {
+      this.scene.remove(this.ridge);
+      this.ridge.traverse(o => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.geometry) mesh.geometry.dispose();
+        const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
+        const list = Array.isArray(mat) ? mat : mat ? [mat] : [];
+        for (const mm of list) mm.dispose();
+      });
     }
-    return group;
+    this.ridge = buildThemeRidges(atmo, this.mountainId.length * 17);
+    this.scene.add(this.ridge);
+
+    // ambient particles
+    this.ambience?.apply(atmo);
   }
 
   private mkRacer(isPlayer: boolean, i: number): Racer {
@@ -1060,6 +1065,14 @@ export class Game {
         this.physDebug = !this.physDebug;
         if (this.physDebugGroup) this.physDebugGroup.visible = this.physDebug;
         this.popup(this.physDebug ? 'PHYS DEBUG ON' : 'PHYS DEBUG OFF', 'sub', null, '#ffd400');
+        return;
+      }
+      if (k === 'F11') {
+        e.preventDefault();
+        this.trackDebug = !this.trackDebug;
+        const ov = this.track.debugGroup ?? this.track.buildDebugOverlay();
+        ov.visible = this.trackDebug;
+        this.popup(this.trackDebug ? 'TRACK DEBUG ON' : 'TRACK DEBUG OFF', 'sub', null, '#2fe6c8');
         return;
       }
     }
@@ -4168,6 +4181,11 @@ export class Game {
     this.scene.add(this.track.build());
     this.track.updateSceneryLod(0, 1, true);
     this.checkpoints.build(this.track);
+    if (this.trackDebug) {
+      this.track.buildDebugOverlay().visible = true;
+    }
+    // swap sky / light / ridges / particles for this mountain's identity
+    this.applyAtmosphere(mountainAtmosphere(m.id));
     this.lastZone = -1;
     this.rig.resetMenuClock();
     this.resetRace();
@@ -4375,53 +4393,46 @@ export class Game {
       this.camera.position.z,
     );
 
-    // fog / light per zone
+    // fog / light per zone, scaled by mountain atmosphere
     const zone = this.track.zoneAt(p.s);
-    // ---- ATMOSPHERIC PERSPECTIVE --------------------------------------
-    // Honest depth cue, not a geometry hider. Density is deliberately set
-    // so the fog is still LIGHT at the LOD cutoff (~460m canopy reach):
-    // at 0.0011, transmittance there is ~60%, so distant trees fade rather
-    // than vanish into a wall. If fog were doing the culling's job you
-    // would see a hard grey curtain at a fixed radius, which is the failure
-    // mode the brief calls out.
-    //
-    // The real scale cue is the three ridge layers, which are tinted toward
-    // haze at build time (0.18 / 0.46 / 0.72) — contrast falls off with
-    // distance independently of fog, so the mountain reads as enormous even
-    // where the fog is thin.
-    const fogTarget = 0.0011 * zone.fog;
+    const A = this.atmo;
+    // Density still tracks zone.fog so forest/volcano sections breathe, but
+    // the mountain's fogScale sets the baseline (clear alpine vs thick mist).
+    const fogTarget = 0.0011 * zone.fog * A.fogScale;
     this.fog.density = damp(this.fog.density, fogTarget, 1.2, dt);
 
     // ---- FOREST READABILITY GUARANTEE ---------------------------------
-    // Dense sections use dark verges and heavy fog, which is atmospheric
-    // but risks losing the rider against the treeline. Lift the ambient
-    // and the fill inside those zones so the character stays readable —
-    // this is a legibility floor, not a look.
     const dense = clamp01((zone.treeDensity - 0.6) / 1.0);
-    this.hemi.intensity = damp(this.hemi.intensity, 1.15 + dense * 0.55, 1.5, dt);
-    this.sun.intensity = damp(this.sun.intensity, 2.6 - dense * 0.35, 1.5, dt);
-    // Fog picks up the warm afternoon haze rather than a neutral grey, so
-    // distance reads as atmosphere instead of a wash.
-    _c1.setHex(zone.far).lerp(_c2.setHex(0xdcd2c0), 0.66);
+    this.hemi.intensity = damp(
+      this.hemi.intensity, A.hemiIntensity + dense * 0.55, 1.5, dt);
+    this.sun.intensity = damp(
+      this.sun.intensity, A.sunIntensity - dense * 0.35, 1.5, dt);
+
+    // Fog blends zone verge color into the mountain fog palette
+    _c1.setHex(zone.far).lerp(_c2.setHex(A.fogColor), 0.66);
     this.fog.color.lerp(_c1, 1 - Math.exp(-1.2 * dt));
-    // Hold the golden-hour angle relative to the camera. The offset ratio
-    // matches the light's authored elevation (~23 degrees), so shadows stay
-    // long and raking for the whole descent instead of standing up as the
-    // player drops thousands of metres.
-    this.sun.position.copy(this.camera.position).add(_v1.set(-360, 250, 165));
+
+    // Sun tracks camera using the mountain's authored direction
+    const [ox, oy, oz] = A.sunOffset;
+    const sunDist = 420;
+    this.sun.position.copy(this.camera.position).add(
+      _v1.set(ox * sunDist, oy * sunDist, oz * sunDist));
     this.sun.target.position.copy(this.camera.position);
+
+    // ambient particles (ash / mist / dust / embers)
+    if (!this.reducedMotion) {
+      this.ambience.update(dt, this.camera.position, 0.4 + clamp01(p.v / 40));
+    }
 
     // spectators
     this.track.updateSpectators(p.s, this.time, dt, this.perfGov.crowdScale);
     this.track.updateSceneryLod(p.s, this.perfGov.lodScale);
     this.track.animateWater(this.time);
-    // foliage sway: ambient + speed + boost (shader uniforms only)
     const windK = this.reducedMotion ? 0.25 : 1;
     const windStr =
       (0.35 + clamp01(p.v / 40) * 1.15 + (this.boosting ? 0.55 : 0)) * windK;
     this.track.animateWind(this.time, windStr);
 
-    // crowd reaction near player
     this.hud.offTrack = Math.abs(p.x) > this.track.halfWidth(p.s) + 0.5;
     this.hud.hitFlash = Math.max(0, this.hud.hitFlash - dt * 2.6);
   }
