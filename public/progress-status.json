@@ -1,21 +1,18 @@
 {
-  "updated": "2026-08-11T22:00:00Z",
-  "stage": 12,
-  "stageName": "Five mountains + TrackDefinition system",
+  "updated": "2026-08-11T23:30:00Z",
+  "stage": 13,
+  "stageName": "Audio theme + perf stream + ship branch",
   "percent": 100,
   "log": [
-    "TrackDefinition + atmosphere presets (alpine/volcanic/forest/limestone/sunset)",
-    "Shaleback reference: 10 sections, landmarks, alpine sky/light/ridges",
-    "Cinder 8s volcanic, Thornwood 10s forest, Ironjaw 10s limestone, Lastlight 10s sunset",
-    "Per-mountain sky, lighting, ridge silhouettes, ambient particles",
-    "Track debug overlay (F11 / ?track)",
+    "Audio: per-theme beds (rumble/forest/wind/birds) + BPM/finale",
+    "Perf: surface chunk streaming, theme LOD mul, governor floor",
+    "Ambience particle budget under load",
+    "Balance + identity polish (prior)",
     "verify: 21/21 physics + typecheck + build"
   ],
   "items": [
-    { "id": "trackDef", "title": "TrackDefinition system", "note": "data-driven mountains", "status": "done" },
-    { "id": "shaleback", "title": "Shaleback reference quality", "note": "spline + env + atmosphere", "status": "done" },
-    { "id": "others", "title": "Four sibling mountains", "note": "cinder thornwood ironjaw lastlight", "status": "done" },
-    { "id": "atmosphere", "title": "Per-mountain sky/light/particles", "note": "applyAtmosphere on load", "status": "done" },
-    { "id": "debug", "title": "Track debug tools", "note": "F11 spline sections landmarks", "status": "done" }
+    { "id": "audio", "title": "Audio theming", "note": "setTheme per mountain", "status": "done" },
+    { "id": "perf", "title": "Perf streaming", "note": "chunks + theme LOD", "status": "done" },
+    { "id": "branch", "title": "Ship hygiene branch", "note": "feat/mountains-track-system", "status": "done" }
   ]
 }

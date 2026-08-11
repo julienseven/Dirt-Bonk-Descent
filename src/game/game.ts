@@ -37,7 +37,7 @@ import {
   type TrickTally,
 } from './tricks';
 import { getMode, type ModeId } from './modes';
-import { PerfGovernor, FixedStep, aiThinkInterval, LOD_BANDS } from './perf';
+import { PerfGovernor, FixedStep, aiThinkInterval, LOD_BANDS, themePerfFloor } from './perf';
 import {
   AI_TIERS, buildField, tierFromLegacy,
   planRivalThink, planRivalHop, planRivalCombat,
@@ -677,6 +677,8 @@ export class Game {
 
     // lock Shaleback alpine look as the starting world
     this.applyAtmosphere(mountainAtmosphere('shaleback'));
+    audio.setTheme('alpine');
+    this.perfGov.setThemeFloor(themePerfFloor('alpine', 4600));
 
     // BONK impact rings — small pool, expand + fade, no per-hit alloc
     const ringGeo = new THREE.RingGeometry(0.72, 1.0, 40);
@@ -4188,7 +4190,12 @@ export class Game {
       this.track.buildDebugOverlay().visible = true;
     }
     // swap sky / light / ridges / particles for this mountain's identity
+    const def = getTrackDefinition(m.id);
     this.applyAtmosphere(mountainAtmosphere(m.id));
+    audio.setTheme(def.theme);
+    // soft quality floor so dense/long mountains don't thrash first frames
+    this.perfGov.setThemeFloor(themePerfFloor(def.theme, def.length));
+    this.ambience.setBudget(this.perfGov.particleScale);
     this.lastZone = -1;
     this.rig.resetMenuClock();
     this.resetRace();
@@ -4430,12 +4437,13 @@ export class Game {
       _v1.set(ox * sunDist, oy * sunDist, oz * sunDist));
     this.sun.target.position.copy(this.camera.position);
 
-    // ambient particles (ash / mist / dust / embers)
+    // ambient particles (ash / mist / dust / embers) — budget tracks governor
+    this.ambience.setBudget(this.perfGov.particleScale);
     if (!this.reducedMotion) {
       this.ambience.update(dt, this.camera.position, 0.4 + clamp01(p.v / 40));
     }
 
-    // spectators
+    // spectators + scenery LOD + terrain chunk streaming
     this.track.updateSpectators(p.s, this.time, dt, this.perfGov.crowdScale);
     this.track.updateSceneryLod(p.s, this.perfGov.lodScale);
     this.track.animateWater(this.time);
@@ -4818,9 +4826,10 @@ export class Game {
       suspRate: clamp01(Math.abs(p.suspV) / 7),
       // ---- environment, read from the section you're actually in
       forest: clamp01(zoneNow.treeDensity / 1.6),
-      water: zoneNow.surface === 'mud' ? 0.85 : 0,
+      water: zoneNow.surface === 'mud' ? 0.85
+        : zoneNow.surface === 'rock' ? 0.05 : 0,
       calm: clamp01(1 - zoneNow.crowd / 2.2) * (p.grounded ? 1 : 0.4),
-      // ---- the finale builds over the last 500m
+      // ---- the finale builds over the last 500m (Lastlight stretches earlier via audio theme)
       homeStretch: h.phase === 'race'
         ? clamp01(1 - toLine / 500) : 0,
       speed01: clamp01(p.v / 42),

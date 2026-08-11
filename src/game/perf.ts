@@ -87,17 +87,36 @@ export class PerfGovernor {
 
   // ---- what each tier costs, in priority order -------------------------
 
+  /**
+   * Optional floor applied by heavy mountains (forest / endurance) so the
+   * first frames don't thrash before adaptive sampling has evidence.
+   * 0 = no bias; 1–2 nudges the starting tier without locking quality.
+   */
+  themeFloor = 0;
+
   /** Particle spawn rate multiplier. First thing to go. */
-  get particleScale(): number { return [1, 0.7, 0.45, 0.25][this.tier]; }
+  get particleScale(): number {
+    const t = Math.min(3, this.tier + this.themeFloor);
+    return [1, 0.7, 0.45, 0.25][t];
+  }
 
   /** Scenery LOD distances shrink as tier rises. */
-  get lodScale(): number { return [1, 0.82, 0.65, 0.5][this.tier]; }
+  get lodScale(): number {
+    const t = Math.min(3, this.tier + this.themeFloor);
+    return [1, 0.82, 0.65, 0.5][t];
+  }
 
   /** Extra spectators beyond the near band get dropped. */
-  get crowdScale(): number { return [1, 0.8, 0.55, 0.3][this.tier]; }
+  get crowdScale(): number {
+    const t = Math.min(3, this.tier + this.themeFloor);
+    return [1, 0.8, 0.55, 0.3][t];
+  }
 
   /** Renderer pixel ratio ceiling. Last visual resort. */
-  get pixelRatio(): number { return [2, 1.75, 1.4, 1.0][this.tier]; }
+  get pixelRatio(): number {
+    const t = Math.min(3, this.tier + this.themeFloor);
+    return [2, 1.75, 1.4, 1.0][t];
+  }
 
   /**
    * AI think rate multiplier. Deliberately mild even at the worst tier —
@@ -105,7 +124,23 @@ export class PerfGovernor {
    */
   get aiScale(): number { return [1, 1, 1.4, 2.0][this.tier]; }
 
-  reset() { this.samples.length = 0; this.cursor = 0; this.tier = 0; this.cooldown = 0; }
+  /** Set a soft quality floor for dense/long mountains. */
+  setThemeFloor(n: number) {
+    this.themeFloor = Math.max(0, Math.min(2, n | 0));
+  }
+
+  reset() {
+    this.samples.length = 0; this.cursor = 0; this.tier = 0;
+    this.cooldown = 0; this.themeFloor = 0;
+  }
+}
+
+/** Suggested governor floor by mountain theme + length. */
+export function themePerfFloor(theme: string, length: number): number {
+  if (theme === 'forest') return 1;
+  if (theme === 'limestone' || length > 5500) return 1;
+  if (theme === 'volcanic') return 0; // short sprint, few trees
+  return 0;
 }
 
 /**

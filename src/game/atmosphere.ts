@@ -123,6 +123,10 @@ export class AmbienceParticles {
     this.points.visible = false;
   }
 
+  /** Active particle count (budget can shrink this under load). */
+  private active = 0;
+  private budget = 1;
+
   apply(atmo: TrackAtmosphere) {
     this.kind = atmo.particle;
     this.color.setHex(atmo.particleColor);
@@ -137,8 +141,24 @@ export class AmbienceParticles {
     mat.blending = this.kind === 'embers'
       ? THREE.AdditiveBlending
       : THREE.NormalBlending;
+    this.setBudget(this.budget);
     // seed particles off-screen until first update
-    for (let i = 0; i < this.n; i++) this.respawn(i, new THREE.Vector3(), true);
+    for (let i = 0; i < this.active; i++) this.respawn(i, new THREE.Vector3(), true);
+  }
+
+  /**
+   * 0..1 quality scale — ash/mist tracks drop particle count first when the
+   * governor is under pressure.
+   */
+  setBudget(scale: number) {
+    this.budget = clamp01(scale);
+    // denser particle modes start higher; mist needs more for a soft sheet
+    const base = this.kind === 'mist' ? 1.0
+      : this.kind === 'ash' ? 0.95
+      : this.kind === 'embers' ? 0.7
+      : 0.75;
+    this.active = Math.max(0, Math.floor(this.n * base * this.budget));
+    this.points.visible = this.kind !== 'none' && this.rate > 0.01 && this.active > 0;
   }
 
   private respawn(i: number, cam: THREE.Vector3, cold = false) {
@@ -171,9 +191,9 @@ export class AmbienceParticles {
   }
 
   update(dt: number, cam: THREE.Vector3, wind = 0.4) {
-    if (!this.points.visible) return;
+    if (!this.points.visible || this.active <= 0) return;
     const windX = wind * 1.2;
-    for (let i = 0; i < this.n; i++) {
+    for (let i = 0; i < this.active; i++) {
       this.pos[i * 3] += (this.vel[i * 3] + windX) * dt;
       this.pos[i * 3 + 1] += this.vel[i * 3 + 1] * dt;
       this.pos[i * 3 + 2] += this.vel[i * 3 + 2] * dt;
@@ -184,6 +204,10 @@ export class AmbienceParticles {
       if (dx * dx + dy * dy + dz * dz > 95 * 95 || this.pos[i * 3 + 1] < cam.y - 25) {
         this.respawn(i, cam);
       }
+    }
+    // hide unused slots by parking them far away
+    for (let i = this.active; i < this.n; i++) {
+      this.pos[i * 3 + 1] = -9999;
     }
     (this.points.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
     (this.points.geometry.getAttribute('color') as THREE.BufferAttribute).needsUpdate = true;

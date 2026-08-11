@@ -77,7 +77,22 @@ Zone `fog` still modulates density as you ride (forest darkens, summit clears).
 
 ## Performance notes
 
-- Terrain is chunked (`CHUNK = 96` nodes)
+- Terrain is chunked (`CHUNK = 96` nodes) and **streamed by s** (`updateSurfaceChunks`)
 - Vegetation is InstancedMesh + distance-band repack (`updateSceneryLod`)
+- Theme LOD multiplier: forest/endurance pull scenery reach in
+- Perf governor theme floor: Thornwood / Ironjaw start one tier leaner
+- Ambient particles: pooled + budgeted via `particleScale`
 - Distant ridges are unlit low-poly silhouettes
-- Ambient particles are a fixed pool (~160 points)
+
+## Audio theming
+
+`audio.setTheme(theme)` on mountain load retargets:
+
+| Theme | Beds | Music |
+|-------|------|-------|
+| alpine | forest + birds | 158 bpm classic |
+| volcanic | ash rumble, dry roll, no birds | 168 bpm aggressive |
+| forest | dense canopy, wet water, many birds | 148 bpm |
+| limestone | thin high wind | 152 bpm, strong finale |
+| sunset | warm wind, big finale layers | 156 bpm, finaleMul 1.45 |
+| canyon | grit rumble, sparse birds | 162 bpm |

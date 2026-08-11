@@ -1,7 +1,12 @@
 // ---------------------------------------------------------------------------
 // DIRT BONK DESCENT :: fully procedural audio (no assets)
+//
+// Continuous beds (roll, wind, forest, water, rumble) + a step sequencer
+// for the punk-surf bed. Mountain theme retargets filters, bed gains, bird
+// rates, BPM and finale lift so each course sounds like its world.
 // ---------------------------------------------------------------------------
 import { clamp, clamp01, lerp } from './core';
+import type { TrackTheme } from './trackDef';
 
 function makeNoiseBuffer(ctx: AudioContext, seconds = 2): AudioBuffer {
   const len = Math.floor(ctx.sampleRate * seconds);
@@ -34,6 +39,7 @@ export class GameAudio {
   private brake!: Loop;     // pad-on-rotor hiss
   private forest!: Loop;    // leaf rustle bed
   private water!: Loop;     // running water near the mud pit
+  private rumble!: Loop;    // low mountain body (volcano / high wind / canyon)
   private chainOsc: OscillatorNode | null = null;
   private chainGain: GainNode | null = null;
   private chainFilter: BiquadFilterNode | null = null;
@@ -46,10 +52,15 @@ export class GameAudio {
   private musicTimer = 0;
   private step = 0;
   private bpm = 158;
+  private baseBpm = 158;
   private musicOn = true;
   private sfxOn = true;
   private intensity = 0;    // 0..1 drives music layers
   private homeStretch = 0;  // 0..1 approach to the finish
+  /** Active mountain world identity. */
+  private theme: TrackTheme = 'alpine';
+  /** Theme multipliers applied every update. */
+  private themeProf = themeProfile('alpine');
 
   init() {
     if (this.ctx) return;
@@ -91,6 +102,8 @@ export class GameAudio {
     this.forest = this.makeLoop('bandpass', 2400, 0, 0.7);
     // water: lower, wetter band
     this.water = this.makeLoop('bandpass', 900, 0, 0.9);
+    // mountain body: volcanic ash / thin high wind / canyon heat
+    this.rumble = this.makeLoop('lowpass', 90, 0, 0.55);
     this.rival = this.makeLoop('bandpass', 300, 0, 1.3);
     if (ctx.createStereoPanner) {
       this.rivalPan = ctx.createStereoPanner();
@@ -155,6 +168,25 @@ export class GameAudio {
   get musicEnabled() { return this.musicOn; }
   get sfxEnabled() { return this.sfxOn; }
 
+  /**
+   * Retarget continuous beds + music character for a mountain.
+   * Call when loadMountain() swaps the world.
+   */
+  setTheme(theme: TrackTheme) {
+    this.theme = theme;
+    this.themeProf = themeProfile(theme);
+    this.baseBpm = this.themeProf.bpm;
+    this.bpm = this.baseBpm;
+    if (!this.ready) return;
+    // retarget static filter centres so the first frame after a swap is correct
+    this.forest.filter.frequency.value = this.themeProf.forestHz;
+    this.wind.filter.frequency.value = this.themeProf.windHz;
+    this.rumble.filter.frequency.value = this.themeProf.rumbleHz;
+    this.water.filter.frequency.value = this.themeProf.waterHz;
+  }
+
+  get currentTheme() { return this.theme; }
+
   /** Continuous state update from the sim. */
   update(dt: number, o: {
     speed01: number; grounded: boolean; offTrack: boolean; airborne: boolean;
@@ -182,22 +214,26 @@ export class GameAudio {
     if (!this.ready || !this.ctx) return;
     const t = this.ctx.currentTime;
     const sp = clamp01(o.speed01);
+    const P = this.themeProf;
 
     const rollTarget = o.paused ? 0 : (o.grounded ? lerp(0.02, o.offTrack ? 0.4 : 0.24, sp) : 0.0);
-    this.roll.gain.gain.setTargetAtTime(rollTarget, t, 0.06);
-    this.roll.filter.frequency.setTargetAtTime(lerp(150, o.offTrack ? 520 : 900, sp), t, 0.1);
+    this.roll.gain.gain.setTargetAtTime(rollTarget * P.rollMul, t, 0.06);
+    this.roll.filter.frequency.setTargetAtTime(
+      lerp(150, o.offTrack ? 520 : 900, sp) * P.rollTone, t, 0.1);
     this.roll.filter.Q.value = o.offTrack ? 0.6 : 1.6;
 
     const gale = clamp01(o.gale ?? 0);
     const windTarget = o.paused
       ? 0
-      : lerp(0.0, 0.30, Math.pow(sp, 1.7)) + (o.airborne ? 0.06 : 0) + gale * 0.26;
+      : (lerp(0.0, 0.30, Math.pow(sp, 1.7)) + (o.airborne ? 0.06 : 0) + gale * 0.26)
+        * P.windMul + P.windBed;
     this.wind.gain.gain.setTargetAtTime(windTarget, t, gale > 0 ? 0.5 : 0.12);
     // a summit gale is broader and lower than the rush of speed
     this.wind.filter.frequency.setTargetAtTime(
-      lerp(lerp(320, 2600, sp), 520, gale), t, 0.3);
+      lerp(lerp(P.windHz * 0.5, P.windHz * 3.5, sp), P.windHz * 0.75, gale), t, 0.3);
 
-    this.crowd.gain.gain.setTargetAtTime(o.paused ? 0 : clamp01(o.crowdNear) * 0.16, t, 0.35);
+    this.crowd.gain.gain.setTargetAtTime(
+      o.paused ? 0 : clamp01(o.crowdNear) * 0.16 * P.crowdMul, t, 0.35);
 
     // a rival alongside you should be audible before you see them
     const rn = clamp01(o.rivalNear ?? 0);
@@ -237,31 +273,44 @@ export class GameAudio {
       this.creak(sr);
     }
 
-    // ---- FOREST / WATER beds
+    // ---- FOREST / WATER / RUMBLE beds (theme-weighted)
+    const forestIn = clamp01(o.forest ?? 0) * P.forestMul;
     this.forest.gain.gain.setTargetAtTime(
-      o.paused ? 0 : clamp01(o.forest ?? 0) * 0.085, t, 0.6);
+      o.paused ? 0 : forestIn * 0.085, t, 0.6);
+    this.forest.filter.frequency.setTargetAtTime(P.forestHz, t, 0.8);
+
+    const waterIn = clamp01(o.water ?? 0) * P.waterMul;
     this.water.gain.gain.setTargetAtTime(
-      o.paused ? 0 : clamp01(o.water ?? 0) * 0.11, t, 0.5);
+      o.paused ? 0 : waterIn * 0.11, t, 0.5);
+    this.water.filter.frequency.setTargetAtTime(P.waterHz, t, 0.6);
+
+    // volcanic ash / limestone body / canyon heat — always-on mountain voice
+    const rumbleTarget = o.paused ? 0
+      : (P.rumbleBed + sp * P.rumbleSpeed + gale * 0.08);
+    this.rumble.gain.gain.setTargetAtTime(rumbleTarget, t, 0.7);
+    this.rumble.filter.frequency.setTargetAtTime(P.rumbleHz, t, 0.5);
 
     // ---- BIRDS: only where it's quiet and you're not flat out
     this.birdTimer -= dt;
-    const calm = clamp01(o.calm ?? 0) * (1 - sp * 0.7);
-    if (!o.paused && calm > 0.25 && this.birdTimer <= 0) {
-      this.birdTimer = 1.6 + Math.random() * 5.5;
+    const calm = clamp01(o.calm ?? 0) * (1 - sp * 0.7) * P.birdMul;
+    if (!o.paused && calm > 0.25 && this.birdTimer <= 0 && P.birdMul > 0.05) {
+      this.birdTimer = (1.6 + Math.random() * 5.5) / Math.max(0.3, P.birdMul);
       this.birdCall(calm);
     }
 
     // Music tracks the run: speed and style raise it, but the approach to
     // the line dominates, so the last stretch always feels like a finale.
-    const home = clamp01(o.homeStretch ?? 0);
+    // Lastlight / ironjaw push the finale harder.
+    const home = clamp01(o.homeStretch ?? 0) * P.finaleMul;
     this.intensity = clamp01(o.intensity * (1 - home * 0.45) + home);
     this.homeStretch = home;
+    this.bpm = this.baseBpm + this.intensity * P.bpmLift;
     if (this.musicOn && !o.paused) this.tickMusic(dt);
   }
 
   // -- music sequencer ------------------------------------------------------
   private tickMusic(dt: number) {
-    const spb = 60 / (this.bpm + this.intensity * 18);
+    const spb = 60 / (this.bpm + this.intensity * 12);
     const stepDur = spb / 4;
     this.musicTimer += dt;
     let guard = 0;
@@ -316,6 +365,10 @@ export class GameAudio {
       }
       // four-on-the-floor kick under the last stretch
       if (H > 0.6 && s % 2 === 0 && s % 4 !== 0) this.kick(t, 0.35 * H);
+      // Lastlight / epic themes: extra octave sparkle near the line
+      if (H > 0.7 && this.themeProf.finaleMul > 1.15 && s % 8 === 4) {
+        this.stab(t, 220 * Math.pow(2, 12 / 12), 0.04 * H);
+      }
     }
   }
 
@@ -595,6 +648,94 @@ export class GameAudio {
   uiClick() { this.tone({ freq: 720, freq2: 980, dur: 0.06, peak: 0.10, type: 'square' }); }
   uiMove() { this.tone({ freq: 420, dur: 0.05, peak: 0.07, type: 'square' }); }
   scrape(v: number) { this.burst({ dur: 0.12, peak: 0.12 * v, f0: 3000, f1: 1200, q: 4, rate: 1.6 }); }
+}
+
+/** Continuous-bed + music character per mountain theme. */
+interface ThemeAudioProfile {
+  forestMul: number; forestHz: number;
+  waterMul: number; waterHz: number;
+  windMul: number; windBed: number; windHz: number;
+  rumbleBed: number; rumbleSpeed: number; rumbleHz: number;
+  birdMul: number;
+  rollMul: number; rollTone: number;
+  crowdMul: number;
+  bpm: number; bpmLift: number; finaleMul: number;
+}
+
+function themeProfile(theme: TrackTheme): ThemeAudioProfile {
+  switch (theme) {
+    case 'volcanic':
+      // ash, low rumble, no birds, dry grit under the tyres
+      return {
+        forestMul: 0, forestHz: 1800,
+        waterMul: 0.35, waterHz: 700,
+        windMul: 0.85, windBed: 0.04, windHz: 480,
+        rumbleBed: 0.07, rumbleSpeed: 0.05, rumbleHz: 70,
+        birdMul: 0,
+        rollMul: 1.15, rollTone: 0.85,
+        crowdMul: 0.4,
+        bpm: 168, bpmLift: 22, finaleMul: 1.1,
+      };
+    case 'forest':
+      // wet canopy, close wind, lots of birds in calm stretches
+      return {
+        forestMul: 1.45, forestHz: 2100,
+        waterMul: 1.25, waterHz: 850,
+        windMul: 0.7, windBed: 0.02, windHz: 900,
+        rumbleBed: 0.01, rumbleSpeed: 0.01, rumbleHz: 110,
+        birdMul: 1.6,
+        rollMul: 0.95, rollTone: 0.9,
+        crowdMul: 0.7,
+        bpm: 148, bpmLift: 14, finaleMul: 1.0,
+      };
+    case 'limestone':
+      // thin high air, sparse birds, long wind
+      return {
+        forestMul: 0.45, forestHz: 2600,
+        waterMul: 0.4, waterHz: 950,
+        windMul: 1.35, windBed: 0.06, windHz: 1400,
+        rumbleBed: 0.03, rumbleSpeed: 0.02, rumbleHz: 95,
+        birdMul: 0.35,
+        rollMul: 1.05, rollTone: 1.1,
+        crowdMul: 0.85,
+        bpm: 152, bpmLift: 18, finaleMul: 1.2,
+      };
+    case 'sunset':
+      // warmer bed, bigger finale — trailer mountain
+      return {
+        forestMul: 0.55, forestHz: 2300,
+        waterMul: 0.5, waterHz: 900,
+        windMul: 1.1, windBed: 0.03, windHz: 1100,
+        rumbleBed: 0.02, rumbleSpeed: 0.015, rumbleHz: 100,
+        birdMul: 0.7,
+        rollMul: 1.0, rollTone: 1.0,
+        crowdMul: 1.1,
+        bpm: 156, bpmLift: 24, finaleMul: 1.45,
+      };
+    case 'canyon':
+      // dry heat, light wind, grit
+      return {
+        forestMul: 0.15, forestHz: 2000,
+        waterMul: 0.15, waterHz: 750,
+        windMul: 0.9, windBed: 0.03, windHz: 700,
+        rumbleBed: 0.04, rumbleSpeed: 0.03, rumbleHz: 85,
+        birdMul: 0.2,
+        rollMul: 1.1, rollTone: 0.95,
+        crowdMul: 0.9,
+        bpm: 162, bpmLift: 18, finaleMul: 1.05,
+      };
+    default: // alpine — classic Shaleback
+      return {
+        forestMul: 1.0, forestHz: 2400,
+        waterMul: 1.0, waterHz: 900,
+        windMul: 1.0, windBed: 0.0, windHz: 700,
+        rumbleBed: 0.0, rumbleSpeed: 0.0, rumbleHz: 90,
+        birdMul: 1.0,
+        rollMul: 1.0, rollTone: 1.0,
+        crowdMul: 1.0,
+        bpm: 158, bpmLift: 18, finaleMul: 1.0,
+      };
+  }
 }
 
 export const audio = new GameAudio();

@@ -195,6 +195,14 @@ export class Track {
     reach: number;
   }[] = [];
   private lastBandS = -1e9;
+  /**
+   * Terrain surface chunks — streamed by track distance so Ironjaw (6.2 km)
+   * and Thornwood (dense) don't keep the whole ribbon on the GPU.
+   */
+  private surfaceChunks: { mesh: THREE.Mesh; s0: number; s1: number }[] = [];
+  private lastChunkS = -1e9;
+  /** Theme multiplies scenery reach (forest denser → tighter, alpine open → longer). */
+  themeLodMul = 1;
   private propMeshes: Record<string, THREE.InstancedMesh> = {};
   private specWindow = { a: 0, b: 0 };
   rng = new RNG(20260114);
@@ -240,6 +248,8 @@ export class Track {
     if (meta?.landmarks) this.landmarks = meta.landmarks;
     if (meta?.startElevation !== undefined) this.startElevation = meta.startElevation;
     if (meta?.mountainId) this.mountainId = meta.mountainId;
+    // denser / longer worlds pull scenery in; open vistas keep it far
+    this.themeLodMul = themeLodMultiplier(this.theme, this.length);
     this.buildNodes();
     this.buildFeatures();
     this.buildShortcuts();
@@ -816,9 +826,11 @@ export class Track {
   updateSceneryLod(playerS: number, lodScale = 1, force = false) {
     if (!force && Math.abs(playerS - this.lastBandS) < 12) return;
     this.lastBandS = playerS;
+    // theme pulls reach in on dense forests / long endurance courses
+    const scale = lodScale * this.themeLodMul;
 
     for (const band of this.sceneryBands) {
-      const reach = band.reach * lodScale;
+      const reach = band.reach * scale;
       // a little more behind than in front is wasted; bias forward
       const lo = playerS - reach * 0.35;
       const hi = playerS + reach;
@@ -845,6 +857,25 @@ export class Track {
       band.mesh.boundingSphere.center.copy(_p);
       band.mesh.boundingSphere.radius = reach * 1.2 + 80;
     }
+
+    this.updateSurfaceChunks(playerS, force);
+  }
+
+  /**
+   * Show only terrain chunks near the player. Keeps draw count proportional
+   * to visible mountain rather than full course length.
+   */
+  updateSurfaceChunks(playerS: number, force = false) {
+    if (!this.surfaceChunks.length) return;
+    if (!force && Math.abs(playerS - this.lastChunkS) < 40) return;
+    this.lastChunkS = playerS;
+    // generous window: surface is continuous and popping is more visible
+    // than a few extra chunks. ~900 m ahead / 250 m behind covers jump lands.
+    const lo = playerS - 250;
+    const hi = playerS + 900;
+    for (const c of this.surfaceChunks) {
+      c.mesh.visible = c.s1 >= lo && c.s0 <= hi;
+    }
   }
 
   /**
@@ -857,6 +888,7 @@ export class Track {
     for (const t of this.waterMaps) t.dispose();
     this.waterMaps.length = 0;
     this.sceneryBands.length = 0;
+    this.surfaceChunks.length = 0;
     this.specMeshes.length = 0;
     this.propMeshes = {};
   }
@@ -1029,6 +1061,7 @@ export class Track {
   }
 
   private buildSurface() {
+    this.surfaceChunks.length = 0;
     const tex = makeDirtTexture();
     tex.repeat.set(1, 1);
     // ground shares the rider's lighting model; very high roughness keeps
@@ -1148,9 +1181,18 @@ export class Track {
       g.computeBoundingSphere();
       const mesh = new THREE.Mesh(g, material);
       mesh.matrixAutoUpdate = false;
+      mesh.frustumCulled = true;
       this.group.add(mesh);
+      this.surfaceChunks.push({
+        mesh,
+        s0: c0 * STEP,
+        s1: c1 * STEP,
+      });
       rngc.next();
     }
+    // start with only the summit window visible — full ribbon would thrash
+    // mobile GPUs on 6 km courses before the first frame
+    this.updateSurfaceChunks(0, true);
   }
 
   private buildTape() {
@@ -2749,4 +2791,25 @@ export class Track {
     mkArch(14, 'START', '#101014', '#ffd400');
     mkArch(this.length - 26, 'FINISH', '#ffd400', '#101014');
   }
+}
+
+/**
+ * Scenery draw-reach multiplier by theme and length.
+ * Forest packs more instances per metre; long courses already stream by s,
+ * but still need tighter reach so repack stays cheap.
+ */
+function themeLodMultiplier(theme: TrackTheme, length: number): number {
+  let m = 1;
+  switch (theme) {
+    case 'forest': m = 0.78; break;     // Thornwood: dense canopy
+    case 'volcanic': m = 0.92; break;   // fewer trees, keep rocks
+    case 'limestone': m = 0.85; break;  // Ironjaw 6.2 km
+    case 'sunset': m = 0.90; break;
+    case 'canyon': m = 0.95; break;
+    default: m = 1.0; break;            // alpine open vistas
+  }
+  // endurance courses pay a small extra tax past 5 km
+  if (length > 5000) m *= 0.90;
+  else if (length > 4000) m *= 0.95;
+  return m;
 }
