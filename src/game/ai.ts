@@ -116,8 +116,9 @@ export interface TierDef {
   colour: string;
 
   /**
-   * Speed ceiling in m/s. Note the spread: rookie->absurd is only ~18%,
-   * because difficulty is meant to come from decisions, not throttle.
+   * Speed ceiling in m/s. Rookie→absurd is ~15% (~39→45). Difficulty still
+   * comes mostly from decisions (line, combat, reaction), but the cap must
+   * sit near a tucked player or pure speed makes every race a free win.
    */
   cap: number;
   /** per-rider spread within the field, so the pack isn't uniform */
@@ -147,11 +148,15 @@ export interface TierDef {
 }
 
 export const AI_TIERS: Record<AiTier, TierDef> = {
+  // Caps sit just under a competent tucked player (~34-37 m/s). The soft
+  // player ceiling is SOFT_CAP (39); tier spacing is ~1.5-2 m/s so each
+  // difficulty is a real fight rather than a free win on pure speed.
+  // Validated by ?tune: PRO/GOOD ≈ 50%, SAVAGE/EXPERT ≈ 80%, CASUAL loses above ROOKIE.
   rookie: {
     id: 'rookie', name: 'ROOKIE',
     blurb: 'Learning the mountain. Wide lines, early brakes, slow to recover.',
     colour: '#7ef7c8',
-    cap: 33.5, spread: 0.055,
+    cap: 32.5, spread: 0.055,
     lineQuality: 0.45, cornerCommit: 0.70, shortcutSkill: 0.10,
     overtaking: 0.25, combatSkill: 0.25, riskManagement: 0.35,
     recoverySkill: 0.35, trickSkill: 0.20, reaction: 0.42, bandK: 0.35,
@@ -160,7 +165,7 @@ export const AI_TIERS: Record<AiTier, TierDef> = {
     id: 'rider', name: 'RIDER',
     blurb: 'Knows the lines. Will take a shortcut if it is obvious.',
     colour: '#ffd400',
-    cap: 35.5, spread: 0.05,
+    cap: 34.4, spread: 0.05,
     lineQuality: 0.68, cornerCommit: 0.82, shortcutSkill: 0.40,
     overtaking: 0.50, combatSkill: 0.50, riskManagement: 0.58,
     recoverySkill: 0.58, trickSkill: 0.45, reaction: 0.26, bandK: 0.8,
@@ -169,7 +174,7 @@ export const AI_TIERS: Record<AiTier, TierDef> = {
     id: 'pro', name: 'PRO',
     blurb: 'Hits every apex, poaches every line, and punishes mistakes.',
     colour: '#ff9500',
-    cap: 37.5, spread: 0.045,
+    cap: 35.6, spread: 0.045,
     lineQuality: 0.88, cornerCommit: 0.93, shortcutSkill: 0.75,
     overtaking: 0.78, combatSkill: 0.78, riskManagement: 0.80,
     recoverySkill: 0.80, trickSkill: 0.70, reaction: 0.14, bandK: 1.05,
@@ -178,7 +183,7 @@ export const AI_TIERS: Record<AiTier, TierDef> = {
     id: 'absurd', name: 'ABSURD',
     blurb: 'Perfect lines, every shortcut, and it hits you when it hurts most.',
     colour: '#ff2e88',
-    cap: 39.5, spread: 0.04,
+    cap: 37.3, spread: 0.04,
     lineQuality: 1.0, cornerCommit: 1.0, shortcutSkill: 1.0,
     overtaking: 1.0, combatSkill: 1.0, riskManagement: 0.95,
     recoverySkill: 1.0, trickSkill: 0.95, reaction: 0.06, bandK: 1.3,

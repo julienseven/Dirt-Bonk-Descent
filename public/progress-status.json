@@ -1,31 +1,24 @@
 {
-  "updated": "2026-08-10T22:40:00Z",
-  "stage": 5,
-  "stageName": "Bike foundation rebuild + rider re-attach",
-  "percent": 92,
+  "updated": "2026-08-11T00:30:00Z",
+  "stage": 8,
+  "stageName": "All modes live · debug · mobile · polish",
+  "percent": 99,
   "log": [
-    "PHASE 1: Inspected bike hierarchy — sparse frame/triangle, fork axis ≠ axle vector",
-    "Rebuilt geometry as single source of truth (WHEEL_R, FRONT/REAR axles, BB, HEAD, SEAT)",
-    "Bike hierarchy: frame → fork/forkLower → swingarm → shock → cranks + anchors",
-    "Wheels: same diameter, ground contact y=0, wheelbase 1.26m, axles matched",
-    "Frame triangle + dual chainstays/seatstays + BB shell + seat post/saddle",
-    "Fork: crown → stanchions → lowers along FORK_AXIS; bars/grips parented to steer",
-    "Crank arms + pedal IK anchors rotate around BB; chain runs to rear hub",
-    "auditBikeGeometry() side-view audit: ok=true, zero issues",
-    "Rider re-tuned to new bars (arms 0.34/0.30, pelvis rest); attach error = 0 all states",
-    "Elbow REST ~99°, BRAKE ~63°, all builds plant hands/feet",
-    "Contact patches + wheel spin use FRONT_AXLE_POS / REAR_AXLE_POS / WHEEL_R",
-    "tsc clean · vite build green"
+    "KNOCKOUT + MAYHEM available:true — elim cuts + last-standing crown",
+    "Mode HUD meter for cut clock; MAYHEM objective strip",
+    "Mode strip UI with blurbs; results show CUT / mode name",
+    "Mobile: safe-area insets, mode-strip scroll, portrait menu OK",
+    "Rotate hint only during race/intro/countdown",
+    "Touch: safe-area pads, compact short-landscape scales",
+    "Debug: ?tune FAIL=0 OK=16 PRO/GOOD 50% BONK 6/6",
+    "Debug: 5 modes, drop-in×1, landscape+portrait, race smoke HUD OK",
+    "tsc + vite green · dist ~1.09 MB"
   ],
   "items": [
-    { "id": "inspect", "title": "Inspect bike/rider transforms", "note": "Fork axis mismatch + sparse rear triangle", "status": "done" },
-    { "id": "bike_geom", "title": "Canonical bike geometry constants", "note": "Single source of truth", "status": "done" },
-    { "id": "bike_hier", "title": "Coherent bike hierarchy", "note": "frame/fork/swingarm/cranks", "status": "done" },
-    { "id": "wheels", "title": "Matched wheels + ground contact", "note": "Side-view audit pass", "status": "done" },
-    { "id": "drivetrain", "title": "Crank + pedals + grip anchors", "note": "IK targets parented correctly", "status": "done" },
-    { "id": "rider_attach", "title": "Rider IK on corrected bike", "note": "Zero attach all builds/states", "status": "done" },
-    { "id": "physics_sync", "title": "Contact / spin / suspension sync", "note": "Uses exported axle constants", "status": "done" },
-    { "id": "ui", "title": "Arcade UI motion language", "note": "Minor polish left", "status": "pending" },
-    { "id": "ship", "title": "Build verify", "note": "tsc + vite OK", "status": "done" }
+    { "id": "knockout", "title": "KNOCKOUT live", "note": "20s cuts, last standing", "status": "done" },
+    { "id": "mayhem", "title": "MAYHEM live", "note": "hazard×2.4 aggression×2", "status": "done" },
+    { "id": "debug", "title": "Debug harness", "note": "tune/states/modes/race", "status": "done" },
+    { "id": "mobile", "title": "Mobile responsiveness", "note": "safe-area + HUD scale", "status": "done" },
+    { "id": "polish", "title": "Polish pass", "note": "results/tips/docs", "status": "done" }
   ]
 }

@@ -33,6 +33,12 @@ export interface ModeContext {
   finished: boolean;
   /** seconds remaining, for timed modes; Infinity when untimed */
   clock: number;
+  /** player was cut mid-race (knockout) */
+  eliminated?: boolean;
+  /** seconds until next elimination cut; Infinity when N/A */
+  elimIn?: number;
+  /** riders still in the field (not cut) */
+  activeField?: number;
 }
 
 /** What the HUD should show for this mode, beyond the standard readouts. */
@@ -114,8 +120,7 @@ export const DESCENT: ModeRules = {
 };
 
 // ---------------------------------------------------------------------------
-// Architecture-only modes. Rules are defined; the engine already reads every
-// switch they use, so enabling one is a flag flip plus its own testing pass.
+// All five modes are engine-live. reqLevel gates the menu, not the sim.
 // ---------------------------------------------------------------------------
 
 export const TIME_ATTACK: ModeRules = {
@@ -152,8 +157,8 @@ export const TRICK_JAM: ModeRules = {
   sub: 'STYLE WINS',
   blurb: 'Position is irrelevant. Highest style score at the bottom takes it.',
   colour: '#ff2e88',
-  available: false,
-  reqLevel: 6,
+  available: true,
+  reqLevel: 0,
   elimination: false,
   elimInterval: 0,
   timeLimit: untimed,
@@ -163,7 +168,7 @@ export const TRICK_JAM: ModeRules = {
   winBy: 'score',
   hud: c => ({
     objective: Math.round(c.score).toLocaleString(),
-    detail: 'STYLE TO BEAT',
+    detail: 'STYLE SCORE',
     meter: -1,
     urgent: false,
   }),
@@ -178,8 +183,8 @@ export const KNOCKOUT: ModeRules = {
   sub: 'LAST RIDER OUT',
   blurb: 'Every twenty seconds, whoever is last is gone. Do not be last.',
   colour: '#ff6a00',
-  available: false,
-  reqLevel: 9,
+  available: true,
+  reqLevel: 0,
   elimination: true,
   elimInterval: 20,
   timeLimit: untimed,
@@ -187,16 +192,26 @@ export const KNOCKOUT: ModeRules = {
   aggressionScale: 1.5,
   trickScale: 1,
   winBy: 'position',
-  hud: c => ({
-    objective: c.place >= c.fieldSize ? 'DANGER' : `P${c.place}`,
-    detail: 'NEXT CUT',
-    meter: -1,
-    urgent: c.place >= c.fieldSize,
-  }),
-  checkEnd: c => (c.finished ? 'finished' : null),
+  hud: c => {
+    const active = c.activeField ?? c.fieldSize;
+    const last = c.place >= active;
+    const t = c.elimIn ?? Infinity;
+    const interval = 20;
+    return {
+      objective: last ? 'DANGER' : `P${c.place} · ${active} LEFT`,
+      detail: Number.isFinite(t) ? `CUT ${fmt(t)}` : 'LAST STANDING',
+      meter: Number.isFinite(t)
+        ? 1 - clamp01((c.elimIn ?? 0) / interval)
+        : -1,
+      urgent: last || (Number.isFinite(t) && t < 5),
+    };
+  },
+  checkEnd: c => (c.eliminated ? 'eliminated' : c.finished ? 'finished' : null),
   xpScale: 1.35,
   cashScale: 1.3,
 };
+
+function clamp01(v: number) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
 export const MAYHEM: ModeRules = {
   id: 'mayhem',
@@ -204,8 +219,8 @@ export const MAYHEM: ModeRules = {
   sub: 'EVERYTHING AT ONCE',
   blurb: 'Maximum hazards, maximum aggression. The mountain wants you gone.',
   colour: '#c0f000',
-  available: false,
-  reqLevel: 12,
+  available: true,
+  reqLevel: 0,
   elimination: false,
   elimInterval: 0,
   timeLimit: untimed,
@@ -213,7 +228,12 @@ export const MAYHEM: ModeRules = {
   aggressionScale: 2.0,
   trickScale: 1.25,
   winBy: 'position',
-  hud: noHud,
+  hud: () => ({
+    objective: 'MAYHEM',
+    detail: 'HAZARDS ×2.4',
+    meter: -1,
+    urgent: true,
+  }),
   checkEnd: c => (c.finished ? 'finished' : null),
   xpScale: 1.5,
   cashScale: 1.4,

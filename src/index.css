@@ -9,6 +9,11 @@
     overscroll-behavior: none;
     touch-action: none;
     -webkit-tap-highlight-color: transparent;
+    /* notch / home-indicator safe padding for fixed HUD chrome */
+    --safe-t: env(safe-area-inset-top, 0px);
+    --safe-r: env(safe-area-inset-right, 0px);
+    --safe-b: env(safe-area-inset-bottom, 0px);
+    --safe-l: env(safe-area-inset-left, 0px);
   }
   body { font-family: 'Inter', system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
   canvas { display: block; }
@@ -81,6 +86,43 @@
 }
 .slide-up { animation: slideUp .45s cubic-bezier(.2,.9,.25,1) both; }
 
+/* Arcade motion language — punchy entrances, not soft fades */
+@keyframes slamIn {
+  0%   { opacity: 0; transform: skewX(-9deg) scale(1.35) translateY(18px); }
+  55%  { opacity: 1; transform: skewX(-9deg) scale(0.96) translateY(0); }
+  100% { opacity: 1; transform: skewX(-9deg) scale(1) translateY(0); }
+}
+.slam-in { animation: slamIn .38s cubic-bezier(.15,1.2,.25,1) both; }
+
+@keyframes pulseGlow {
+  0%, 100% { filter: drop-shadow(0 0 0 transparent); }
+  50%      { filter: drop-shadow(0 0 14px currentColor); }
+}
+.pulse-glow { animation: pulseGlow 1.6s ease-in-out infinite; }
+
+@keyframes tickPop {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.18); }
+  100% { transform: scale(1); }
+}
+.tick-pop { animation: tickPop .22s cubic-bezier(.2,1.4,.3,1); }
+
+@keyframes barFlash {
+  0%   { box-shadow: 8px 8px 0 #000, 0 0 0 transparent; }
+  40%  { box-shadow: 8px 8px 0 #000, 0 0 48px #ff2e88aa; }
+  100% { box-shadow: 8px 8px 0 #000, 0 0 40px #ff2e8877; }
+}
+.drop-pulse {
+  animation: barFlash 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wobble, .scan, .slam-in, .pulse-glow, .tick-pop, .drop-pulse, .speedlines {
+    animation: none !important;
+  }
+  .slide-up { animation: none; opacity: 1; }
+}
+
 @keyframes scanline {
   from { background-position: 0 0; }
   to   { background-position: 0 100px; }
@@ -97,20 +139,54 @@
   overscroll-behavior: contain;
   touch-action: pan-y;
   -webkit-overflow-scrolling: touch;
+  padding-left: max(12px, var(--safe-l));
+  padding-right: max(12px, var(--safe-r));
+  padding-bottom: max(8px, var(--safe-b));
+}
+
+.screen-pad {
+  padding-top: max(12px, var(--safe-t));
+  padding-bottom: max(12px, var(--safe-b));
+  padding-left: max(8px, var(--safe-l));
+  padding-right: max(8px, var(--safe-r));
+}
+
+/* Horizontal mode chips on narrow widths */
+.mode-strip {
+  touch-action: pan-x;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.mode-strip::-webkit-scrollbar { display: none; }
+
+.safe-tr {
+  top: max(12px, var(--safe-t)) !important;
+  right: max(12px, var(--safe-r)) !important;
 }
 
 /* Landscape phones are wide but very short — reclaim vertical space. */
 @media (max-height: 560px) {
-  .screen-pad { padding-top: 14px; padding-bottom: 14px; align-items: flex-start; }
+  .screen-pad { padding-top: max(10px, var(--safe-t)); padding-bottom: max(10px, var(--safe-b)); align-items: flex-start; }
   .compact-hide { display: none; }
-  .compact-title { font-size: clamp(30px, 6.5vw, 52px) !important; }
-  .compact-tight { margin-top: 10px !important; }
-  .compact-gap { gap: 12px !important; }
+  .compact-title { font-size: clamp(28px, 6.5vw, 52px) !important; }
+  .compact-tight { margin-top: 8px !important; }
+  .compact-gap { gap: 10px !important; }
+  .hud-mode { top: 8% !important; transform: translateX(-50%) scale(.82); transform-origin: top center; }
+  .hud-mode .hud-big { font-size: 22px !important; }
+}
+
+/* Ultra-short landscape (phone notch + browser chrome) */
+@media (max-height: 400px) {
+  .compact-title { font-size: clamp(24px, 5.5vw, 40px) !important; }
+  .hud-topleft, .hud-topright { transform: scale(.72); }
+  .hud-mode { top: 6% !important; transform: translateX(-50%) scale(.7); }
 }
 
 @media (pointer: coarse) {
   /* keyboard legend is noise on a touch device */
   .keys-only { display: none; }
+  /* larger hit targets on menu chips */
+  .mode-strip button { min-height: 40px; }
 }
 
 /* On touch devices the thumb pads own the bottom corners, so lift and
@@ -118,16 +194,24 @@
 @media (pointer: coarse) {
   /* steering strip owns the lower-left, action cluster the lower-right */
   .hud-speedo {
-    bottom: 136px !important;
-    left: 2px !important;
+    bottom: calc(128px + var(--safe-b)) !important;
+    left: max(2px, var(--safe-l)) !important;
     transform: scale(.66);
     transform-origin: bottom left;
   }
   .hud-boost {
-    bottom: 148px !important;
-    right: 2px !important;
+    bottom: calc(140px + var(--safe-b)) !important;
+    right: max(2px, var(--safe-r)) !important;
     transform: scale(.7);
     transform-origin: bottom right;
+  }
+  .hud-topleft {
+    top: max(8px, var(--safe-t)) !important;
+    left: max(8px, var(--safe-l)) !important;
+  }
+  .hud-topright {
+    top: max(8px, var(--safe-t)) !important;
+    right: max(8px, var(--safe-r)) !important;
   }
   .hud-descent { display: none; }
   /* debug panel would sit under the left thumb */
@@ -136,18 +220,29 @@
   .hud-recover { top: 44% !important; }
   .hud-hazard { top: 50% !important; }
   .hud-crashwhy { top: 38% !important; }
+  .hud-mode {
+    top: max(10%, calc(var(--safe-t) + 36px)) !important;
+  }
+  /* zone banner clear of notch */
+  .hud-zone {
+    top: max(18%, calc(var(--safe-t) + 64px)) !important;
+  }
 }
 
 /* Short landscape phones: the HUD corners crowd fast, so shrink the
    readouts rather than letting them overlap the play area. */
 @media (pointer: coarse) and (max-height: 460px) {
-  .hud-speedo { transform: scale(.52); bottom: 120px !important; }
-  .hud-boost { transform: scale(.56); bottom: 130px !important; }
-  .hud-topleft { transform: scale(.8); transform-origin: top left; }
-  .hud-topright { transform: scale(.8); transform-origin: top right; }
+  .hud-speedo { transform: scale(.48); bottom: calc(108px + var(--safe-b)) !important; }
+  .hud-boost { transform: scale(.52); bottom: calc(118px + var(--safe-b)) !important; }
+  .hud-topleft { transform: scale(.72); transform-origin: top left; }
+  .hud-topright { transform: scale(.72); transform-origin: top right; }
+  .hud-mode { transform: translateX(-50%) scale(.68); }
+  .touch-steer { height: 108px !important; }
+  .touch-actions { bottom: max(8px, var(--safe-b)) !important; right: max(8px, var(--safe-r)) !important; }
+  .touch-actions button { transform: scale(.9); transform-origin: bottom right; }
 }
 
-/* Very narrow portrait: warn rather than render an unplayable layout. */
+/* Very narrow portrait: menu still works; race asks for landscape. */
 .rotate-hint { display: none; }
 @media (pointer: coarse) and (orientation: portrait) {
   .rotate-hint {
@@ -161,7 +256,13 @@
     gap: 14px;
     background: #06070a;
     text-align: center;
-    padding: 24px;
+    padding: max(24px, var(--safe-t)) max(24px, var(--safe-r)) max(24px, var(--safe-b)) max(24px, var(--safe-l));
+  }
+  /* allow menus / garage in portrait — only race HUD needs landscape */
+  .rotate-hint[data-phase='menu'],
+  .rotate-hint[data-phase='finish'],
+  .rotate-hint[data-phase='paused'] {
+    display: none;
   }
 }
 

@@ -16,21 +16,18 @@ export const DIFFICULTIES: { id: Difficulty; label: string; blurb: string; color
 /**
  * Base skill / aggression per difficulty.
  *
- * `skill` maps to a speed ceiling via aiCap = 24.5 + skill*15 (m/s). Analysis
- * of the drag model puts a competent player at ~38-42 m/s tucked and ~33
- * un-tucked, so the top rival's cap is set relative to that:
- *   chill  top ~33 m/s  (a good line beats them comfortably)
- *   rider  top ~35 m/s  (loses to a clean run, punishes a sloppy one)
- *   pro    top ~37 m/s  (a real fight)
- *   savage top ~41 m/s  (needs near-perfect tucking and corner exits)
+ * Hard speed ceilings live in AI_TIERS[].cap (m/s), tuned so a competent
+ * tucked player (~42-46) is competitive rather than free:
+ *   chill/rookie  ~39.2  (DECENT+ clears; CASUAL fights)
+ *   rider         ~41.4  (GOOD/EXPERT clear; DECENT scrapes)
+ *   pro           ~42.9  (GOOD ≈ 50% in ?tune)
+ *   savage/absurd ~45.0  (EXPERT fights; CASUAL/DECENT lose)
  *
- * The hard speed ceiling now comes from AI_TIERS[].cap; `skill` here drives
- * execution quality and the per-grid-slot spread. The four rows line up
- * one-to-one with the four AI tiers via tierFromLegacy().
+ * `skill` here drives execution quality and the per-grid-slot spread. The
+ * four rows line up one-to-one with the four AI tiers via tierFromLegacy().
  *
  * `bandK` scales the rubber band. At 1.0 the band moves skill by up to +/-0.15
- * = 2.25 m/s, which was large enough to erase the gap between difficulties —
- * so chill damps it (you can run away) and savage amplifies it (they hunt).
+ * — chill damps it (you can run away), savage amplifies it (they hunt).
  */
 export const DIFF_TUNING: Record<
   Difficulty, { skill: number; step: number; aggro: number; bandK: number }

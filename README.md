@@ -15,6 +15,30 @@ No models, no textures, no audio files.
 
 ---
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/menu.jpg" alt="Main menu — five live modes" width="48%" />
+  <img src="docs/screenshots/race.jpg" alt="Mid-race HUD with pack and side bonk" width="48%" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/drop.jpg" alt="Start gate — THE DROP" width="48%" />
+  <img src="docs/screenshots/garage.jpg" alt="Garage — rider and bike select" width="48%" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/mountains.jpg" alt="Mountain select — five authored courses" width="64%" />
+</p>
+
+| Shot | What's on screen |
+|---|---|
+| **Menu** | All five modes live · difficulty · pad binds |
+| **Race** | Chase cam · pack · SIDE BONK callouts · speedo |
+| **Drop** | START gate line-up on Shaleback |
+| **Garage** | Rider roster · bike preview · performance bars |
+| **Mountains** | Shaleback · Cinder · Thornwood · Ironjaw · Lastlight |
+
+---
+
 ## What it is
 
 A 4.6 km arcade downhill racer inspired by the wild, fast, chaotic feel of early-2000s
@@ -119,10 +143,9 @@ Five personalities — **SPEED FREAK**, **BONKER**, **SHOWOFF**, **COWARD**, **C
 each defined by ten behavioural weights, crossed with four difficulty tiers.
 
 Four tiers — **ROOKIE**, **RIDER**, **PRO**, **ABSURD**.
-Difficulty deliberately **does not** scale raw speed much (ROOKIE → ABSURD is only ~18%).
-It scales decision quality: line selection, cornering commitment, shortcut nerve,
-overtaking, combat timing, risk management, recovery and trick usage. The honest lever is
-**reaction delay** — 0.42 s down to 0.06 s.
+Difficulty scales decision quality first (line, combat, reaction 0.42 s → 0.06 s), with
+speed ceilings close enough that a tucked player still has to race: ROOKIE ~39 m/s →
+ABSURD ~45 m/s against a player soft-cap of 47. Pure speed is no longer a free win.
 
 ### Crashes
 Six causes, each with its own ragdoll profile so you can identify what went wrong from the
@@ -140,6 +163,19 @@ You cannot buy past a level gate. The rule is enforced by a compile-time type as
 not by convention.
 
 ---
+
+## Modes
+
+| Mode | Status | Win by |
+|---|---|---|
+| **DESCENT** | live | position |
+| **TIME ATTACK** | live | beat the clock |
+| **TRICK JAM** | live | style score (×2 trick mult) |
+| **KNOCKOUT** | live | last standing (20 s cuts) |
+| **MAYHEM** | live | position · hazards ×2.4 · aggression ×2 |
+
+`hazardScale` densifies props/scenery when a mode builds the course. Knockout
+cuts the last rider every 20 seconds until one remains.
 
 ## The mountain
 
@@ -161,6 +197,9 @@ physics and hazard mix:
 
 Pacing alternates deliberately — release, tension, tension, **combat**, release, tension,
 reward, dread, **combat**, release.
+
+Also authored: **Cinder Chute**, **Thornwood Deep**, **Lastlight Spine**, **Ironjaw Pass**
+(6.2 km endurance).
 
 ---
 
@@ -205,9 +244,12 @@ soundtrack that gains finale layers over the last 500 m. Impacts sidechain-duck 
 
 ```
 src/game/
-  game.ts          engine, camera, race flow
+  game.ts          engine, race flow, rider sim
+  physics.ts       shared speed / axle / drag constants
   track.ts         procedural course generation + scenery
-  shaleback.ts     the authored mountain
+  mountainsBuild.ts  mountain id → Track factory
+  shaleback.ts     authored mountains (also cinder / thornwood / …)
+  ironjawPass.ts   endurance course
   bikeState.ts     physics state machine (pure resolver + rule table)
   bonk.ts          collision resolver
   tricks.ts        rotation / flip / style composition
@@ -215,7 +257,7 @@ src/game/
   ai.ts            personalities × difficulty tiers
   garage.ts        riders, bikes, upgrades, cosmetics
   progression.ts   XP sources, challenges, unlocks
-  modes.ts         race mode rulesets
+  modes.ts         race mode rulesets (Descent / Time Attack / Trick Jam)
   audio.ts         procedural audio engine
   models.ts        rider rig + geometry builders
   riderMaterials.ts  material library + progressive dirt

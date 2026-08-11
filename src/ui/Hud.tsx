@@ -3,6 +3,7 @@ import type { Game } from '../game/game';
 import { formatTime } from '../game/core';
 
 const PLACE = ['', '1st', '2nd', '3rd', '4th', '5th', '6th'];
+const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
 /** plain-language explanation shown while you're on the floor */
 const CRASH_WHY: Record<string, string> = {
@@ -27,6 +28,19 @@ const STATE_TINT: Record<string, string> = {
   LANDING: '#ffd400', BOOSTING: '#ff4de3', CRASHING: '#ff4d4d',
   STUNNED: '#ff6a6a', RECOVERING: '#c0f000', FINISHED: '#ffffff',
 };
+
+/** Speedo arc geometry — 270° sweep starting at 7:30 (CSS -135° on the SVG). */
+const SPEEDO = {
+  size: 150,
+  cx: 75,
+  cy: 75,
+  r: 62,
+  /** visible arc length as a fraction of the full circle */
+  sweep: 0.75,
+} as const;
+const SPEEDO_CIRC = 2 * Math.PI * SPEEDO.r;
+const SPEEDO_TRACK = SPEEDO_CIRC * SPEEDO.sweep;
+const SPEEDO_GAP = SPEEDO_CIRC;
 
 export default function Hud({ game }: { game: Game }) {
   const root = useRef<HTMLDivElement>(null);
@@ -81,11 +95,12 @@ export default function Hud({ game }: { game: Game }) {
   const promptTxt = useRef<HTMLDivElement>(null);
   const modeObj = useRef<HTMLDivElement>(null);
   const modeDet = useRef<HTMLDivElement>(null);
+  const modeBar = useRef<HTMLDivElement>(null);
+  const modeFill = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let raf = 0;
     let lastCount = '';
-    const C = 2 * Math.PI * 62;
     const loop = () => {
       raf = requestAnimationFrame(loop);
       const h = game.hud;
@@ -136,7 +151,7 @@ export default function Hud({ game }: { game: Game }) {
       if (speedNum.current) speedNum.current.textContent = String(Math.round(kph));
       if (speedArc.current) {
         const f = Math.min(1, kph / 175);
-        speedArc.current.style.strokeDasharray = `${f * C * 0.75} ${C}`;
+        speedArc.current.style.strokeDasharray = `${f * SPEEDO_TRACK} ${SPEEDO_GAP}`;
         speedArc.current.style.stroke = h.boosting ? '#ff4de3' : kph > 130 ? '#ffd400' : '#2fe6c8';
       }
       if (placeNum.current && placeNum.current.textContent !== PLACE[h.place]) {
@@ -325,18 +340,30 @@ export default function Hud({ game }: { game: Game }) {
         recKey.current.style.background = h.recoverPulse > 0.4 ? '#7ef7c8' : '#ffffff';
       }
 
-      // mode objective (time attack clock, etc.)
+      // mode objective (time attack clock, knockout cut, mayhem, etc.)
       if (modeObj.current) {
         const show = !!h.modeObjective && h.phase === 'race';
         modeObj.current.style.opacity = show ? '1' : '0';
         if (show && modeObj.current.textContent !== h.modeObjective) {
           modeObj.current.textContent = h.modeObjective;
+          modeObj.current.classList.remove('tick-pop');
+          // reflow so the animation restarts on each objective change
+          void modeObj.current.offsetWidth;
+          modeObj.current.classList.add('tick-pop');
         }
         modeObj.current.style.color = h.modeUrgent ? '#ff2e88' : '#7ef7ff';
       }
       if (modeDet.current) {
         modeDet.current.style.opacity = h.modeDetail && h.phase === 'race' ? '1' : '0';
         if (modeDet.current.textContent !== h.modeDetail) modeDet.current.textContent = h.modeDetail;
+      }
+      if (modeBar.current && modeFill.current) {
+        const show = h.modeMeter >= 0 && h.phase === 'race';
+        modeBar.current.style.opacity = show ? '1' : '0';
+        if (show) {
+          modeFill.current.style.width = `${Math.round(clamp01(h.modeMeter) * 100)}%`;
+          modeFill.current.style.background = h.modeUrgent ? '#ff2e88' : '#ff6a00';
+        }
       }
 
       // hazard telegraph: pulses harder the later you leave it
@@ -461,12 +488,28 @@ export default function Hud({ game }: { game: Game }) {
 
       {/* bottom-left: speedo */}
       <div className="hud-speedo absolute bottom-5 left-5">
-        <div className="relative h-[150px] w-[150px]">
-          <svg viewBox="0 0 150 150" className="absolute inset-0 -rotate-[135deg]">
-            <circle cx="75" cy="75" r="62" fill="none" stroke="rgba(0,0,0,0.6)" strokeWidth="11" strokeDasharray={`${2 * Math.PI * 62 * 0.75} ${2 * Math.PI * 62}`} strokeLinecap="round" />
-            <circle ref={speedArc} cx="75" cy="75" r="62" fill="none" stroke="#2fe6c8" strokeWidth="11"
-              strokeDasharray={`0 ${2 * Math.PI * 62}`} strokeLinecap="round"
-              style={{ filter: 'drop-shadow(0 0 8px currentColor)', transition: 'stroke .2s' }} />
+        <div className="relative" style={{ width: SPEEDO.size, height: SPEEDO.size }}>
+          <svg
+            viewBox={`0 0 ${SPEEDO.size} ${SPEEDO.size}`}
+            className="absolute inset-0 -rotate-[135deg]"
+            aria-hidden
+          >
+            {/* track */}
+            <circle
+              cx={SPEEDO.cx} cy={SPEEDO.cy} r={SPEEDO.r}
+              fill="none" stroke="rgba(0,0,0,0.6)" strokeWidth="11"
+              strokeDasharray={`${SPEEDO_TRACK} ${SPEEDO_GAP}`}
+              strokeLinecap="round"
+            />
+            {/* value */}
+            <circle
+              ref={speedArc}
+              cx={SPEEDO.cx} cy={SPEEDO.cy} r={SPEEDO.r}
+              fill="none" stroke="#2fe6c8" strokeWidth="11"
+              strokeDasharray={`0 ${SPEEDO_GAP}`}
+              strokeLinecap="round"
+              style={{ filter: 'drop-shadow(0 0 8px currentColor)', transition: 'stroke .2s' }}
+            />
           </svg>
           <div className="absolute inset-0 flex flex-col items-center justify-center">
             <div ref={speedNum} className="hud-big text-[52px] leading-none text-white" style={{ textShadow: '0 3px 0 #000' }}>0</div>
@@ -493,12 +536,12 @@ export default function Hud({ game }: { game: Game }) {
       </div>
 
       {/* zone banner */}
-      <div ref={zoneWrap} className="absolute left-0 top-[22%] opacity-0" style={{ transform: 'skewX(-9deg)' }}>
+      <div ref={zoneWrap} className="hud-zone absolute left-0 top-[22%] opacity-0" style={{ transform: 'skewX(-9deg)' }}>
         <div className="bg-[#ffd400] py-1 pl-6 pr-8">
           <div ref={zoneName} className="hud-big text-[30px] leading-none text-black">START GATE</div>
         </div>
         <div className="ml-6 bg-black/85 px-3 py-[2px]">
-          <div ref={zoneSub} className="hud-label text-[#ffd400]">DROP IN</div>
+          <div ref={zoneSub} className="hud-label text-[#ffd400]">GATE OPEN</div>
         </div>
       </div>
 
@@ -519,11 +562,14 @@ export default function Hud({ game }: { game: Game }) {
       <div ref={offTxt} className="hud-big absolute left-1/2 top-[74%] -translate-x-1/2 text-[24px] text-[#ff6a00] opacity-0 transition-opacity"
         style={{ textShadow: '0 3px 0 #000' }}>OFF COURSE!</div>
 
-      {/* mode objective (time attack, etc.) */}
-      <div className="pointer-events-none absolute left-1/2 top-[10%] -translate-x-1/2 text-center">
+      {/* mode objective (time attack, knockout cut, mayhem, etc.) */}
+      <div className="hud-mode pointer-events-none absolute left-1/2 top-[10%] -translate-x-1/2 text-center">
         <div ref={modeObj} className="hud-big text-[34px] leading-none text-[#7ef7ff] opacity-0 transition-opacity"
           style={{ textShadow: '0 4px 0 #000, 0 0 22px #7ef7ff66' }} />
         <div ref={modeDet} className="hud-label mt-1 !text-[10px] text-white/70 opacity-0 transition-opacity" />
+        <div ref={modeBar} className="mx-auto mt-2 h-[5px] w-[160px] overflow-hidden bg-black/55 opacity-0 transition-opacity">
+          <div ref={modeFill} className="h-full bg-[#ff6a00]" style={{ width: '0%', transition: 'width .12s linear' }} />
+        </div>
       </div>
 
       {/* contextual control prompt */}

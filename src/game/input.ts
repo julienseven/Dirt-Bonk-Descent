@@ -3,12 +3,10 @@
 //
 // Keyboard remains authoritative in Game.keys. This module polls the
 // Gamepad API each frame and produces a normalized action snapshot the
-// sim can OR into keyboard intent. No remapping UI yet — defaults match
-// the living-room layout from the build brief.
+// sim can OR into keyboard intent.
 //
-// Controller defaults:
-//   LT brake · RT pedal · Left stick steer · A hop · B/X attack · RB boost
-//   Y tuck · Start pause
+// Button indices follow the Standard Gamepad layout and can be remapped
+// via setPadBinding / localStorage (menu CONTROLLER panel).
 // ---------------------------------------------------------------------------
 
 import { clamp } from './core';
@@ -30,6 +28,58 @@ export interface PadActions {
   bonkLTap: boolean;
   bonkRTap: boolean;
   pauseTap: boolean;
+}
+
+/** Remappable face / shoulder actions (triggers stay LT/RT). */
+export type PadBindAction = 'hop' | 'bonkL' | 'bonkR' | 'boost' | 'tuck' | 'pause';
+
+export const PAD_BIND_LABELS: Record<PadBindAction, string> = {
+  hop: 'HOP (A)',
+  bonkL: 'BONK L (X)',
+  bonkR: 'BONK R (B)',
+  boost: 'BOOST (RB)',
+  tuck: 'TUCK (Y/LB)',
+  pause: 'PAUSE (START)',
+};
+
+/** Standard Gamepad defaults matching the living-room layout. */
+export const DEFAULT_PAD_BINDS: Record<PadBindAction, number> = {
+  hop: 0,    // A
+  bonkR: 1,  // B
+  bonkL: 2,  // X
+  tuck: 3,   // Y (LB also OR'd)
+  boost: 5,  // RB
+  pause: 9,  // Start
+};
+
+const BIND_KEY = 'dirt-bonk-descent.padBinds.v1';
+
+function loadBinds(): Record<PadBindAction, number> {
+  try {
+    if (typeof localStorage === 'undefined') return { ...DEFAULT_PAD_BINDS };
+    const raw = localStorage.getItem(BIND_KEY);
+    if (!raw) return { ...DEFAULT_PAD_BINDS };
+    const p = JSON.parse(raw) as Partial<Record<PadBindAction, number>>;
+    return { ...DEFAULT_PAD_BINDS, ...p };
+  } catch {
+    return { ...DEFAULT_PAD_BINDS };
+  }
+}
+
+let binds = loadBinds();
+
+export function getPadBinds(): Record<PadBindAction, number> {
+  return { ...binds };
+}
+
+export function setPadBinding(action: PadBindAction, button: number) {
+  binds = { ...binds, [action]: button | 0 };
+  try { localStorage.setItem(BIND_KEY, JSON.stringify(binds)); } catch { /* */ }
+}
+
+export function resetPadBinds() {
+  binds = { ...DEFAULT_PAD_BINDS };
+  try { localStorage.removeItem(BIND_KEY); } catch { /* */ }
 }
 
 const DEAD = 0.18;
@@ -80,11 +130,9 @@ export class GamepadInput {
 
     const a = pad.axes;
     const b = pad.buttons;
-    // standard mapping: 0=A, 1=B, 2=X, 3=Y, 4=LB, 5=RB, 6=LT, 7=RT, 9=Start
-    // axes: 0 lx, 1 ly, 2 rx, 3 ry  (some pads use 6/7 for triggers as axes)
+    const map = binds;
+    // axes: 0 lx, 1 ly; triggers: buttons[6/7] with axis fallbacks
     const lx = axis(a[0] ?? 0);
-    // triggers: standard buttons[6/7], with axes[2/5] or [3/4] as fallback
-    // for pads that don't expose trigger buttons
     const ltBtn = b[6] ? b[6].value : 0;
     const rtBtn = b[7] ? b[7].value : 0;
     const ltAxis = Math.max(0, a[2] ?? a[3] ?? 0);
@@ -95,14 +143,15 @@ export class GamepadInput {
     const dpad = (pressed(b[14]) ? -1 : 0) + (pressed(b[15]) ? 1 : 0);
     const steer = Math.abs(lx) > 0.01 ? lx : dpad;
 
-    const hop = pressed(b[0]);           // A
-    const bonkR = pressed(b[1]);         // B — attack right
-    const bonkL = pressed(b[2]);         // X — attack left
-    const tuck = pressed(b[3]) || pressed(b[4]); // Y or LB
-    const boost = pressed(b[5]);         // RB
+    const hop = pressed(b[map.hop]);
+    const bonkR = pressed(b[map.bonkR]);
+    const bonkL = pressed(b[map.bonkL]);
+    // tuck: remapped face button OR LB (4) always available for accessibility
+    const tuck = pressed(b[map.tuck]) || pressed(b[4]);
+    const boost = pressed(b[map.boost]);
     const brake = lt > 0.2 || pressed(b[13]); // LT or dpad down
     const pedal = rt > 0.2 || pressed(b[12]); // RT or dpad up
-    const pause = pressed(b[9]) || pressed(b[8]);
+    const pause = pressed(b[map.pause]) || pressed(b[8]);
 
     const out: PadActions = {
       connected: true,
@@ -123,6 +172,25 @@ export class GamepadInput {
     this.prev = { hop, bonkL, bonkR, pause };
     this.last = out;
     return out;
+  }
+
+  /**
+   * First button currently held (for rebinding UI). Returns -1 if none.
+   * Skips LT/RT so remaps don't steal pedals.
+   */
+  static firstHeldButton(): number {
+    const list = typeof navigator !== 'undefined' && navigator.getGamepads
+      ? navigator.getGamepads()
+      : [];
+    for (let i = 0; i < list.length; i++) {
+      const g = list[i];
+      if (!g || !g.connected) continue;
+      for (let bi = 0; bi < g.buttons.length; bi++) {
+        if (bi === 6 || bi === 7) continue; // leave triggers alone
+        if (pressed(g.buttons[bi])) return bi;
+      }
+    }
+    return -1;
   }
 
   get snapshot() { return this.last; }

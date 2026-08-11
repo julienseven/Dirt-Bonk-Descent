@@ -55,7 +55,7 @@ export interface Zone {
 }
 
 export const ZONES: Zone[] = [
-  { name: 'START GATE', sub: 'DROP IN', t0: 0.000, t1: 0.055, dirt: 0x9a7550, verge: 0x6f9440, far: 0x5c7a38, width: 19, rough: 0.35, steep: -0.02, surface: 'dirt', treeDensity: 0.20, treeType: 'pine', rockDensity: 0.10, crowd: 2.6, fog: 0.9, features: ['roller', 'berm'], props: ['cone', 'bale'] },
+  { name: 'START GATE', sub: 'GATE OPEN', t0: 0.000, t1: 0.055, dirt: 0x9a7550, verge: 0x6f9440, far: 0x5c7a38, width: 19, rough: 0.35, steep: -0.02, surface: 'dirt', treeDensity: 0.20, treeType: 'pine', rockDensity: 0.10, crowd: 2.6, fog: 0.9, features: ['roller', 'berm'], props: ['cone', 'bale'] },
   { name: 'PINE PLUNGE', sub: 'ROOTS & RUTS', t0: 0.055, t1: 0.195, dirt: 0x6d5236, verge: 0x39662c, far: 0x27461f, width: 13.5, rough: 1.25, steep: 0.055, surface: 'dirt', treeDensity: 1.00, treeType: 'pine', rockDensity: 0.55, crowd: 0.55, fog: 1.25, features: ['whoops', 'roller', 'berm', 'kicker'], props: ['log', 'rock'] },
   { name: 'KICKER RIDGE', sub: 'SEND IT', t0: 0.195, t1: 0.335, dirt: 0xa8814f, verge: 0x7d9440, far: 0x6a7f38, width: 17, rough: 0.55, steep: 0.01, surface: 'dirt', treeDensity: 0.22, treeType: 'mixed', rockDensity: 0.30, crowd: 1.5, fog: 0.75, features: ['table', 'kicker', 'double', 'berm'], props: ['cone', 'bale', 'barrel'] },
   { name: 'HAYSTACK HOLLOW', sub: 'FARM CHAOS', t0: 0.335, t1: 0.470, dirt: 0x9d7c4d, verge: 0x93b04c, far: 0x7c9640, width: 14.5, rough: 0.7, steep: -0.015, surface: 'grass', treeDensity: 0.30, treeType: 'broad', rockDensity: 0.12, crowd: 2.2, fog: 0.8, features: ['roller', 'berm', 'kicker', 'chicane'], props: ['bale', 'bale', 'cone', 'barrel'] },
@@ -196,18 +196,25 @@ export class Track {
   zones: Zone[] = ZONES;
   /** guaranteed set-pieces, as fractions of length */
   private scripted: { kind: string; at: number; len: number; h: number; depth: number }[] = [];
+  /**
+   * Mode-driven density multiplier for props + scenery hazards.
+   * 1 = authored density; <1 Time Attack / Trick Jam; >1 Mayhem.
+   */
+  densityScale = 1;
 
   constructor(
     seed = 20260114,
     length = TRACK_LENGTH,
     zones?: Zone[],
     scripted?: { kind: string; at: number; len: number; h: number; depth: number }[],
+    densityScale = 1,
   ) {
     this.rng = new RNG(seed);
     this.length = length;
     this.count = Math.floor(length / STEP) + 2;
     if (zones && zones.length) this.zones = zones;
     if (scripted) this.scripted = scripted;
+    this.densityScale = Math.max(0.25, densityScale);
     this.buildNodes();
     this.buildFeatures();
     this.buildShortcuts();
@@ -720,7 +727,9 @@ export class Track {
           });
         }
       }
-      s += rng.range(26, 62);
+      // hazardScale densifies props: Mayhem packs the trail, Time Attack opens it
+      const gap = rng.range(26, 62) / this.densityScale;
+      s += Math.max(8, gap);
     }
     this.obstacles.sort((a, b) => a.s - b.s);
     // idx stays unique across the whole course (collision debounce uses it).
@@ -1286,7 +1295,9 @@ export class Track {
         q.multiply(qTilt);
 
         const roll = rng.next();
-        if (roll < Z.treeDensity * 0.34 * (0.4 + near * 0.9) && Z.treeType !== 'none') {
+        const treeK = Z.treeDensity * this.densityScale;
+        const rockK = Z.rockDensity * this.densityScale;
+        if (roll < treeK * 0.34 * (0.4 + near * 0.9) && Z.treeType !== 'none') {
           const isPine = Z.treeType === 'pine' || (Z.treeType === 'mixed' && rng.chance(0.55));
           const scale = rng.range(1.5, 3.6) * (isPine ? 1.5 : 1.0);
           if (isPine && nPine < MAX) {
@@ -1314,7 +1325,7 @@ export class Track {
             sBroad[nBroad] = s;
             nBroad++;
           }
-        } else if (roll < Z.treeDensity * 0.34 + Z.rockDensity * 0.22) {
+        } else if (roll < treeK * 0.34 + rockK * 0.22) {
           // family by distance: pebbles line the trail, landmarks sit out
           // on the hillside where they read against the sky
           const ki = dist < 9 ? 0 : dist < 30 ? 1 : 2;

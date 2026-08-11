@@ -76,6 +76,10 @@ function GameApp() {
       clearInterval(tick);
       setPct(100);
       setGame(g);
+      // dev / harness: let Playwright and the console skip the cold open
+      if (typeof window !== 'undefined' && /[?&](debug|states|capture)=/.test(window.location.search)) {
+        (window as unknown as { __dbd?: Game }).__dbd = g;
+      }
       } catch (err) {
         // Never hang on the loading screen. A throw during construction
         // used to leave setGame() unreached and the bar stuck forever,
@@ -217,13 +221,21 @@ function GameApp() {
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#06070a]">
       <div ref={mount} className="absolute inset-0" />
-      {/* portrait phones can't fit the pads and the HUD; ask for landscape */}
-      <div className="rotate-hint">
+      {/* portrait phones can't fit pads + HUD during a run; menus still work upright */}
+      <div
+        className="rotate-hint"
+        data-phase={phase === 'race' || phase === 'countdown' || phase === 'intro' ? 'race' : phase}
+        style={{
+          display: (phase === 'race' || phase === 'countdown' || phase === 'intro')
+            ? undefined
+            : 'none',
+        }}
+      >
         <div className="hud-big text-[34px] text-[#ffd400]" style={{ textShadow: '0 4px 0 #000' }}>
           ROTATE YOUR DEVICE
         </div>
-        <div className="hud-label !text-[10px]">DIRT BONK DESCENT IS PLAYED IN LANDSCAPE</div>
-        <div className="mt-2 text-[40px]">📱</div>
+        <div className="hud-label !text-[10px]">RACE IN LANDSCAPE</div>
+        <div className="mt-2 text-[40px]" aria-hidden>📱</div>
       </div>
       {!game && !fatal && <Loading pct={pct} />}
       {fatal && (

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import type { Game } from '../game/game';
 import { formatTime } from '../game/core';
 import { audio } from '../game/audio';
@@ -7,6 +8,10 @@ import {
 import { getMountain, levelFromXp } from '../game/mountains';
 import type { XpLine } from '../game/progression';
 import { MODES, type ModeId } from '../game/modes';
+import {
+  GamepadInput, PAD_BIND_LABELS, getPadBinds, setPadBinding, resetPadBinds,
+  type PadBindAction,
+} from '../game/input';
 
 const PLACE = ['', '1st', '2nd', '3rd', '4th', '5th', '6th'];
 
@@ -53,7 +58,27 @@ export function Menu({
   const hasGhost = !!save.ghost[save.difficulty];
   const pb = save.best[save.difficulty];
   const pbScore = save.bestScore[save.difficulty] ?? 0;
+  const riderLevel = levelFromXp(save.xp).level;
   const playableModes = MODES.filter(m => m.available);
+  const selectedMode = MODES.find(m => m.id === mode) ?? MODES[0];
+  const [binds, setBinds] = useState(getPadBinds);
+  const [listen, setListen] = useState<PadBindAction | null>(null);
+
+  // wait for the next pad press while remapping a face action
+  useEffect(() => {
+    if (!listen) return;
+    let alive = true;
+    const id = window.setInterval(() => {
+      if (!alive) return;
+      const btn = GamepadInput.firstHeldButton();
+      if (btn < 0) return;
+      setPadBinding(listen, btn);
+      setBinds(getPadBinds());
+      setListen(null);
+      audio.uiClick();
+    }, 80);
+    return () => { alive = false; clearInterval(id); };
+  }, [listen]);
 
   return (
     <div className="screen-pad absolute inset-0 z-20 flex items-center justify-center" style={{ background: 'radial-gradient(ellipse at 50% 40%, rgba(6,8,12,.35) 0%, rgba(4,5,8,.92) 75%)' }}>
@@ -83,9 +108,11 @@ export function Menu({
           <div className="slide-up" style={{ animationDelay: '.08s' }}>
             <button
               onClick={() => { audio.resume(); audio.uiClick(); onStart(); }}
-              className="group relative block"
+              className="group relative block slam-in"
+              data-testid="drop-in"
+              aria-label="Drop in — start race"
             >
-              <span className="title-skew block bg-[#ff2e88] px-10 py-4 transition-transform duration-150 group-hover:translate-x-1 group-hover:-translate-y-1"
+              <span className="title-skew drop-pulse block bg-[#ff2e88] px-10 py-4 transition-transform duration-150 group-hover:translate-x-1 group-hover:-translate-y-1 group-active:translate-x-0 group-active:translate-y-0"
                 style={{ boxShadow: '8px 8px 0 #000, 0 0 40px #ff2e8877' }}>
                 <span className="hud-big block text-[40px] leading-none text-white">DROP IN</span>
               </span>
@@ -117,23 +144,41 @@ export function Menu({
               </span>
             </button>
             {onMode && playableModes.length > 1 && (
-              <div className="mt-3 flex flex-wrap gap-2">
-                {playableModes.map(m => {
-                  const on = mode === m.id;
-                  return (
-                    <button key={m.id} type="button"
-                      onClick={() => { audio.uiClick(); onMode(m.id); }}
-                      className="title-skew px-3 py-1 transition-transform hover:translate-x-0.5"
-                      style={{
-                        background: on ? m.colour : 'transparent',
-                        border: `2px solid ${m.colour}`,
-                        boxShadow: on ? '3px 3px 0 #000' : undefined,
-                      }}>
-                      <span className="hud-label !text-[9px]"
-                        style={{ color: on ? '#000' : m.colour }}>{m.name}</span>
-                    </button>
-                  );
-                })}
+              <div className="mt-3">
+                <div className="hud-label mb-1.5">MODE</div>
+                <div className="mode-strip -mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
+                  {playableModes.map(m => {
+                    const on = mode === m.id;
+                    const locked = riderLevel < m.reqLevel;
+                    return (
+                      <button key={m.id} type="button"
+                        disabled={locked}
+                        onClick={() => {
+                          if (locked) return;
+                          audio.uiClick();
+                          onMode(m.id);
+                        }}
+                        className="title-skew shrink-0 px-3 py-1.5 transition-transform hover:translate-x-0.5 disabled:cursor-not-allowed disabled:opacity-40"
+                        style={{
+                          background: on ? m.colour : 'transparent',
+                          border: `2px solid ${m.colour}`,
+                          boxShadow: on ? '3px 3px 0 #000' : undefined,
+                        }}
+                        title={locked ? `Unlock at level ${m.reqLevel}` : m.blurb}>
+                        <span className="hud-label !text-[9px] whitespace-nowrap"
+                          style={{ color: on ? '#000' : m.colour }}>
+                          {m.name}{locked ? ` · L${m.reqLevel}` : ''}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-1.5 max-w-[280px] text-[11px] leading-snug text-white/45">
+                  <span className="font-black" style={{ color: selectedMode.colour }}>
+                    {selectedMode.sub}
+                  </span>
+                  {' — '}{selectedMode.blurb}
+                </p>
               </div>
             )}
             <div className="mt-4 flex flex-wrap gap-2">
@@ -209,6 +254,35 @@ export function Menu({
                 <span className="flex shrink-0 items-center gap-1">{keys}</span>
               </div>
             ))}
+            <div className="col-span-2 mt-3 border-t border-white/10 pt-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="hud-label !text-[#2fe6c8]">CONTROLLER</span>
+                <button type="button"
+                  onClick={() => { resetPadBinds(); setBinds(getPadBinds()); setListen(null); audio.uiMove(); }}
+                  className="hud-label !text-[8px] text-white/40 hover:text-white/70">
+                  RESET
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {(Object.keys(PAD_BIND_LABELS) as PadBindAction[]).map(action => (
+                  <button key={action} type="button"
+                    onClick={() => { setListen(action); audio.uiMove(); }}
+                    className="title-skew flex items-center justify-between border border-white/15 px-2 py-1 text-left hover:border-[#2fe6c8]/60"
+                    style={{
+                      borderColor: listen === action ? '#ffd400' : undefined,
+                      background: listen === action ? '#ffd40022' : 'transparent',
+                    }}>
+                    <span className="hud-label !text-[8px] !tracking-[.08em]">
+                      {listen === action ? 'PRESS…' : PAD_BIND_LABELS[action]}
+                    </span>
+                    <span className="hud-mono text-[11px] text-[#ffd400]">B{binds[action]}</span>
+                  </button>
+                ))}
+              </div>
+              <p className="mt-2 text-[10px] leading-snug text-white/35">
+                Click an action, then press a pad button. LT/RT stay pedal &amp; brake.
+              </p>
+            </div>
           </div>
         </div>
 
@@ -221,6 +295,9 @@ export function Menu({
           <span><span className="text-[#ffd400]">Tip</span> — bonks, tricks and close shaves chain into one multiplier</span>
           <span><span className="text-[#ffd400]">Tip</span> — land on downslopes to keep speed; tuck the straights</span>
           <span><span className="text-[#ffd400]">Tip</span> — go down? mash to get up fast and you'll keep your momentum</span>
+          <span><span className="text-[#ffd400]">Tip</span> — <span className="text-white">KNOCKOUT</span>: never sit last when the cut clock hits zero</span>
+          <span><span className="text-[#ffd400]">Tip</span> — <span className="text-white">MAYHEM</span>: denser rocks, meaner rivals — ride loose and keep boost ready</span>
+          <span><span className="text-[#ffd400]">Tip</span> — <span className="text-white">TRICK JAM</span>: place is noise — stack flip + spin + style for the big score</span>
         </div>
        </div>
       </div>
@@ -258,7 +335,8 @@ export function Results({
   if (!d) return null;
   const prevSplits = result?.timeRecord ? [] : (save.best[save.difficulty]?.splits ?? []);
   const rivals = [...game.hud.rivals].sort((a, b) => a.place - b.place);
-  const win = d.place === 1;
+  const win = d.place === 1 && !d.eliminated;
+  const cut = !!d.eliminated;
   const rows: [string, string][] = [
     ['FINISH TIME', formatTime(d.time)],
     ['STYLE POINTS', Math.round(d.score).toLocaleString()],
@@ -268,10 +346,17 @@ export function Results({
     ['TOTAL AIRTIME', `${d.airTotal.toFixed(1)}s`],
     ['BEST TRICK', d.bestTrick],
   ];
-  if (isFinite(d.gap)) {
+  if (isFinite(d.gap) && !cut) {
     rows.splice(1, 0, ['MARGIN', `${d.gap < 0.01 ? '<0.01' : d.gap.toFixed(2)}s`]);
   }
-  const photo = isFinite(d.gap) && d.gap < 0.75;
+  const photo = !cut && isFinite(d.gap) && d.gap < 0.75;
+  const banner = cut
+    ? 'CUT FROM THE FIELD'
+    : photo ? 'DECIDED BY INCHES'
+    : win ? 'YOU TOOK THE MOUNTAIN'
+    : 'RUN COMPLETE';
+  const accent = cut ? '#ff6a00' : win ? '#ffd400' : '#ff2e88';
+  const modeName = MODES.find(m => m.id === d.modeId)?.name ?? 'DESCENT';
   return (
     <div className="screen-pad absolute inset-0 z-20 flex items-center justify-center"
       style={{
@@ -280,7 +365,7 @@ export function Results({
           'linear-gradient(100deg, rgba(4,5,8,.94) 0%, rgba(4,5,8,.90) 46%, rgba(4,5,8,.55) 68%, rgba(4,5,8,.30) 100%)',
       }}>
       <div className="scan pointer-events-none absolute inset-0 opacity-30" />
-      <div className="pointer-events-none absolute right-5 top-4 flex items-center gap-2">
+      <div className="pointer-events-none absolute right-5 top-4 flex items-center gap-2 safe-tr">
         <span className="h-[9px] w-[9px] rounded-full bg-[#ff2e88]"
           style={{ animation: 'wobble 1.2s ease-in-out infinite' }} />
         <span className="hud-label !text-[10px]">REPLAY</span>
@@ -289,14 +374,17 @@ export function Results({
        {/* left-aligned on wide screens so the replay has room to breathe */}
        <div className="mx-auto w-full max-w-4xl xl:mx-0 xl:ml-[4vw]">
         <div className="slide-up">
-          <div className="title-skew inline-block px-5 py-1" style={{ background: win ? '#ffd400' : '#ff2e88' }}>
-            <span className="hud-label !text-[12px] !tracking-[.4em] !text-black">
-              {photo ? 'DECIDED BY INCHES' : win ? 'YOU TOOK THE MOUNTAIN' : 'RUN COMPLETE'}
-            </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="title-skew inline-block px-5 py-1" style={{ background: accent }}>
+              <span className="hud-label !text-[12px] !tracking-[.4em] !text-black">
+                {banner}
+              </span>
+            </div>
+            <span className="hud-label !text-[9px] text-white/40">{modeName}</span>
           </div>
-          <h2 className="hud-big mt-1 text-[clamp(52px,10vw,116px)] leading-[0.85] text-white"
-            style={{ textShadow: `0 8px 0 ${win ? '#ffd400' : '#ff2e88'}, 0 0 60px #00000099` }}>
-            {PLACE[d.place]} PLACE
+          <h2 className="hud-big mt-1 text-[clamp(40px,9vw,116px)] leading-[0.85] text-white"
+            style={{ textShadow: `0 8px 0 ${accent}, 0 0 60px #00000099` }}>
+            {cut ? 'OUT' : `${PLACE[d.place]} PLACE`}
           </h2>
           {(payout > 0 || xpGain > 0) && (() => {
             const lv = levelFromXp(save.xp);

@@ -140,8 +140,13 @@ export default function TouchControls({ game, visible }: { game: Game; visible: 
       {/* steering strip — the whole lower-left is a slide surface */}
       <div
         ref={zone}
-        className="pointer-events-auto absolute bottom-0 left-0 touch-none"
-        style={{ width: '46%', height: 132 }}
+        className="touch-steer pointer-events-auto absolute bottom-0 left-0 touch-none"
+        style={{
+          width: '46%',
+          height: 132,
+          paddingBottom: 'max(0px, env(safe-area-inset-bottom, 0px))',
+          paddingLeft: 'max(0px, env(safe-area-inset-left, 0px))',
+        }}
       >
         <div className="absolute inset-x-3 bottom-4 h-[58px] rounded-2xl border-2 border-white/25 bg-black/40 backdrop-blur">
           <div className="absolute inset-y-0 left-1/2 w-[2px] -translate-x-1/2 bg-white/20" />
@@ -155,14 +160,17 @@ export default function TouchControls({ game, visible }: { game: Game; visible: 
       </div>
 
       {/* right thumb cluster */}
-      <div className="absolute bottom-4 right-3 flex flex-col items-end gap-2">
+      <div className="touch-actions absolute bottom-4 right-3 flex flex-col items-end gap-2"
+        style={{
+          bottom: 'max(12px, env(safe-area-inset-bottom, 0px))',
+          right: 'max(10px, env(safe-area-inset-right, 0px))',
+        }}>
         <div className="flex items-end gap-2">
           <ActionButton game={game} code="KeyS" label="■" sub="BRAKE" size={54} />
           <ActionButton game={game} code="KeyJ" label="⤴" sub="HOP" size={54} />
           <ActionButton game={game} code="Space" label="⚡" sub="BOOST" size={62} tint="rgba(255,46,136,.75)" />
         </div>
         <div className="flex items-end gap-2">
-          <button className="pointer-events-none opacity-0" aria-hidden />
           <TouchAction game={game} code="KeyQ" side="L" label="◀" />
           <TouchAction game={game} code="KeyE" side="R" label="▶" />
         </div>
@@ -170,7 +178,12 @@ export default function TouchControls({ game, visible }: { game: Game; visible: 
 
       <button
         onPointerDown={e => { e.preventDefault(); game.togglePause(); }}
-        className="pointer-events-auto absolute right-3 top-3 touch-none rounded-lg border-2 border-white/30 bg-black/45 px-3 py-2 backdrop-blur"
+        className="pointer-events-auto absolute touch-none rounded-lg border-2 border-white/30 bg-black/45 px-3 py-2 backdrop-blur"
+        style={{
+          top: 'max(10px, env(safe-area-inset-top, 0px))',
+          right: 'max(10px, env(safe-area-inset-right, 0px))',
+        }}
+        aria-label="Pause"
       >
         <span className="hud-big text-[14px] text-white">II</span>
       </button>

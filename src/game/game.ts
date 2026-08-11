@@ -9,7 +9,7 @@ import { Track, Obstacle, ZONES } from './track';
 import {
   createRider, RiderRig, RIDER_PALETTES, getBuild, shapeForBike,
   solveRiderIK, applyRiderStance,
-  CHEST_ATTACK, BB_POS, SHOCK_UPPER, SHOCK_LOWER, SHOCK_BASE_LEN, FORK_AXIS,
+  BB_POS, SHOCK_UPPER, SHOCK_LOWER, SHOCK_BASE_LEN, FORK_AXIS,
   WHEEL_R, FRONT_AXLE_POS, REAR_AXLE_POS,
 } from './models';
 import {
@@ -20,10 +20,7 @@ import {
   type Perf, type Loadout, computePerf, getBike, loadoutColors, RIDER_BUILD_OF,
 } from './garage';
 import { getMountain } from './mountains';
-import { SHALEBACK_SECTIONS, SHALEBACK_SETPIECES } from './shaleback';
-import { CINDER_SECTIONS, CINDER_SETPIECES } from './cinderChute';
-import { THORNWOOD_SECTIONS, THORNWOOD_SETPIECES } from './thornwoodDeep';
-import { LASTLIGHT_SECTIONS, LASTLIGHT_SETPIECES } from './lastlightSpine';
+import { buildMountainTrack } from './mountainsBuild';
 import {
   PROPS, PROP_SCORE, PROP_BOOST, PROP_CALL, patchSurface,
   type PropDef, type PropKind,
@@ -61,20 +58,12 @@ import { CheckpointSystem } from './checkpoints';
 import { GamepadInput } from './input';
 import { CameraRig, INTRO } from './camera';
 
-export const GRAV = 30;
-export const SOFT_CAP = 47;
-/**
- * Chest pitch on top of pelvis/spine attack lean.
- * Full DH lean lives in models.ts (PELVIS_ATTACK + SPINE_ATTACK + CHEST_ATTACK).
- */
-export const ATTACK_PITCH = CHEST_ATTACK;
-/** Axle offsets from the bike's origin, in metres along the track. */
-export const AXLE_F = 0.60;
-export const AXLE_R = -0.62;
-export const WHEELBASE = AXLE_F - AXLE_R;
-/** quadratic air drag; tucking multiplies this by TUCK_DRAG */
-export const DRAG_K = 0.0040;
-export const TUCK_DRAG = 0.58;
+export {
+  GRAV, SOFT_CAP, ATTACK_PITCH, AXLE_F, AXLE_R, WHEELBASE, DRAG_K, TUCK_DRAG,
+} from './physics';
+import {
+  GRAV, SOFT_CAP, ATTACK_PITCH, AXLE_F, AXLE_R, WHEELBASE, DRAG_K, TUCK_DRAG,
+} from './physics';
 
 export type Phase = 'menu' | 'intro' | 'countdown' | 'race' | 'finish' | 'paused';
 
@@ -175,6 +164,10 @@ export interface HudState {
   modeObjective: string;
   modeDetail: string;
   modeUrgent: boolean;
+  /** 0..1 mode progress bar; -1 hides */
+  modeMeter: number;
+  /** player was cut mid-race */
+  eliminated: boolean;
   /** debug overlay extras */
   debugVel: number;
   debugAir: number;
@@ -184,6 +177,7 @@ export interface HudState {
     time: number; place: number; score: number; bonks: number; tricks: number;
     topSpeed: number; bestTrick: string; bestTrickScore: number; airTotal: number;
     gap: number; splits: number[]; shortcuts: number; nearMisses: number;
+    eliminated: boolean; modeId: string;
   };
 }
 
@@ -245,6 +239,10 @@ interface Racer {
   place: number;
   finished: boolean;
   finishTime: number;
+  /** cut mid-race (knockout) — not a natural finish */
+  eliminated: boolean;
+  /** style points banked this run (trick jam ranks on this) */
+  styleScore: number;
   /** seconds since crossing the line */
   finishRoll: number;
   /** which way they carve as they scrub off speed */
@@ -330,6 +328,10 @@ export class Game {
   invincible = false;
   /** mode clock remaining (Infinity = untimed) */
   modeClock = Infinity;
+  /** seconds since last knockout cut */
+  private elimTimer = 0;
+  /** seconds until next cut (HUD) */
+  private elimIn = Infinity;
   style = 0;
   combo = 0;
   comboTime = 0;
@@ -481,7 +483,8 @@ export class Game {
       splitDelta: 0, splitShow: 0, splitHasPb: false,
       ghostActive: false, ghostGap: 0, reducedMotion: false,
       trickText: '', trickHold: 0, finishData: null,
-      modeObjective: '', modeDetail: '', modeUrgent: false,
+      modeObjective: '', modeDetail: '', modeUrgent: false, modeMeter: -1,
+      eliminated: false,
       debugVel: 0, debugAir: 0, debugCp: '', debugInv: false,
     };
     this.init();
@@ -593,7 +596,7 @@ export class Game {
     this.scene.add(this.ridge);
 
     // track — the default mountain is the authored vertical slice
-    this.track = new Track(20260114, 4600, SHALEBACK_SECTIONS, SHALEBACK_SETPIECES);
+    this.track = buildMountainTrack('shaleback', 1);
     this.scene.add(this.track.build());
     this.track.updateSceneryLod(0, 1, true);
     this.checkpoints.build(this.track);
@@ -742,7 +745,7 @@ export class Game {
       mass: 86, swingT: 99, bonkCooldownPair: 0, ragdoll: null,
       // the player rides "neutral"; rivals get personality below
       stCadence: 1, stLean: 1, stWeight: 0, stHead: 1, stTwitch: 1,
-      place: i + 1, finished: false, finishTime: 0,
+      place: i + 1, finished: false, finishTime: 0, eliminated: false, styleScore: 0,
       finishRoll: 0, finishCarve: 0, finishPose: 0,
       skill: 0, aiOffset: 0, aiSeed: this.rng.range(0, 100), aiHopCd: 0, aiCap: 30,
       thinkCd: 0, aiSteer: 0, aiPedal: true, aiBrake: false, aiTuck: false,
@@ -822,7 +825,8 @@ export class Game {
       r.dirt = 0; r.wet = 0;
       r.dirtTint.setHex(0x6b5942);
       r.rig.dirt.set(0, r.dirtTint);
-      r.finished = false; r.finishTime = 0; r.place = i + 1;
+      r.finished = false; r.finishTime = 0; r.eliminated = false; r.styleScore = 0;
+      r.place = i + 1;
       r.finishRoll = 0; r.finishCarve = 0; r.finishPose = 0;
       r.aiOffset = this.rng.range(-0.3, 0.3);
     });
@@ -836,6 +840,11 @@ export class Game {
     this.score = 0; this.bonks = 0; this.tricksLanded = 0; this.topSpeed = 0;
     this.airTotal = 0; this.bestTrick = ''; this.bestTrickScore = 0;
     this.airSpin = this.airFlip = this.airPose = 0;
+    this.elimTimer = 0;
+    {
+      const m = getMode(this.mode);
+      this.elimIn = m.elimination && m.elimInterval > 0 ? m.elimInterval : Infinity;
+    }
     this.rig.reset(); this.hitStop = 0; this.timeScale = 1; this.slowmo = 0;
     this.dirtPool.clear(); this.sparkPool.clear(); this.smokePool.clear();
     this.clearImpactRings();
@@ -876,12 +885,18 @@ export class Game {
     this.onPhaseChange?.(p);
   }
 
-  /** Switch race rules (Descent / Time Attack / …). Applied on next reset. */
+  /** Switch race rules (Descent / Time Attack / …). Rebuilds track if hazard density changes. */
   setMode(id: ModeId) {
     this.mode = id;
     const m = getMode(id);
     const est = (this.track.length - 20) / 28;
     this.modeClock = m.timeLimit(this.difficulty, est);
+    this.elimTimer = 0;
+    this.elimIn = m.elimination && m.elimInterval > 0 ? m.elimInterval : Infinity;
+    // hazardScale is baked into Track at build time — rebuild when it drifts
+    if (this.track && Math.abs(this.track.densityScale - m.hazardScale) > 0.02) {
+      this.loadMountain(this.mountainId, true);
+    }
   }
 
   /** Full cold open. Used for a fresh drop-in. */
@@ -1149,17 +1164,33 @@ export class Game {
       if (this.player.finished) {
         // let the roll-out, carve and pose play before the results card
         this.finishHold += dt;
-        if (this.finishHold > 4.4) this.enterFinish();
+        const hold = this.player.eliminated ? 2.2 : 4.4;
+        if (this.finishHold > hold) this.enterFinish();
       }
-      // mode clock uses wall time so hit-stop / slow-mo don't steal seconds
-      if (Number.isFinite(this.modeClock) && !this.player.finished) {
-        this.modeClock = Math.max(0, this.modeClock - dt);
-        const end = getMode(this.mode).checkEnd({
+      // mode clock / elimination use wall time so hit-stop doesn't steal seconds
+      if (!this.player.finished) {
+        const rules = getMode(this.mode);
+        if (Number.isFinite(this.modeClock)) {
+          this.modeClock = Math.max(0, this.modeClock - dt);
+        }
+        if (rules.elimination && rules.elimInterval > 0) {
+          this.elimTimer += dt;
+          this.elimIn = Math.max(0, rules.elimInterval - this.elimTimer);
+          if (this.elimTimer >= rules.elimInterval) {
+            this.elimTimer = 0;
+            this.elimIn = rules.elimInterval;
+            this.eliminateLast();
+          }
+        }
+        const activeField = this.racers.filter(r => !r.eliminated).length;
+        const end = rules.checkEnd({
           raceTime: this.raceTime, progress: clamp01(this.player.s / this.track.length),
           place: this.player.place, fieldSize: this.racers.length,
           score: this.score, tricks: this.tricksLanded, bonks: this.bonks,
           shortcuts: this.shortcutsHit, nearMisses: this.nearMisses,
           finished: this.player.finished, clock: this.modeClock,
+          eliminated: this.player.eliminated,
+          elimIn: this.elimIn, activeField,
         });
         if (end === 'timeup') {
           this.player.finished = true;
@@ -1194,6 +1225,9 @@ export class Game {
   private enterFinish() {
     if (this.hud.finishData) return;
     const me = this.player;
+    // sync player score into the style field used by score-mode ranking
+    me.styleScore = this.score;
+    this.recomputePlaces();
     // resolve the margin now that the pack has had time to cross the line;
     // for anyone still out on course, project their arrival from position
     let gap = Infinity;
@@ -1214,11 +1248,80 @@ export class Game {
       splits: this.splits.slice(),
       shortcuts: this.shortcutsHit,
       nearMisses: this.nearMisses,
+      eliminated: this.player.eliminated,
+      modeId: this.mode,
     };
     this.setPhase('finish');
     this.startReplay();
     audio.cheer(1.3);
     for (let i = 0; i < 6; i++) setTimeout(() => audio.chime(i * 2), i * 130);
+  }
+
+  /** Rank the field: score modes by style, else by track position / finish time. */
+  private recomputePlaces() {
+    const winBy = getMode(this.mode).winBy;
+    const order = [...this.racers].sort((a, b) => {
+      if (a.eliminated !== b.eliminated) return a.eliminated ? 1 : -1;
+      if (winBy === 'score') {
+        const sa = a.isPlayer ? this.score : a.styleScore;
+        const sb = b.isPlayer ? this.score : b.styleScore;
+        if (Math.abs(sb - sa) > 0.5) return sb - sa;
+      }
+      const ra = a.finished ? 1e9 - a.finishTime : a.s;
+      const rb = b.finished ? 1e9 - b.finishTime : b.s;
+      return rb - ra;
+    });
+    order.forEach((r, i) => { r.place = i + 1; });
+  }
+
+  /** Knockout cut: last non-eliminated rider by track progress is gone. */
+  private eliminateLast() {
+    // riders who already crossed the line are safe; only the live pack is cut
+    const active = this.racers.filter(r => !r.eliminated && !r.finished);
+    if (active.length <= 1) {
+      // sole survivor (or last standing) wins the knockout
+      if (active.length === 1 && !active[0].finished) {
+        const champ = active[0];
+        champ.finished = true;
+        champ.finishTime = this.raceTime;
+        this.popup(
+          champ.isPlayer ? 'LAST STANDING!' : `${champ.name} WINS`,
+          'trick', null, '#ffd400',
+        );
+        audio.cheer(1.2);
+        if (champ.isPlayer) this.finishHold = 0;
+      }
+      return;
+    }
+    active.sort((a, b) => a.s - b.s);
+    const victim = active[0];
+    victim.eliminated = true;
+    victim.finished = true;
+    victim.finishTime = this.raceTime + 1000 + (1 - clamp01(victim.s / this.track.length));
+    victim.v *= 0.2;
+    this.popup(
+      victim.isPlayer ? 'ELIMINATED!' : `${victim.name} OUT`,
+      'trick', null, victim.isPlayer ? '#ff2e88' : '#ff6a00',
+    );
+    audio.cheer(victim.isPlayer ? 0.4 : 0.9);
+    audio.chime(victim.isPlayer ? 0 : 5);
+    this.shakeAdd(victim.isPlayer ? 0.55 : 0.25);
+    if (victim.isPlayer) this.finishHold = 0;
+
+    // if only one remains after the cut, crown them immediately
+    const remain = this.racers.filter(r => !r.eliminated && !r.finished);
+    if (remain.length === 1) {
+      const champ = remain[0];
+      champ.finished = true;
+      champ.finishTime = this.raceTime;
+      this.popup(
+        champ.isPlayer ? 'LAST STANDING!' : `${champ.name} WINS`,
+        'trick', null, '#ffd400',
+      );
+      audio.cheer(1.2);
+      if (champ.isPlayer) this.finishHold = 0;
+    }
+    this.recomputePlaces();
   }
 
   /**
@@ -1396,9 +1499,8 @@ export class Game {
     }
     this.style = damp(this.style, 0, 0.35, dt);
 
-    // ---- placings
-    const order = [...this.racers].sort((a, b) => (b.finished ? 1e9 - b.finishTime : b.s) - (a.finished ? 1e9 - a.finishTime : a.s));
-    order.forEach((r, i) => (r.place = i + 1));
+    // ---- placings (score modes rank by style; knockout sinks eliminated)
+    this.recomputePlaces();
 
     // ---- endgame drama
     if (live) this.updateEndgame(dt);
@@ -1436,6 +1538,11 @@ export class Game {
   private stepRacer(r: Racer, dt: number, inp: {
     steer: number; pedal: boolean; brake: boolean; tuck: boolean; hop: boolean; boost: boolean; live: boolean;
   }) {
+    // knockout victims stop racing
+    if (r.eliminated) {
+      r.v = damp(r.v, 0, 3, dt);
+      return;
+    }
     const trk = this.track;
 
     // ===== STATE RESOLUTION ================================================
@@ -1582,7 +1689,7 @@ export class Game {
     // garage upgrades only touch the player; rivals stay on the tuned baseline
     const P = r.isPlayer ? this.perf : IDENTITY_PERF;
     let a = GRAV * Math.sin(pitch);
-    const speed01 = clamp01(r.v / 40);
+    const speed01 = clamp01(r.v / 33);
     // throttle comes from the state, not the raw key
     if (RULES.throttle) a += pedalForce(speed01) * P.accel;
     // boost thrust scales with efficiency too
@@ -1998,6 +2105,19 @@ export class Game {
     } else {
       r.v -= impact * 0.10 * (1 - landQual) * 1.6;
       r.v = Math.max(0, r.v);
+      // trick jam: rivals bank style from air time × personality appetite
+      if (r.airTime > 0.35 && r.trickSpin !== 0) {
+        const appetite = r.brain?.trick ?? 0.3;
+        const air = r.airTime;
+        const pts = (180 + air * 420 + Math.abs(r.trickAngle) * 40)
+          * appetite * (0.7 + landQual * 0.5)
+          * getMode(this.mode).trickScale;
+        r.styleScore += pts;
+      } else if (r.airTime > 0.55) {
+        // small hop credit so non-trickers aren't zeroed in score modes
+        r.styleScore += 40 * r.airTime * (r.brain?.trick ?? 0.2)
+          * getMode(this.mode).trickScale;
+      }
       if (impact > 26 && Math.random() < 0.25) this.crashRacer(r);
     }
     void surf;
@@ -2155,7 +2275,7 @@ export class Game {
     const band2 = clamp(rel * 0.0024 * bk, -0.10 * bk, 0.15 * bk);
     const skill = clamp(r.skill + band2, SKILL_MIN, SKILL_MAX);
     // personality sets the ceiling; the band nudges it
-    r.aiCap = B ? B.cap * (1 + band2 * 0.5) : 24.5 + skill * 15;
+    r.aiCap = B ? B.cap * (1 + band2 * 0.5) : 20.5 + skill * 12.5;
     // first 30s: pack stays bunched so the holeshot is a real fight, not a parade
     const early = this.raceTime < 28
       ? 1 - clamp01(this.raceTime / 28) * 0.35
@@ -2952,7 +3072,9 @@ export class Game {
 
     this.tricksLanded++;
     this.addCombo();
-    this.addScore(pts * getMode(this.mode).trickScale);
+    const scaled = pts * getMode(this.mode).trickScale;
+    this.addScore(scaled);
+    this.player.styleScore = this.score;
     this.boostSys.add('trick', clamp((14 + pts / 42) / 14, 0.7, 3.2));
     this.style = 1;
     if (pts > this.bestTrickScore) { this.bestTrickScore = pts; this.bestTrick = res.name; }
@@ -3855,36 +3977,31 @@ export class Game {
 
   // -------------------------------------------------------------------------
   /** Tear down the current course and generate a different mountain. */
-  loadMountain(id: string) {
+  loadMountain(id: string, force = false) {
     const m = getMountain(id);
-    if (this.mountainId === id && this.track) return;
+    if (this.mountainId === id && this.track && !force) return;
     this.mountainId = id;
+    const hs = getMode(this.mode).hazardScale;
 
-    this.scene.remove(this.track.group);
-    const seenTex = new Set<THREE.Texture>();
-    this.track.group.traverse(o => {
-      const mesh = o as THREE.Mesh;
-      if (mesh.geometry) mesh.geometry.dispose();
-      const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
-      const list = Array.isArray(mat) ? mat : mat ? [mat] : [];
-      for (const mm of list) {
-        // textures are shared between materials, so dedupe before disposing
-        const tex = (mm as THREE.MeshStandardMaterial).map;
-        if (tex && !seenTex.has(tex)) { seenTex.add(tex); tex.dispose(); }
-        mm.dispose();
-      }
-    });
-    this.track.dispose();
+    if (this.track) {
+      this.scene.remove(this.track.group);
+      const seenTex = new Set<THREE.Texture>();
+      this.track.group.traverse(o => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.geometry) mesh.geometry.dispose();
+        const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
+        const list = Array.isArray(mat) ? mat : mat ? [mat] : [];
+        for (const mm of list) {
+          // textures are shared between materials, so dedupe before disposing
+          const tex = (mm as THREE.MeshStandardMaterial).map;
+          if (tex && !seenTex.has(tex)) { seenTex.add(tex); tex.dispose(); }
+          mm.dispose();
+        }
+      });
+      this.track.dispose();
+    }
 
-    this.track = m.id === 'cinder'
-      ? new Track(m.seed, m.length, CINDER_SECTIONS, CINDER_SETPIECES)
-      : m.id === 'thornwood'
-      ? new Track(m.seed, m.length, THORNWOOD_SECTIONS, THORNWOOD_SETPIECES)
-      : m.id === 'lastlight'
-      ? new Track(m.seed, m.length, LASTLIGHT_SECTIONS, LASTLIGHT_SETPIECES)
-      : m.authored
-      ? new Track(m.seed, m.length, SHALEBACK_SECTIONS, SHALEBACK_SETPIECES)
-      : new Track(m.seed, m.length);
+    this.track = buildMountainTrack(m.id, hs);
     this.scene.add(this.track.build());
     this.track.updateSceneryLod(0, 1, true);
     this.checkpoints.build(this.track);
@@ -4450,6 +4567,7 @@ export class Game {
     // mode objective strip
     {
       const rules = getMode(this.mode);
+      const activeField = this.racers.filter(r => !r.eliminated).length;
       const mh = rules.hud({
         raceTime: this.raceTime,
         progress: clamp01(p.s / this.track.length),
@@ -4457,10 +4575,13 @@ export class Game {
         score: this.score, tricks: this.tricksLanded, bonks: this.bonks,
         shortcuts: this.shortcutsHit, nearMisses: this.nearMisses,
         finished: p.finished, clock: this.modeClock,
+        eliminated: p.eliminated, elimIn: this.elimIn, activeField,
       });
       h.modeObjective = mh.objective;
       h.modeDetail = mh.detail;
       h.modeUrgent = mh.urgent;
+      h.modeMeter = mh.meter;
+      h.eliminated = p.eliminated;
     }
     h.recover = p.recover;
     h.recoverPulse = Math.max(0, h.recoverPulse - this.lastDt * 5);

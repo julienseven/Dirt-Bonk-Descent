@@ -5,6 +5,12 @@
 // measured instead of guessed. It mirrors stepRacer()'s speed physics exactly;
 // it deliberately ignores tricks, bonks and crashes, so results are a clean
 // read on the *speed* balance between the player and the field.
+//
+// playerSkill (0..1) is a synthetic competence lever:
+//   0.45 CASUAL  — sits up, brakes early, freewheels, lower hold speed
+//   0.65 DECENT  — partial tuck discipline
+//   0.85 GOOD    — clean lines, ~50% wins on PRO
+//   1.00 EXPERT  — near-optimal tuck + brake timing, holds near SOFT_CAP
 // ---------------------------------------------------------------------------
 import { clamp, clamp01, RNG } from './core';
 import { Track, TRACK_LENGTH } from './track';
@@ -17,23 +23,29 @@ const MAX_T = 600;
 
 interface Sim {
   s: number; v: number;
-  skill: number; cap: number; grip: number;
+  cap: number; grip: number;
   finish: number;
+  tuckGate: number;
+  cornerCommit: number;
+  /** lower tiers make more line mistakes */
+  mistake: number;
 }
 
 /**
  * Longitudinal step shared by player and AI. Mirrors the real sim's forces:
  * gravity along pitch, pedal, brake, quadratic drag, surface drag, caps.
+ * `pedalMul` scales throttle force (player skill only).
  */
 function stepSpeed(
   trk: Track, s: number, v: number,
   pedal: boolean, brake: boolean, tuck: boolean, cap: number,
+  pedalMul = 1,
 ): number {
   const pitch = trk.pitchAt(s);
   const surf = trk.surfaceAt(s, 0);
-  const speed01 = clamp01(v / 40);
+  const speed01 = clamp01(v / 33);
   let a = GRAV * Math.sin(pitch);
-  if (pedal) a += 11 + (1.2 - 11) * speed01;
+  if (pedal) a += (11 + (1.2 - 11) * speed01) * pedalMul;
   if (brake) a -= 30 * surf.grip;
   a -= DRAG_K * (tuck ? TUCK_DRAG : 1) * v * v;
   a -= surf.drag * (v * 0.055 + 0.5);
@@ -48,6 +60,11 @@ function cornerLimit(trk: Track, s: number, grip: number): number {
   return c > 0.0002 ? Math.sqrt(grip / c) : 9999;
 }
 
+/** Soften the upper skill band so GOOD sits near EXPERT, not midway. */
+function skillEase(sk: number): number {
+  return Math.pow(clamp01(sk), 0.85);
+}
+
 export interface RaceResult {
   playerTime: number;
   aiTimes: number[];
@@ -58,31 +75,40 @@ export interface RaceResult {
 
 /**
  * @param playerSkill 0..1 — how well the reference player tucks, brakes and
- *        holds a line. 0.5 = casual, 0.8 = competent, 1.0 = near-optimal.
+ *        holds a line. 0.45 = casual, 0.65 = decent, 0.85 = good, 1.0 = expert.
  */
 export function simulateRace(
   trk: Track, diff: Difficulty, playerSkill: number, seed = 1,
 ): RaceResult {
   const rng = new RNG(seed * 7919 + 13);
   const T = DIFF_TUNING[diff];
-
-  // model the real field: personality caps and per-tier cornering grip
   const tier = AI_TIERS[tierFromLegacy(diff)];
+
   const ai: Sim[] = [];
   for (let i = 1; i <= 5; i++) {
     const spread = (i - 1 - 2.5) * tier.spread;
+    // personality paceBias stand-in (±4%) so the field isn't a mono-cap blob
+    const pace = 1 + rng.range(-0.04, 0.04);
     ai.push({
       s: 0, v: 0,
-      skill: T.skill + i * T.step + rng.range(-0.03, 0.03),
-      cap: (tier.cap + spread * 10) + rng.range(-0.4, 0.4),
+      cap: ((tier.cap + spread * 10) + rng.range(-0.5, 0.5)) * pace,
       grip: 13 + tier.cornerCommit * 11 + rng.range(0, 3),
       finish: -1,
+      tuckGate: 0.003 + tier.lineQuality * 0.006 + rng.range(-0.001, 0.001),
+      cornerCommit: tier.cornerCommit,
+      mistake: (1 - tier.lineQuality) * 0.35,
     });
   }
 
-  // reference player: better skill = tucks more, brakes later, carries more
-  const pGrip = 14 + playerSkill * 12;
-  const pTuckBias = 0.004 + playerSkill * 0.010;
+  // ---- reference player: skill must change lap time (not just labels)
+  const sk = skillEase(playerSkill);
+  const pCap = 29 + sk * 10;                 // 29..39 sustained hold
+  const pGrip = 9 + sk * 16;                 // corner belief
+  const pBrakeMul = 0.74 + sk * 0.30;        // fraction of limit before brake
+  const pTuckMaxCurv = 0.0005 + sk * 0.008;  // how bent a line still tucks
+  const pPedalMul = 0.65 + sk * 0.35;        // throttle efficiency
+  const pUpright = (1 - sk) * 0.50;          // form-break rate (sit up)
+
   let ps = 0, pv = 0, pTop = 0, pFinish = -1;
 
   for (let t = 0; t < MAX_T; t += DT) {
@@ -90,9 +116,13 @@ export function simulateRace(
     if (pFinish < 0) {
       const look = ps + 18 + pv * 0.5;
       const lim = cornerLimit(trk, look, pGrip);
-      const brake = pv > lim;
-      const tuck = !brake && Math.abs(trk.curvatureAt(look)) < pTuckBias;
-      pv = stepSpeed(trk, ps, pv, !brake, brake, tuck, SOFT_CAP);
+      const curv = Math.abs(trk.curvatureAt(look));
+      const brake = pv > lim * pBrakeMul && curv > 0.0008;
+      let tuck = !brake && curv < pTuckMaxCurv;
+      // low skill randomly sits up — free speed leaks
+      if (tuck && rng.next() < pUpright * DT * 3) tuck = false;
+      const wantPedal = !brake && pv < pCap * (0.90 + sk * 0.10);
+      pv = stepSpeed(trk, ps, pv, wantPedal, brake, tuck, pCap, pPedalMul);
       ps += pv * DT;
       pTop = Math.max(pTop, pv);
       if (ps >= TRACK_LENGTH - 20) pFinish = t;
@@ -105,9 +135,17 @@ export function simulateRace(
       const cap = r.cap * (1 + band * 0.5);
       const look = r.s + 22 + r.v * 0.55;
       const lim = cornerLimit(trk, look, r.grip);
-      const brake = r.v > Math.min(cap * 1.1, lim)
-        && Math.abs(trk.curvatureAt(look)) > 0.008;
-      const tuck = !brake && Math.abs(trk.curvatureAt(look)) < 0.005 && r.v > 18;
+      const curv = Math.abs(trk.curvatureAt(look));
+      // higher tiers commit closer to the true corner limit
+      let brake = r.v > Math.min(cap * 1.1, lim * (0.88 + r.cornerCommit * 0.14))
+        && curv > 0.008;
+      // line mistakes: early brakes, broken tuck
+      if (!brake && curv > 0.005 && r.v > cap * 0.75
+        && rng.next() < r.mistake * DT * 1.2) {
+        brake = true;
+      }
+      let tuck = !brake && curv < r.tuckGate && r.v > 18;
+      if (tuck && rng.next() < r.mistake * DT * 1.5) tuck = false;
       r.v = stepSpeed(trk, r.s, r.v, r.v < cap, brake, tuck, cap);
       r.s += r.v * DT;
       if (r.s >= TRACK_LENGTH - 20) r.finish = t;

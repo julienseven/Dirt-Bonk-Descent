@@ -268,7 +268,7 @@ export function computePerf(l: Loadout): Perf {
   const s = computeStats(l);
   const n = (v: number) => (v - 50) / 50;   // -1 .. +1
   return {
-    topCap: n(s.top) * 5.0,
+    topCap: n(s.top) * 4.2,
     accel: 1 + n(s.accel) * 0.24,
     grip: 1 + n(s.grip) * 0.20,
     airRate: 1 + n(s.air) * 0.42,

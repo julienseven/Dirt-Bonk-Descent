@@ -52,8 +52,9 @@ export const MOUNTAINS: MountainDef[] = [
   },
   {
     id: 'ironjaw', name: 'IRONJAW PASS', sub: 'ENDURANCE',
-    blurb: 'Six kilometres of mountain. Bring legs and a bike you trust.',
+    blurb: 'Six kilometres of limestone grind: wind gap, iron wall, secret rim, pack fight.',
     seed: 505017, length: 6200, rating: 4, reqLevel: 8, estSpeed: 30.5, tint: '#ffd400',
+    authored: true,
   },
   {
     id: 'lastlight', name: 'LASTLIGHT SPINE', sub: 'THE SHOWCASE',
